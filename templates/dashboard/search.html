@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}
+Search | SecureDrive
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+
+    <div>
+        <h3 class="mb-1">Search</h3>
+
+        {% if query %}
+            <p class="text-muted mb-0">
+                Results for “{{ query }}”
+            </p>
+        {% else %}
+            <p class="text-muted mb-0">
+                Enter a file or folder name to search.
+            </p>
+        {% endif %}
+    </div>
+
+    <a
+        href="{% url 'dashboard' %}"
+        class="btn btn-light"
+    >
+        <i class="bi bi-arrow-left me-2"></i>
+        My Drive
+    </a>
+
+</div>
+
+
+{% if query %}
+
+    <div class="mb-4">
+
+        <h5 class="mb-3">Folders</h5>
+
+        <div class="row g-3">
+
+            {% for folder in folders %}
+
+                <div class="col-md-4 col-lg-3">
+
+                    <a
+                        href="{% url 'folder_open' folder.id %}"
+                        class="text-decoration-none text-dark"
+                    >
+                        <div class="card border-0 shadow-sm h-100">
+
+                            <div class="card-body">
+
+                                <i
+                                    class="bi bi-folder-fill text-warning fs-2 me-2"
+                                ></i>
+
+                                <span>
+                                    {{ folder.folder_name }}
+                                </span>
+
+                            </div>
+
+                        </div>
+                    </a>
+
+                </div>
+
+            {% empty %}
+
+                <div class="col-12 text-muted">
+                    No matching folders.
+                </div>
+
+            {% endfor %}
+
+        </div>
+
+    </div>
+
+
+    <div>
+
+        <h5 class="mb-3">Files</h5>
+
+        <div class="card border-0 shadow-sm">
+
+            <div class="card-body p-0">
+
+                {% for file in files %}
+
+                    <div class="list-group-item">
+
+                        <div class="d-flex align-items-center">
+
+                            <i
+                                class="bi bi-file-earmark-lock fs-3 text-primary me-3"
+                            ></i>
+
+                            <div class="flex-grow-1">
+
+                                <a
+                                    href="{% url 'file_download' file.id %}"
+                                    class="text-decoration-none fw-medium"
+                                >
+                                    {{ file.file_name }}
+                                </a>
+
+                                <small class="d-block text-muted">
+                                    {{ file.file_size }} bytes
+                                    ·
+                                    {{ file.created_at|date:"d/m/Y H:i" }}
+                                </small>
+
+                            </div>
+
+                            <span
+                                class="badge bg-success-subtle text-success"
+                            >
+                                Encrypted
+                            </span>
+
+                        </div>
+
+                    </div>
+
+                {% empty %}
+
+                    <div class="text-center py-5 text-muted">
+                        No matching files.
+                    </div>
+
+                {% endfor %}
+
+            </div>
+
+        </div>
+
+    </div>
+
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+
+{% block title %}
+Shared with me | SecureDrive
+{% endblock %}
+
+{% block extra_css %}
+
+<style>
+    .shared-file-card {
+        border: 0;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .shared-file-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.08) !important;
+    }
+
+    .shared-file-icon {
+        width: 52px;
+        height: 52px;
+        border-radius: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #e7f1ff;
+    }
+
+    .shared-owner-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #6c757d;
+        color: white;
+        font-size: 12px;
+        font-weight: 600;
+    }
+</style>
+
+{% endblock %}
+
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+
+    <div>
+        <h3 class="mb-1">
+            <i class="bi bi-people-fill text-primary me-2"></i>
+            Shared with me
+        </h3>
+
+        <p class="text-muted mb-0">
+            Files shared with you by other SecureDrive users.
+        </p>
+    </div>
+
+    <span class="badge bg-primary-subtle text-primary px-3 py-2">
+        {{ shares|length }} file{{ shares|length|pluralize }}
+    </span>
+
+</div>
+
+
+{% if shares %}
+
+    <div class="row g-3">
+
+        {% for share in shares %}
+
+            <div class="col-md-6 col-xl-4">
+
+                <div class="card shared-file-card shadow-sm h-100">
+
+                    <div class="card-body p-4">
+
+                        <div class="d-flex align-items-start mb-4">
+
+                            <div class="shared-file-icon me-3">
+                                <i
+                                    class="bi bi-file-earmark-lock-fill fs-3 text-primary"
+                                ></i>
+                            </div>
+
+                            <div class="flex-grow-1 text-truncate">
+
+                                <h6 class="mb-1 text-truncate">
+                                    {{ share.file.file_name }}
+                                </h6>
+
+                                <small class="text-muted">
+                                    {{ share.file.file_size|filesizeformat }}
+                                </small>
+
+                            </div>
+
+                        </div>
+
+
+                        <div
+                            class="d-flex justify-content-between align-items-center mb-3"
+                        >
+
+                            <div class="d-flex align-items-center">
+
+                                <div class="shared-owner-avatar me-2">
+                                    {{ share.owner.username|first|upper }}
+                                </div>
+
+                                <div>
+                                    <small class="d-block text-muted">
+                                        Shared by
+                                    </small>
+
+                                    <small class="fw-medium">
+                                        {{ share.owner.username }}
+                                    </small>
+                                </div>
+
+                            </div>
+
+
+                            {% if share.permission == "download" %}
+
+                                <span
+                                    class="badge bg-success-subtle text-success"
+                                >
+                                    <i class="bi bi-download me-1"></i>
+                                    Download
+                                </span>
+
+                            {% else %}
+
+                                <span
+                                    class="badge bg-secondary-subtle text-secondary"
+                                >
+                                    <i class="bi bi-eye me-1"></i>
+                                    View only
+                                </span>
+
+                            {% endif %}
+
+                        </div>
+
+
+                        <small class="text-muted d-block mb-3">
+                            <i class="bi bi-clock me-1"></i>
+                            Shared {{ share.created_at|date:"d/m/Y H:i" }}
+                        </small>
+
+
+                        {% if share.permission == "download" %}
+
+                            <a
+                                href="{% url 'file_download' share.file.id %}"
+                                class="btn btn-primary w-100"
+                            >
+                                <i class="bi bi-download me-2"></i>
+                                Download file
+                            </a>
+
+                        {% else %}
+
+                            <button
+                                type="button"
+                                class="btn btn-light w-100"
+                                disabled
+                            >
+                                <i class="bi bi-lock me-2"></i>
+                                Download not permitted
+                            </button>
+
+                        {% endif %}
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        {% endfor %}
+
+    </div>
+
+{% else %}
+
+    <div class="card border-0 shadow-sm">
+
+        <div class="card-body text-center py-5">
+
+            <div
+                class="d-inline-flex align-items-center justify-content-center rounded-circle bg-light mb-3"
+                style="width: 80px; height: 80px;"
+            >
+                <i class="bi bi-people fs-1 text-muted"></i>
+            </div>
+
+            <h5>No shared files yet</h5>
+
+            <p class="text-muted mb-0">
+                Files shared with your account will appear here.
+            </p>
+
+        </div>
+
+    </div>
+
+{% endif %}
+
+{% endblock %}
