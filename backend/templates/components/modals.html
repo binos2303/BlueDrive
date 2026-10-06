@@ -1,0 +1,721 @@
+
+
+<!-- ===================================================== -->
+<!-- UPLOAD FOLDER MODAL -->
+<!-- ===================================================== -->
+<div class="modal fade" id="uploadFolderModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <form method="POST" action="{% url 'folder_upload' %}" enctype="multipart/form-data" id="folderUploadForm">
+        {% csrf_token %}
+        {% if current_folder %}<input type="hidden" name="parent" value="{{ current_folder.id }}">{% endif %}
+        <div class="modal-header">
+          <h5 class="modal-title">Upload folder</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <label class="form-label">Select a folder</label>
+          <input type="file" name="files" class="form-control" id="folderUploadInput" webkitdirectory directory multiple required>
+          <div id="folderUploadPaths"></div>
+          <small class="text-muted">The folder structure will be recreated inside SecureDrive.</small>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary"><i class="bi bi-folder-arrow-up me-2" aria-hidden="true"></i>Upload folder</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ===================================================== -->
+<!-- FOLDER MODALS -->
+<!-- ===================================================== -->
+
+
+
+<!-- Create Folder -->
+
+<div
+    class="modal fade"
+    id="createFolderModal"
+    tabindex="-1"
+    aria-hidden="true"
+>
+    <div class="modal-dialog modal-dialog-centered">
+
+        <div class="modal-content">
+
+            <form
+                method="POST"
+                action="{% url 'folder_create' %}"
+            >
+
+                {% csrf_token %}
+
+                <div class="modal-header">
+
+                    <h5 class="modal-title">
+                        Create folder
+                    </h5>
+
+                    <button
+                        type="button"
+                        class="btn-close"
+                        data-bs-dismiss="modal"
+                    ></button>
+
+                </div>
+
+
+                <div class="modal-body">
+
+                    <label class="form-label">
+                        Folder name
+                    </label>
+
+                    <input
+                        type="text"
+                        name="folder_name"
+                        class="form-control"
+                        placeholder="Folder name"
+                        maxlength="255"
+                        autocomplete="off"
+                        required
+                    >
+
+                    {% if current_folder %}
+
+                        <input
+                            type="hidden"
+                            name="parent"
+                            value="{{ current_folder.id }}"
+                        >
+
+                    {% endif %}
+
+                </div>
+
+
+                <div class="modal-footer">
+
+                    <button
+                        type="button"
+                        class="btn btn-light"
+                        data-bs-dismiss="modal"
+                    >
+                        Cancel
+                    </button>
+
+                    <button
+                        type="submit"
+                        class="btn btn-primary"
+                    >
+                        <i class="bi bi-folder-plus me-2"></i>
+                        Create
+                    </button>
+
+                </div>
+
+            </form>
+
+        </div>
+
+    </div>
+</div>
+
+
+
+
+<!-- ===================================================== -->
+<!-- UPLOAD FILE MODAL -->
+<!-- ===================================================== -->
+
+<div
+    class="modal fade"
+    id="uploadFileModal"
+    tabindex="-1"
+    aria-hidden="true"
+>
+    <div class="modal-dialog modal-dialog-centered">
+
+        <div class="modal-content">
+
+            <form
+                method="POST"
+                action="{% url 'file_upload' %}"
+                enctype="multipart/form-data"
+            >
+
+                {% csrf_token %}
+
+                {% if current_folder %}
+                    <input
+                        type="hidden"
+                        name="folder"
+                        value="{{ current_folder.id }}"
+                    >
+                {% endif %}
+
+
+                <div class="modal-header">
+
+                    <h5 class="modal-title">
+                        Upload files
+                    </h5>
+
+                    <button
+                        type="button"
+                        class="btn-close"
+                        data-bs-dismiss="modal"
+                    ></button>
+
+                </div>
+
+
+                <div class="modal-body">
+
+                    <label class="form-label">
+                        Select file
+                    </label>
+
+                    <input
+                        type="file"
+                        name="file_path"
+                        class="form-control"
+                        multiple
+                        required
+                    >
+
+                    <small class="text-muted">
+                        Select one or more files to upload to SecureDrive.
+                    </small>
+
+                </div>
+
+
+                <div class="modal-footer">
+
+                    <button
+                        type="button"
+                        class="btn btn-light"
+                        data-bs-dismiss="modal"
+                    >
+                        Cancel
+                    </button>
+
+                    <button
+                        type="submit"
+                        class="btn btn-primary"
+                    >
+                        <i class="bi bi-cloud-arrow-up me-2"></i>
+                        Upload
+                    </button>
+
+                </div>
+
+            </form>
+
+        </div>
+
+    </div>
+</div>
+{% for folder in folders %}
+
+    <!-- Rename Folder Modal -->
+
+    <div
+        class="modal fade"
+        id="renameFolderModal{{ folder.id }}"
+        tabindex="-1"
+        aria-hidden="true"
+    >
+
+        <div class="modal-dialog modal-dialog-centered">
+
+            <div class="modal-content">
+
+                <form
+                    method="POST"
+                    action="{% url 'folder_rename' folder.id %}"
+                >
+
+                    {% csrf_token %}
+
+                    <div class="modal-header">
+
+                        <h5 class="modal-title">
+                            Rename folder
+                        </h5>
+
+                        <button
+                            type="button"
+                            class="btn-close"
+                            data-bs-dismiss="modal"
+                        ></button>
+
+                    </div>
+
+
+                    <div class="modal-body">
+
+                        <label class="form-label">
+                            Folder name
+                        </label>
+
+                        <input
+                            type="text"
+                            name="folder_name"
+                            value="{{ folder.folder_name }}"
+                            class="form-control"
+                            maxlength="255"
+                            required
+                            autocomplete="off"
+                        />
+
+                    </div>
+
+
+                    <div class="modal-footer">
+
+                        <button
+                            type="button"
+                            class="btn btn-light"
+                            data-bs-dismiss="modal"
+                        >
+                            Cancel
+                        </button>
+
+                        <button
+                            type="submit"
+                            class="btn btn-primary"
+                        >
+                            Rename
+                        </button>
+
+                    </div>
+
+                </form>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- Share Folder Modal -->
+
+    <div
+        class="modal fade"
+        id="shareFolderModal{{ folder.id }}"
+        tabindex="-1"
+        aria-hidden="true"
+    >
+
+        <div class="modal-dialog modal-dialog-centered">
+
+            <div class="modal-content">
+
+                <form
+                    method="POST"
+                    action="{% url 'share_folder' folder.id %}"
+                >
+
+                    {% csrf_token %}
+
+                    <div class="modal-header">
+
+                        <h5 class="modal-title">
+                            Share folder
+                        </h5>
+
+                        <button
+                            type="button"
+                            class="btn-close"
+                            data-bs-dismiss="modal"
+                        ></button>
+
+                    </div>
+
+
+                    <div class="modal-body">
+
+                        <p class="text-muted">
+
+                            <i
+                                class="bi bi-folder-fill text-warning me-2"
+                            ></i>
+
+                            {{ folder.folder_name }}
+
+                        </p>
+
+
+                        <label class="form-label">
+                            Username or email
+                        </label>
+
+                        <input
+                            type="text"
+                            name="username"
+                            class="form-control mb-3"
+                            placeholder="Enter username or email"
+                            autocomplete="off"
+                            required
+                        />
+
+                        <label class="form-label">Permission</label>
+                        <select name="permission" class="form-select">
+                            <option value="viewer" selected>Viewer</option>
+                            <option value="editor">Editor</option>
+                        </select>
+
+                    </div>
+
+
+                    <div class="modal-footer">
+
+                        <button
+                            type="button"
+                            class="btn btn-light"
+                            data-bs-dismiss="modal"
+                        >
+                            Cancel
+                        </button>
+
+                        <button
+                            type="submit"
+                            class="btn btn-primary"
+                        >
+
+                            <i class="bi bi-share me-2"></i>
+
+                            Share
+
+                        </button>
+
+                    </div>
+
+                </form>
+
+            </div>
+
+        </div>
+
+    </div>
+
+{% endfor %}
+
+
+
+<!-- ===================================================== -->
+<!-- FILE MODALS -->
+<!-- ===================================================== -->
+
+
+{% for file in files %}
+
+    <!-- Rename File Modal -->
+
+    <div
+        class="modal fade"
+        id="renameFileModal{{ file.id }}"
+        tabindex="-1"
+        aria-hidden="true"
+    >
+
+        <div class="modal-dialog modal-dialog-centered">
+
+            <div class="modal-content">
+
+                <form
+                    method="POST"
+                    action="{% url 'file_rename' file.id %}"
+                >
+                    {% if current_folder %}
+                        <input type="hidden" name="current_folder_id" value="{{ current_folder.id }}">
+                    {% endif %}
+
+                    {% csrf_token %}
+
+                    <div class="modal-header">
+
+                        <h5 class="modal-title">
+                            Rename file
+                        </h5>
+
+                        <button
+                            type="button"
+                            class="btn-close"
+                            data-bs-dismiss="modal"
+                        ></button>
+
+                    </div>
+
+
+                    <div class="modal-body">
+
+                        <label class="form-label">
+                            File name
+                        </label>
+
+                        <input
+                            type="text"
+                            name="file_name"
+                            value="{{ file.file_name }}"
+                            class="form-control"
+                            maxlength="255"
+                            required
+                        />
+
+                        <small class="text-muted">
+                            The file extension cannot be changed.
+                        </small>
+
+                    </div>
+
+
+                    <div class="modal-footer">
+
+                        <button
+                            type="button"
+                            class="btn btn-light"
+                            data-bs-dismiss="modal"
+                        >
+                            Cancel
+                        </button>
+
+                        <button
+                            type="submit"
+                            class="btn btn-primary"
+                        >
+                            Rename
+                        </button>
+
+                    </div>
+
+                </form>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- Move File Modal -->
+
+    <div
+        class="modal fade"
+        id="moveFileModal{{ file.id }}"
+        tabindex="-1"
+        aria-hidden="true"
+    >
+
+        <div class="modal-dialog modal-dialog-centered">
+
+            <div class="modal-content">
+
+                <form
+                    method="POST"
+                    action="{% url 'file_move' file.id %}"
+                >
+
+                    {% csrf_token %}
+
+                    <div class="modal-header">
+
+                        <h5 class="modal-title">
+                            Move file
+                        </h5>
+
+                        <button
+                            type="button"
+                            class="btn-close"
+                            data-bs-dismiss="modal"
+                        ></button>
+
+                    </div>
+
+
+                    <div class="modal-body">
+
+                        <p class="text-muted mb-3">
+
+                            <i class="bi bi-file-earmark me-2"></i>
+
+                            {{ file.file_name }}
+
+                        </p>
+
+
+                        <label class="form-label">
+                            Destination
+                        </label>
+
+
+                        <select
+                            name="folder_id"
+                            class="form-select"
+                        >
+
+                            {% if not is_shared_access %}
+                                <option value="">My Drive</option>
+                            {% endif %}
+
+
+                            {% for folder in all_folders %}
+
+                                <option
+                                    value="{{ folder.id }}"
+                                    {% if file.folder and folder.id == file.folder.id %}
+                                        selected
+                                    {% endif %}
+                                >
+                                    {{ folder.folder_name }}
+                                </option>
+
+                            {% endfor %}
+
+                        </select>
+
+                    </div>
+
+
+                    <div class="modal-footer">
+
+                        <button
+                            type="button"
+                            class="btn btn-light"
+                            data-bs-dismiss="modal"
+                        >
+                            Cancel
+                        </button>
+
+                        <button
+                            type="submit"
+                            class="btn btn-primary"
+                        >
+
+                            <i class="bi bi-folder-symlink me-2"></i>
+
+                            Move
+
+                        </button>
+
+                    </div>
+
+                </form>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- Share File Modal -->
+
+    <div
+        class="modal fade"
+        id="shareFileModal{{ file.id }}"
+        tabindex="-1"
+        aria-hidden="true"
+    >
+
+        <div class="modal-dialog modal-dialog-centered">
+
+            <div class="modal-content">
+
+                <form
+                    method="POST"
+                    action="{% url 'share_file' file.id %}"
+                >
+
+                    {% csrf_token %}
+
+                    <div class="modal-header">
+
+                        <h5 class="modal-title">
+                            Share file
+                        </h5>
+
+                        <button
+                            type="button"
+                            class="btn-close"
+                            data-bs-dismiss="modal"
+                        ></button>
+
+                    </div>
+
+
+                    <div class="modal-body">
+
+                        <p class="text-muted">
+                            {{ file.file_name }}
+                        </p>
+
+
+                        <label class="form-label">
+                            Username or email
+                        </label>
+
+                        <input
+                            type="text"
+                            name="username"
+                            class="form-control mb-3"
+                            required
+                        />
+
+                        <label class="form-label">Permission</label>
+                        <select name="permission" class="form-select">
+                            <option value="viewer" selected>Viewer</option>
+                            <option value="editor">Editor</option>
+                        </select>
+
+                    </div>
+
+
+                    <div class="modal-footer">
+
+                        <button
+                            type="button"
+                            class="btn btn-light"
+                            data-bs-dismiss="modal"
+                        >
+                            Cancel
+                        </button>
+
+                        <button
+                            type="submit"
+                            class="btn btn-primary"
+                        >
+                            Share
+                        </button>
+
+                    </div>
+
+                </form>
+
+            </div>
+
+        </div>
+
+    </div>
+
+{% endfor %}
+<script>
+document.addEventListener("change", function (event) {
+  if (event.target.id !== "folderUploadInput") return;
+  const holder = document.getElementById("folderUploadPaths");
+  holder.innerHTML = "";
+  Array.from(event.target.files).forEach(file => {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "relative_paths";
+    input.value = file.webkitRelativePath || file.name;
+    holder.appendChild(input);
+  });
+});
+</script>

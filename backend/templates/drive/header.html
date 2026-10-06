@@ -1,0 +1,909 @@
+<!-- ========================= -->
+<!-- DRIVE HEADER -->
+<!-- ========================= -->
+
+<div class="drive-header mb-4">
+
+    <!-- ========================= -->
+    <!-- HEADER INFORMATION -->
+    <!-- ========================= -->
+
+    <div class="mb-3">
+        
+        <h3 class="mb-1">
+            <i class="bi bi-house"></i> 
+            {% if current_folder %}
+                {{ current_folder.folder_name }}
+            {% else %}
+                My Drive
+            {% endif %}
+        </h3>
+
+
+        {% if current_folder %}
+
+            <nav aria-label="breadcrumb">
+
+                <ol class="breadcrumb mb-2">
+
+                    {% if is_shared_access %}
+
+                        <li class="breadcrumb-item">
+
+                            <a
+                                href="{% url 'shared_with_me' %}"
+                                class="text-decoration-none"
+                            >
+                                Shared with me
+                            </a>
+
+                        </li>
+
+                    {% else %}
+
+                        <li class="breadcrumb-item">
+
+                            <a
+                                href="{% url 'dashboard' %}"
+                                class="text-decoration-none"
+                            >
+                                My Drive
+                            </a>
+
+                        </li>
+
+                    {% endif %}
+
+
+                    {% for breadcrumb in breadcrumbs %}
+
+                        {% if not forloop.last %}
+
+                            <li class="breadcrumb-item">
+
+                                <a
+                                    href="{% url 'folder_open' breadcrumb.id %}"
+                                    class="text-decoration-none"
+                                >
+                                    {{ breadcrumb.folder_name }}
+                                </a>
+
+                            </li>
+
+                        {% else %}
+
+                            <li
+                                class="breadcrumb-item active"
+                                aria-current="page"
+                            >
+                                {{ breadcrumb.folder_name }}
+                            </li>
+
+                        {% endif %}
+
+                    {% endfor %}
+
+                </ol>
+
+            </nav>
+
+        {% endif %}
+
+
+        
+        {% if is_shared_access and shared_access %}
+
+            <div class="shared-folder-banner mt-3">
+
+                <div class="shared-folder-banner-icon">
+                    <i class="bi bi-people-fill"></i>
+                </div>
+
+                <div class="min-w-0">
+
+                    <div class="fw-semibold">
+                        Shared folder
+                    </div>
+
+                    <div class="small text-muted">
+
+                        Shared by
+
+                        <span class="fw-medium text-dark">
+                            {{ shared_access.owner.username }}
+                        </span>
+
+                        {{ shared_access.permission_label }}
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        {% endif %}
+
+    </div>
+
+
+    <!-- ========================= -->
+    <!-- TOOLBAR -->
+    <!-- ========================= -->
+
+    <div class="drive-toolbar-row">
+
+        {% if not is_shared_access %}
+
+            <!-- ========================= -->
+            <!-- BULK ACTION TOOLBAR -->
+            <!-- ========================= -->
+
+            <div class="drive-bulk-area">
+
+                <form
+                    method="POST"
+                    action="{% url 'bulk_action' %}"
+                    id="bulkActionForm"
+                    class="drive-multi-toolbar"
+                >
+
+                    {% csrf_token %}
+
+                    <!-- Current folder -->
+
+                    <input
+                        type="hidden"
+                        name="current_folder_id"
+                        value="{% if current_folder %}{{ current_folder.id }}{% endif %}"
+                    >
+
+                    <!-- Source -->
+
+                    <input
+                        type="hidden"
+                        name="source"
+                        value="drive"
+                    >
+
+
+                    <!-- ========================= -->
+                    <!-- SELECTED COUNT -->
+                    <!-- ========================= -->
+
+                    <span class="drive-selected-count">
+
+                        <span id="selectedCount">0</span>
+
+                        selected
+
+                    </span>
+
+
+                    <!-- ========================= -->
+                    <!-- COPY -->
+                    <!-- ========================= -->
+
+                    <button
+                        type="submit"
+                        name="action"
+                        value="copy"
+                        class="btn btn-sm btn-outline-primary"
+                        id="bulkCopyButton"
+                        disabled
+                    >
+
+                        <i class="bi bi-copy me-1"></i>
+
+                        Copy
+
+                    </button>
+
+
+                    <!-- ========================= -->
+                    <!-- CUT -->
+                    <!-- ========================= -->
+
+                    <button
+                        type="submit"
+                        name="action"
+                        value="cut"
+                        class="btn btn-sm btn-outline-secondary"
+                        id="bulkCutButton"
+                        disabled
+                    >
+
+                        <i class="bi bi-scissors me-1"></i>
+
+                        Cut
+
+                    </button>
+
+
+                    <!-- ========================= -->
+                    <!-- MOVE TO TRASH -->
+                    <!-- ========================= -->
+
+                    <button
+                        type="submit"
+                        name="action"
+                        value="trash"
+                        class="btn btn-sm btn-outline-danger"
+                        id="bulkTrashButton"
+                        disabled
+                    >
+
+                        <i class="bi bi-trash me-1"></i>
+
+                        Move to Trash
+
+                    </button>
+
+
+                    <!-- ========================= -->
+                    <!-- DESTINATION -->
+                    <!-- ========================= -->
+
+                    <select
+                        name="destination_id"
+                        id="bulkDestination"
+                        class="form-select form-select-sm drive-destination"
+                        aria-label="Move selected items to"
+                        disabled
+                    >
+
+                        <option value="">
+                            My Drive
+                        </option>
+
+                        {% for folder in all_folders %}
+
+                            <option value="{{ folder.id }}">
+                                {{ folder.folder_name }}
+                            </option>
+
+                        {% endfor %}
+
+                    </select>
+
+
+                    <!-- ========================= -->
+                    <!-- MOVE -->
+                    <!-- ========================= -->
+
+                    <button
+                        type="submit"
+                        name="action"
+                        value="move"
+                        class="btn btn-sm btn-outline-success"
+                        id="bulkMoveButton"
+                        disabled
+                    >
+
+                        <i class="bi bi-folder-symlink me-1"></i>
+
+                        Move
+
+                    </button>
+
+
+                    <!-- ========================= -->
+                    <!-- CLEAR -->
+                    <!-- ========================= -->
+
+                    <button
+                        type="button"
+                        class="btn btn-sm btn-light bg-body-secondary"
+                        id="clearSelection"
+                        data-clear-selection
+                    >
+
+                        Clear
+
+                    </button>
+
+                </form>
+
+
+                <!-- ========================= -->
+                <!-- PASTE -->
+                <!-- ========================= -->
+
+                {% if request.session.clipboard %}
+
+                    <form
+                        method="POST"
+                        action="{% url 'bulk_paste' %}"
+                        class="drive-paste-form"
+                    >
+
+                        {% csrf_token %}
+
+                        {% if current_folder %}
+
+                            <input
+                                type="hidden"
+                                name="folder_id"
+                                value="{{ current_folder.id }}"
+                            >
+
+                        {% endif %}
+
+                        <button
+                            type="submit"
+                            class="btn btn-sm btn-primary"
+                        >
+
+                            <i class="bi bi-clipboard me-1"></i>
+
+                            Paste
+
+                        </button>
+
+                    </form>
+
+                {% endif %}
+
+            </div>
+
+        {% endif %}
+
+
+        <!-- ========================= -->
+        <!-- SORT -->
+        <!-- ========================= -->
+
+        <div class="dropdown drive-sort">
+
+            <button
+                class="btn btn-sm btn-light border dropdown-toggle"
+                type="button"
+                data-bs-toggle="dropdown"
+                aria-expanded="false"
+            >
+
+                <i class="bi bi-sort-down me-1"></i>
+
+                Sort:
+
+                {% if sort_key == "modified" %}
+
+                    Modified
+
+                {% elif sort_key == "size" %}
+
+                    Size
+
+                {% elif sort_key == "type" %}
+
+                    Type
+
+                {% else %}
+
+                    Name
+
+                {% endif %}
+
+            </button>
+
+
+            <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+
+                {% for key, option in sort_options.items %}
+
+                    <!-- ASC -->
+
+                    <li>
+
+                        <a
+                            class="dropdown-item
+                            {% if sort_key == key and sort_direction == 'asc' %}
+                                active
+                            {% endif %}"
+                            href="?sort={{ key }}&direction=asc"
+                        >
+
+                            <i class="bi bi-sort-alpha-down me-2"></i>
+
+                            {{ option.label }} ↑
+
+                        </a>
+
+                    </li>
+
+
+                    <!-- DESC -->
+
+                    <li>
+
+                        <a
+                            class="dropdown-item
+                            {% if sort_key == key and sort_direction == 'desc' %}
+                                active
+                            {% endif %}"
+                            href="?sort={{ key }}&direction=desc"
+                        >
+
+                            <i class="bi bi-sort-alpha-up me-2"></i>
+
+                            {{ option.label }} ↓
+
+                        </a>
+
+                    </li>
+
+                {% endfor %}
+
+            </ul>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- ========================= -->
+<!-- TOOLBAR STYLE -->
+<!-- ========================= -->
+
+<style>
+
+    /* ========================================
+       MAIN TOOLBAR
+       ======================================== */
+
+    .drive-toolbar-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        width: 100%;
+    }
+
+
+    /* ========================================
+       LEFT SIDE
+       ======================================== */
+
+    .drive-bulk-area {
+        display: flex;
+        align-items: center;
+        flex-wrap: nowrap;
+        gap: 0.5rem;
+
+        min-width: 0;
+        flex: 1 1 auto;
+    }
+
+
+    /* ========================================
+       MULTI ACTION FORM
+       ======================================== */
+
+    .drive-multi-toolbar {
+        display: flex;
+        align-items: center;
+        flex-wrap: nowrap;
+        gap: 0.5rem;
+
+        min-width: 0;
+
+        margin: 0;
+    }
+
+
+    /* ========================================
+       SELECTED COUNT
+       ======================================== */
+
+    .drive-selected-count {
+        display: inline-flex;
+        align-items: center;
+
+        white-space: nowrap;
+
+        font-weight: 600;
+
+        margin-right: 0.25rem;
+    }
+
+
+    /* ========================================
+       BUTTONS
+       ======================================== */
+
+    .drive-multi-toolbar .btn,
+    .drive-paste-form .btn {
+        white-space: nowrap;
+    }
+
+
+    /* ========================================
+       DESTINATION SELECT
+       ======================================== */
+
+    .drive-destination {
+        width: 230px;
+        min-width: 180px;
+
+        flex: 0 1 230px;
+    }
+
+
+    /* ========================================
+       PASTE
+       ======================================== */
+
+    .drive-paste-form {
+        margin: 0;
+        flex-shrink: 0;
+    }
+
+
+    /* ========================================
+       SORT
+       ======================================== */
+
+    .drive-sort {
+        flex: 0 0 auto;
+        margin-left: auto;
+    }
+
+
+    .drive-sort .btn {
+        white-space: nowrap;
+    }
+
+
+    /* ========================================
+       DISABLED STATE
+       ======================================== */
+
+    .drive-multi-toolbar .btn:disabled,
+    .drive-multi-toolbar .form-select:disabled {
+
+        cursor: not-allowed;
+
+        opacity: 0.55;
+
+    }
+
+
+    /* ========================================
+       TABLET
+       ======================================== */
+
+    @media (max-width: 1199.98px) {
+
+        .drive-toolbar-row {
+            align-items: flex-start;
+        }
+
+        .drive-bulk-area {
+            flex-wrap: wrap;
+        }
+
+        .drive-multi-toolbar {
+            flex-wrap: wrap;
+        }
+
+        .drive-destination {
+            width: 200px;
+            flex-basis: 200px;
+        }
+
+    }
+
+
+    /* ========================================
+       MOBILE
+       ======================================== */
+
+    @media (max-width: 767.98px) {
+
+        .drive-toolbar-row {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+
+        .drive-bulk-area {
+            width: 100%;
+            flex-wrap: wrap;
+        }
+
+
+        .drive-multi-toolbar {
+            width: 100%;
+            flex-wrap: wrap;
+        }
+
+
+        .drive-selected-count {
+            width: 100%;
+            margin-bottom: 0.15rem;
+        }
+
+
+        .drive-destination {
+            width: auto;
+            flex: 1 1 180px;
+        }
+
+
+        .drive-paste-form {
+            width: auto;
+        }
+
+
+        .drive-sort {
+            width: 100%;
+            margin-left: 0;
+        }
+
+
+        .drive-sort .btn {
+            width: 100%;
+        }
+
+    }
+
+</style>
+
+
+<!-- ========================= -->
+<!-- BULK SELECTION SCRIPT -->
+<!-- ========================= -->
+
+{% if not is_shared_access %}
+
+<script>
+
+    (function () {
+
+        const bulkForm =
+            document.getElementById("bulkActionForm");
+
+        const selectedCount =
+            document.getElementById("selectedCount");
+
+        const copyButton =
+            document.getElementById("bulkCopyButton");
+
+        const cutButton =
+            document.getElementById("bulkCutButton");
+
+        const trashButton =
+            document.getElementById("bulkTrashButton");
+
+        const moveButton =
+            document.getElementById("bulkMoveButton");
+
+        const destination =
+            document.getElementById("bulkDestination");
+
+        const clearButton =
+            document.getElementById("clearSelection");
+
+
+        if (!bulkForm || !selectedCount) {
+            return;
+        }
+
+
+        /* ========================================
+           GET SELECTED ITEMS
+           ======================================== */
+
+        function getSelectedItems() {
+
+            return [
+                ...document.querySelectorAll(
+                    ".drive-select:checked"
+                ),
+            ];
+
+        }
+
+
+        /* ========================================
+           SYNC TOOLBAR
+           ======================================== */
+
+        function syncToolbar() {
+
+            const selected =
+                getSelectedItems();
+
+            const hasSelection =
+                selected.length > 0;
+
+
+            /* Count */
+
+            selectedCount.textContent =
+                selected.length;
+
+
+            /* Enable / disable */
+
+            if (copyButton) {
+                copyButton.disabled =
+                    !hasSelection;
+            }
+
+
+            if (cutButton) {
+                cutButton.disabled =
+                    !hasSelection;
+            }
+
+
+            if (trashButton) {
+                trashButton.disabled =
+                    !hasSelection;
+            }
+
+
+            if (moveButton) {
+                moveButton.disabled =
+                    !hasSelection;
+            }
+
+
+            if (destination) {
+                destination.disabled =
+                    !hasSelection;
+            }
+
+
+            /* Remove old generated inputs */
+
+            bulkForm
+                .querySelectorAll(
+                    "input[data-generated]"
+                )
+                .forEach((input) => {
+                    input.remove();
+                });
+
+
+            /* Create selected inputs */
+
+            selected.forEach((item) => {
+
+                const input =
+                    document.createElement("input");
+
+
+                input.type =
+                    "hidden";
+
+
+                input.name =
+                    item.dataset.selectType === "file"
+                        ? "file_ids"
+                        : "folder_ids";
+
+
+                input.value =
+                    item.value;
+
+
+                input.dataset.generated =
+                    "1";
+
+
+                bulkForm.appendChild(input);
+
+            });
+
+        }
+
+
+        /* ========================================
+           CHECKBOX CHANGE
+           ======================================== */
+
+        document.addEventListener(
+            "change",
+            function (event) {
+
+                if (
+                    event.target.classList.contains(
+                        "drive-select"
+                    )
+                ) {
+
+                    syncToolbar();
+
+                }
+
+            }
+        );
+
+
+        /* ========================================
+           CLEAR SELECTION
+           ======================================== */
+
+        if (clearButton) {
+
+            clearButton.addEventListener(
+                "click",
+                function () {
+
+                    document
+                        .querySelectorAll(
+                            ".drive-select"
+                        )
+                        .forEach((checkbox) => {
+
+                            checkbox.checked =
+                                false;
+
+                        });
+
+
+                    syncToolbar();
+
+                }
+            );
+
+        }
+
+
+        /* ========================================
+           SELECT ALL
+           ======================================== */
+
+        document.addEventListener(
+            "click",
+            function (event) {
+
+                const button =
+                    event.target.closest(
+                        "[data-select-all]"
+                    );
+
+
+                if (!button) {
+                    return;
+                }
+
+
+                const type =
+                    button.dataset.selectAll;
+
+
+                document
+                    .querySelectorAll(
+                        '.drive-select[data-select-type="' +
+                        type +
+                        '"]'
+                    )
+                    .forEach((checkbox) => {
+
+                        checkbox.checked =
+                            true;
+
+                    });
+
+
+                syncToolbar();
+
+            }
+        );
+
+
+        /* ========================================
+           INITIAL STATE
+           ======================================== */
+
+        syncToolbar();
+
+    })();
+
+</script>
+
+{% endif %}

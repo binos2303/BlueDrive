@@ -1,0 +1,520 @@
+{% extends "base.html" %}
+
+{% block title %}Trash | SecureDrive{% endblock %}
+
+{% block content %}
+    <style>
+        .trash-card .card-body {
+            padding: 0 !important;
+        }
+
+        .trash-item {
+            padding: 14px 18px;
+            border-bottom: 1px solid #eef0f2;
+        }
+
+        .trash-item:last-child {
+            border-bottom: 0;
+        }
+
+        .trash-item-content {
+            min-width: 0;
+            flex: 1 1 auto;
+        }
+
+        .trash-item-main {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            min-width: 0;
+        }
+
+        .trash-item-name {
+            min-width: 0;
+            max-width: 100%;
+            font-weight: 500;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .trash-item-meta {
+            display: inline-flex;
+            align-items: center;
+            flex-wrap: wrap;
+            color: #6c757d;
+            font-size: 0.8125rem;
+            line-height: 1.5;
+            white-space: nowrap;
+        }
+
+        .trash-actions {
+            flex: 0 0 auto;
+            margin-left: 1rem;
+        }
+
+        .trash-actions form,
+        .trash-actions button {
+            white-space: nowrap;
+        }
+
+        .trash-select {
+            flex-shrink: 0;
+        }
+
+        .trash-icon {
+            flex-shrink: 0;
+        }
+
+        @media (max-width: 991.98px) {
+            .trash-item-main {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 0.15rem;
+            }
+
+            .trash-item-meta {
+                width: 100%;
+            }
+        }
+
+        @media (max-width: 767.98px) {
+            .trash-item {
+                padding: 14px 16px;
+            }
+
+            .trash-item-content {
+                min-width: 0;
+            }
+
+            .trash-item-name {
+                max-width: 100%;
+            }
+
+            .trash-actions {
+                width: 100%;
+                margin-left: 0;
+                margin-top: 10px;
+            }
+
+            .trash-actions form,
+            .trash-actions button {
+                flex: 1 1 0;
+            }
+        }
+
+        @media (max-width: 575.98px) {
+            .trash-item {
+                padding-left: 1rem;
+                padding-right: 1rem;
+            }
+
+            .trash-item-meta {
+                font-size: 0.78rem;
+            }
+        }
+    </style>
+
+    <div class="container-fluid">
+        <!-- ========================= -->
+        <!-- PAGE HEADER -->
+        <!-- ========================= -->
+
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                
+                <h3 class="mb-1"><i class="bi bi-trash"></i> Trash</h3>
+            </div>
+
+            <a href="{% url 'dashboard' %}" class="btn btn-light">
+                <i class="bi bi-arrow-left me-2"></i>
+                My Drive
+            </a>
+        </div>
+
+        <!-- ========================= -->
+        <!-- BULK ACTION TOOLBAR -->
+        <!-- ========================= -->
+
+        <form method="POST" action="{% url 'trash_bulk_action' %}" id="trashBulkForm" class="bulk-toolbar d-none mb-4">
+            {% csrf_token %}
+
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                <span class="fw-medium me-2">
+                    <span id="trashSelectedCount">0</span>
+                    selected
+                </span>
+
+                <!-- RESTORE -->
+
+                <button type="submit" class="btn btn-sm btn-outline-primary" name="action" value="restore">
+                    <i class="bi bi-arrow-counterclockwise me-1"></i>
+                    Restore
+                </button>
+
+                <!-- DELETE PERMANENTLY -->
+
+                <button
+                    type="submit"
+                    class="btn btn-sm btn-outline-danger"
+                    name="action"
+                    value="permanent_delete"
+                    onclick="return confirm(
+                    'Permanently delete the selected items? This cannot be undone.'
+                );"
+                >
+                    <i class="bi bi-trash me-1"></i>
+                    Delete permanently
+                </button>
+
+                <!-- CLEAR -->
+
+                <button type="button" class="btn btn-sm btn-light bg-body-secondary" id="clearTrashSelection">
+                    Clear
+                </button>
+            </div>
+        </form>
+
+        <!-- ========================= -->
+        <!-- FOLDERS -->
+        <!-- ========================= -->
+
+        <div class="mb-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">Folders</h5>
+
+                <button type="button" class="btn btn-sm btn-light bg-body-secondary" data-trash-select-all="folder">
+                    <i class="bi bi-check2-square me-1"></i>
+                    Select all
+                </button>
+            </div>
+
+            <div class="card border-0 shadow-sm trash-card">
+                <div class="card-body p-1">
+                    {% for folder in folders %}
+                        <!-- FOLDER ITEM -->
+
+                        <div class="trash-item">
+                            <div class="d-flex align-items-center">
+                                <!-- CHECKBOX -->
+
+                                <input
+                                    class="form-check-input me-3 trash-select"
+                                    type="checkbox"
+                                    data-select-type="folder"
+                                    value="{{ folder.id }}"
+                                    aria-label="Select {{ folder.folder_name }}"
+                                />
+
+                                <!-- ICON -->
+
+                                <i class="bi bi-folder-x fs-3 text-muted me-3 trash-icon"></i>
+
+                                <!-- NAME + DATE -->
+
+                                <a
+                                    href="{% url 'trash_folder_open' folder.id %}"
+                                    class="text-decoration-none text-dark trash-item-content"
+                                >
+                                    <div class="trash-item-main">
+                                        <div class="trash-item-name" title="{{ folder.folder_name }}">
+                                            {{ folder.folder_name }}
+                                        </div>
+
+                                        <div class="trash-item-meta">
+                                            Moved to Trash: {{ folder.deleted_at|date:"M j, Y, g:i A" }}
+                                        </div>
+                                    </div>
+                                </a>
+
+                                <!-- ACTIONS -->
+
+                                <div class="d-flex gap-2 trash-actions">
+                                    <!-- RESTORE -->
+
+                                    <form method="POST" action="{% url 'folder_restore' folder.id %}">
+                                        {% csrf_token %}
+
+                                        <button type="submit" class="btn btn-outline-primary btn-sm">Restore</button>
+                                    </form>
+
+                                    <!-- DELETE PERMANENTLY -->
+
+                                    <button
+                                        type="button"
+                                        class="btn btn-outline-danger btn-sm"
+                                        data-bs-toggle="modal"
+                                        data-bs-target="#deleteFolderModal{{ folder.id }}"
+                                    >
+                                        Delete permanently
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ========================= -->
+                        <!-- FOLDER DELETE MODAL -->
+                        <!-- ========================= -->
+
+                        <div
+                            class="modal fade delete-confirm-modal"
+                            id="deleteFolderModal{{ folder.id }}"
+                            tabindex="-1"
+                            aria-hidden="true"
+                        >
+                            <div class="modal-dialog modal-dialog-centered">
+                                <div class="modal-content border-0 rounded-4 shadow">
+                                    <div class="modal-header border-0">
+                                        <h5 class="modal-title">Delete permanently?</h5>
+
+                                        <button
+                                            type="button"
+                                            class="btn-close"
+                                            data-bs-dismiss="modal"
+                                            aria-label="Close"
+                                        ></button>
+                                    </div>
+
+                                    <div class="modal-body">
+                                        "<strong>{{ folder.folder_name }}</strong>" and all of its contents will be
+                                        permanently deleted.
+                                    </div>
+
+                                    <div class="modal-footer border-0">
+                                        <button type="button" class="btn btn-light" data-bs-dismiss="modal">
+                                            Cancel
+                                        </button>
+
+                                        <form method="POST" action="{% url 'folder_delete_permanently' folder.id %}">
+                                            {% csrf_token %}
+
+                                            <button type="submit" class="btn btn-danger">Delete permanently</button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {% empty %}
+
+                        <div class="text-center py-4 text-muted">
+                            <i class="bi bi-folder-x fs-2"></i>
+
+                            <p class="mb-0 mt-2">No folders in Trash.</p>
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <!-- ========================= -->
+        <!-- FILES -->
+        <!-- ========================= -->
+
+        <div>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">Files</h5>
+
+                <button type="button" class="btn btn-sm btn-light bg-body-secondary" data-trash-select-all="file">
+                    <i class="bi bi-check2-square me-1"></i>
+                    Select all
+                </button>
+            </div>
+
+            <div class="card border-0 shadow-sm trash-card">
+                <div class="card-body p-1">
+                    {% for file in files %}
+                        <!-- FILE ITEM -->
+
+                        <div class="trash-item">
+                            <div class="d-flex align-items-center">
+                                <!-- CHECKBOX -->
+
+                                <input
+                                    class="form-check-input me-3 trash-select"
+                                    type="checkbox"
+                                    data-select-type="file"
+                                    value="{{ file.id }}"
+                                    aria-label="Select {{ file.file_name }}"
+                                />
+
+                                <!-- ICON -->
+
+                                <i class="bi bi-file-earmark-x fs-3 text-muted me-3 trash-icon"></i>
+
+                                <!-- NAME + DATE -->
+
+                                <div class="trash-item-content">
+                                    <div class="trash-item-main">
+                                        <div class="trash-item-name" title="{{ file.file_name }}">
+                                            {{ file.file_name }}
+                                        </div>
+
+                                        <div class="trash-item-meta">
+                                            Moved to Trash: {{ file.deleted_at|date:"M j, Y, g:i A" }}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- ACTIONS -->
+
+                                <div class="d-flex gap-2 trash-actions">
+                                    <!-- RESTORE -->
+
+                                    <form method="POST" action="{% url 'file_restore' file.id %}">
+                                        {% csrf_token %}
+
+                                        <button type="submit" class="btn btn-outline-primary btn-sm">Restore</button>
+                                    </form>
+
+                                    <!-- DELETE PERMANENTLY -->
+
+                                    <button
+                                        type="button"
+                                        class="btn btn-outline-danger btn-sm"
+                                        data-bs-toggle="modal"
+                                        data-bs-target="#deleteFileModal{{ file.id }}"
+                                    >
+                                        Delete permanently
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ========================= -->
+                        <!-- FILE DELETE MODAL -->
+                        <!-- ========================= -->
+
+                        <div
+                            class="modal fade delete-confirm-modal"
+                            id="deleteFileModal{{ file.id }}"
+                            tabindex="-1"
+                            aria-hidden="true"
+                        >
+                            <div class="modal-dialog modal-dialog-centered">
+                                <div class="modal-content border-0 rounded-4 shadow">
+                                    <div class="modal-header border-0">
+                                        <h5 class="modal-title">Delete permanently?</h5>
+
+                                        <button
+                                            type="button"
+                                            class="btn-close"
+                                            data-bs-dismiss="modal"
+                                            aria-label="Close"
+                                        ></button>
+                                    </div>
+
+                                    <div class="modal-body">
+                                        "<strong>{{ file.file_name }}</strong>" will be permanently deleted.
+                                    </div>
+
+                                    <div class="modal-footer border-0">
+                                        <button type="button" class="btn btn-light" data-bs-dismiss="modal">
+                                            Cancel
+                                        </button>
+
+                                        <form method="POST" action="{% url 'file_delete_permanently' file.id %}">
+                                            {% csrf_token %}
+
+                                            <button type="submit" class="btn btn-danger">Delete permanently</button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {% empty %}
+
+                        <div class="text-center py-4 text-muted">
+                            <i class="bi bi-file-earmark-x fs-2"></i>
+
+                            <p class="mb-0 mt-2">No files in Trash.</p>
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========================= -->
+    <!-- BULK SELECTION SCRIPT -->
+    <!-- ========================= -->
+
+    <script>
+        (function () {
+            const form = document.getElementById("trashBulkForm");
+            const count = document.getElementById("trashSelectedCount");
+
+            if (!form || !count) {
+                return;
+            }
+
+            function getSelected() {
+                return [...document.querySelectorAll(".trash-select:checked")];
+            }
+
+            function sync() {
+                const selected = getSelected();
+
+                count.textContent = selected.length;
+
+                form.classList.toggle("d-none", selected.length === 0);
+
+                form.querySelectorAll("input[data-generated]").forEach((input) => input.remove());
+
+                selected.forEach((item) => {
+                    const input = document.createElement("input");
+
+                    input.type = "hidden";
+
+                    input.name = item.dataset.selectType === "file" ? "file_ids" : "folder_ids";
+
+                    input.value = item.value;
+
+                    input.dataset.generated = "1";
+
+                    form.appendChild(input);
+                });
+            }
+
+            <!-- CHECKBOX CHANGE -->
+
+            document.addEventListener("change", (event) => {
+                if (event.target.classList.contains("trash-select")) {
+                    sync();
+                }
+            });
+
+            <!-- SELECT ALL + CLEAR -->
+
+            document.addEventListener("click", (event) => {
+                const selectAllButton = event.target.closest("[data-trash-select-all]");
+
+                if (selectAllButton) {
+                    const type = selectAllButton.dataset.trashSelectAll;
+
+                    document.querySelectorAll('.trash-select[data-select-type="' + type + '"]').forEach((checkbox) => {
+                        checkbox.checked = true;
+                    });
+
+                    sync();
+
+                    return;
+                }
+
+                const clearButton = event.target.closest("#clearTrashSelection");
+
+                if (clearButton) {
+                    document.querySelectorAll(".trash-select").forEach((checkbox) => {
+                        checkbox.checked = false;
+                    });
+
+                    sync();
+                }
+            });
+
+            sync();
+        })();
+    </script>
+{% endblock %}

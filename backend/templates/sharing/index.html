@@ -1,0 +1,1722 @@
+{% extends "base.html" %}
+
+{% block title %}Sharing | SecureDrive{% endblock %}
+
+{% block content %}
+
+<style>
+    .sharing-row {
+        padding: 14px 18px;
+        border-bottom: 1px solid #eef0f2;
+    }
+
+    .sharing-row:last-child {
+        border-bottom: 0;
+    }
+
+    .sharing-row > .d-flex {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .sharing-main {
+        min-width: 0;
+        flex: 1 1 auto;
+    }
+
+    .sharing-name {
+        display: block;
+        min-width: 0;
+        max-width: 100%;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #212529;
+    }
+
+
+    .sharing-unavailable a.sharing-name {
+        pointer-events: none;
+        color: #6c757d !important;
+        text-decoration: line-through !important;
+    }
+
+    .sharing-meta {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        color: #6c757d;
+        font-size: 0.8125rem;
+        line-height: 1.5;
+        margin-top: 2px;
+    }
+
+    .sharing-meta > span {
+        white-space: nowrap;
+    }
+
+    .sharing-permission {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .sharing-permission.viewer {
+        background: #eef5ff;
+        color: #0d6efd;
+    }
+
+    .sharing-permission.editor {
+        background: #eaf7ee;
+        color: #198754;
+    }
+
+    .sharing-actions {
+        flex: 0 0 auto;
+        margin-left: auto;
+    }
+
+    .sharing-unavailable {
+        opacity: 0.7;
+        background: #fafbfc;
+    }
+
+    .sharing-unavailable .sharing-name {
+        text-decoration: line-through;
+    }
+
+    .sharing-empty {
+        padding: 48px 20px;
+    }
+
+    .sharing-empty-icon {
+        font-size: 2.5rem;
+        color: #adb5bd;
+    }
+
+    @media (max-width: 991.98px) {
+        .sharing-row {
+            padding: 14px 16px;
+        }
+
+        .sharing-meta {
+            gap: 0.5rem 0.75rem;
+        }
+
+        .sharing-actions {
+            flex: 0 0 auto;
+        }
+    }
+
+    @media (max-width: 767.98px) {
+        .sharing-row > .d-flex {
+            flex-wrap: wrap;
+        }
+
+        .sharing-main {
+            flex: 1 1 calc(100% - 70px);
+        }
+
+        .sharing-actions {
+            width: 100%;
+            margin-left: 0;
+            margin-top: 10px;
+        }
+
+        .sharing-actions .btn {
+            flex: 1 1 auto;
+        }
+
+        .sharing-meta {
+            align-items: flex-start;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .sharing-meta > span {
+            white-space: normal;
+        }
+    }
+</style>
+
+
+<div class="container-fluid">
+
+    <!-- =========================================================
+         PAGE HEADER
+    ========================================================== -->
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            
+            <h3 class="mb-1"><i class="bi bi-people"></i> Sharing</h3>
+        </div>
+    </div>
+
+
+    <!-- =========================================================
+         BULK DOWNLOAD TOOLBAR
+    ========================================================== -->
+
+    <form
+        method="POST"
+        action="{% url 'bulk_download_shared' %}"
+        id="sharedBulkForm"
+        class="border rounded-3 bg-white p-3 d-none mb-4"
+    >
+        {% csrf_token %}
+
+        <div class="d-flex flex-wrap align-items-center gap-2">
+
+            <span class="fw-medium me-2">
+                <span id="sharedSelectedCount">0</span>
+                selected
+            </span>
+
+            <button
+                class="btn btn-sm btn-outline-primary"
+                type="submit"
+            >
+                <i class="bi bi-download me-1"></i>
+                Download selected
+            </button>
+
+            <button
+                class="btn btn-sm btn-light"
+                type="button"
+                id="clearSharedSelection"
+            >
+                Clear
+            </button>
+
+        </div>
+    </form>
+
+
+    <!-- =========================================================
+         SHARED WITH ME
+    ========================================================== -->
+
+    <div class="card border-0 shadow-sm mb-4">
+
+        <div class="card-header bg-transparent py-4">
+            <h5 class="mb-1">Shared with me</h5>
+        </div>
+
+
+        <div class="card-body p-0">
+
+            {% for share in received_shares %}
+
+                <!-- =================================================
+                     RECEIVED FILE
+                ================================================== -->
+
+                {% if share.file %}
+
+                    <div
+                        class="sharing-row
+                        {% if share.file.deleted_at or share.file.folder and share.file.folder.deleted_at %}
+                            sharing-unavailable
+                        {% endif %}"
+                    >
+
+                        <div class="d-flex align-items-center gap-3">
+
+                            {% if not share.file.deleted_at and not share.file.folder.deleted_at %}
+
+                                <input
+                                    class="form-check-input shared-select"
+                                    type="checkbox"
+                                    value="{{ share.file.id }}"
+                                    aria-label="Select {{ share.file.file_name }}"
+                                >
+
+                            {% endif %}
+
+
+                            <!-- File icon -->
+
+                            <div class="flex-shrink-0">
+                                <i class="bi bi-file-earmark fs-4 text-primary"></i>
+                            </div>
+
+
+                            <!-- File information -->
+
+                            <div class="sharing-main">
+
+                                <a
+                                    href="{% url 'file_view' share.file.id %}" 
+                                    class="sharing-name text-decoration-none text-dark" 
+                                    title="{{ share.file.file_name }}"
+                                >
+                                    {{ share.file.file_name }}
+                                </a>
+
+                                <div class="sharing-meta">
+
+                                    <span>
+                                        Owner:
+                                        <strong class="fw-medium">
+                                            {{ share.owner.username }}
+                                        </strong>
+                                    </span>
+
+                                    <span>
+                                        Shared on:
+                                        {{ share.created_at|date:"M j, Y, g:i A" }}
+                                    </span>
+
+                                    <span
+                                        class="
+                                            sharing-permission
+                                            {% if share.is_editor %}
+                                                editor
+                                            {% else %}
+                                                viewer
+                                            {% endif %}
+                                        "
+                                    >
+                                        <i
+                                            class="
+                                                bi
+                                                {% if share.is_editor %}
+                                                    bi-pencil-square
+                                                {% else %}
+                                                    bi-eye
+                                                {% endif %}
+                                            "
+                                        ></i>
+
+                                        {{ share.permission_label }}
+                                    </span>
+
+                                </div>
+
+                            </div>
+
+
+                            <!-- File actions -->
+
+                            <div class="sharing-actions">
+
+                                <div class="dropdown">
+
+                                    <button
+                                        class="btn btn-sm btn-light border"
+                                        type="button"
+                                        data-bs-toggle="dropdown"
+                                        aria-expanded="false"
+                                        aria-label="More actions"
+                                    >
+                                        <i class="bi bi-three-dots-vertical"></i>
+                                    </button>
+
+
+                                    <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+
+                                        {% if share.file.deleted_at or share.file.folder and share.file.folder.deleted_at %}
+
+                                            <li>
+                                                <span class="dropdown-item-text text-muted">
+                                                    <i class="bi bi-archive me-2"></i>
+                                                    Unavailable while in Trash
+                                                </span>
+                                            </li>
+
+                                        {% else %}
+
+                                            <li>
+                                                <a
+                                                    class="dropdown-item"
+                                                    href="{% url 'file_view' share.file.id %}"
+                                                >
+                                                    <i class="bi bi-file-earmark me-2"></i>
+                                                    Open
+                                                </a>
+                                            </li>
+
+                                            <li>
+                                                <a
+                                                    class="dropdown-item"
+                                                    href="{% url 'file_download' share.file.id %}"
+                                                >
+                                                    <i class="bi bi-download me-2"></i>
+                                                    Download
+                                                </a>
+                                            </li>
+
+                                            <li>
+                                                <button
+                                                    type="button"
+                                                    class="dropdown-item js-share-detail"
+                                                    data-detail-url="{% url 'file_details' share.file.id %}"
+                                                    data-bs-toggle="modal"
+                                                    data-bs-target="#shareDetailModal"
+                                                >
+                                                    <i class="bi bi-info-circle me-2"></i>
+                                                    Details
+                                                </button>
+                                            </li>
+
+                                        {% endif %}
+
+                                    </ul>
+
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                <!-- =================================================
+                     RECEIVED FOLDER
+                ================================================== -->
+
+                {% else %}
+
+                    <div
+                        class="
+                            sharing-row
+                            {% if share.folder.deleted_at %}
+                                sharing-unavailable
+                            {% endif %}
+                        "
+                    >
+
+                        <div class="d-flex align-items-center gap-3">
+
+                            <!-- Folder icon -->
+
+                            <div class="flex-shrink-0">
+                                <i class="bi bi-folder-fill fs-4 text-warning"></i>
+                            </div>
+
+
+                            <!-- Folder information -->
+
+                            <div class="sharing-main">
+
+                                <a
+                                    href="{% url 'folder_open' share.folder.id %}"
+                                    class="sharing-name text-decoration-none text-dark"
+                                    title="{{ share.folder.folder_name }}"
+                                >
+                                    {{ share.folder.folder_name }}
+                                </a>
+
+                                <div class="sharing-meta">
+
+                                    <span>
+                                        Owner:
+                                        <strong class="fw-medium">
+                                            {{ share.owner.username }}
+                                        </strong>
+                                    </span>
+
+                                    <span>
+                                        Shared on:
+                                        {{ share.created_at|date:"M j, Y, g:i A" }}
+                                    </span>
+
+                                    <span
+                                        class="
+                                            sharing-permission
+                                            {% if share.is_editor %}
+                                                editor
+                                            {% else %}
+                                                viewer
+                                            {% endif %}
+                                        "
+                                    >
+                                        <i
+                                            class="
+                                                bi
+                                                {% if share.is_editor %}
+                                                    bi-pencil-square
+                                                {% else %}
+                                                    bi-eye
+                                                {% endif %}
+                                            "
+                                        ></i>
+
+                                        {{ share.permission_label }}
+                                    </span>
+
+                                </div>
+
+                            </div>
+
+
+                            <!-- Folder actions -->
+
+                            <div class="sharing-actions">
+
+                                <div class="dropdown">
+
+                                    <button
+                                        class="btn btn-sm btn-light border"
+                                        type="button"
+                                        data-bs-toggle="dropdown"
+                                        aria-expanded="false"
+                                        aria-label="More actions"
+                                    >
+                                        <i class="bi bi-three-dots-vertical"></i>
+                                    </button>
+
+
+                                    <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+
+                                        {% if share.folder.deleted_at %}
+
+                                            <li>
+                                                <span class="dropdown-item-text text-muted">
+                                                    <i class="bi bi-archive me-2"></i>
+                                                    Unavailable while in Trash
+                                                </span>
+                                            </li>
+
+                                        {% else %}
+
+                                            <li>
+                                                <a
+                                                    class="dropdown-item"
+                                                    href="{% url 'folder_open' share.folder.id %}"
+                                                >
+                                                    <i class="bi bi-folder2-open me-2"></i>
+                                                    Open
+                                                </a>
+                                            </li>
+
+                                            <li>
+                                                <a
+                                                    class="dropdown-item"
+                                                    href="{% url 'folder_download' share.folder.id %}"
+                                                >
+                                                    <i class="bi bi-download me-2"></i>
+                                                    Download
+                                                </a>
+                                            </li>
+
+                                            <li>
+                                                <button
+                                                    type="button"
+                                                    class="dropdown-item js-share-detail"
+                                                    data-detail-url="{% url 'folder_details' share.folder.id %}"
+                                                    data-bs-toggle="modal"
+                                                    data-bs-target="#shareDetailModal"
+                                                >
+                                                    <i class="bi bi-info-circle me-2"></i>
+                                                    Details
+                                                </button>
+                                            </li>
+
+                                        {% endif %}
+
+                                    </ul>
+
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                {% endif %}
+
+            {% empty %}
+
+                <div class="text-center text-muted sharing-empty">
+
+                    <i class="bi bi-people sharing-empty-icon"></i>
+
+                    <p class="mt-3 mb-0">
+                        Nothing has been shared with you.
+                    </p>
+
+                </div>
+
+            {% endfor %}
+
+        </div>
+
+    </div>
+
+
+    <!-- =========================================================
+         SHARED BY ME
+    ========================================================== -->
+
+    <div class="card border-0 shadow-sm">
+
+        <div class="card-header bg-transparent py-4">
+
+            <h5 class="mb-1">
+                Shared by me
+            </h5>
+
+        </div>
+
+
+        <div class="card-body p-0">
+
+            {% for share in sent_shares %}
+
+                <!-- =================================================
+                     SHARED FILE
+                ================================================== -->
+
+                {% if share.file %}
+
+                    <div
+                        class="
+                            sharing-row
+                            {% if share.file.deleted_at %}
+                                sharing-unavailable
+                            {% endif %}
+                        "
+                    >
+
+                        <div class="d-flex align-items-center gap-3">
+
+                            <!-- File icon -->
+
+                            <div class="flex-shrink-0">
+                                <i class="bi bi-file-earmark fs-4 text-primary"></i>
+                            </div>
+
+
+                            <!-- File information -->
+
+                            <div class="sharing-main">
+
+                                <div
+                                    class="sharing-name"
+                                    title="{{ share.file.file_name }}"
+                                >
+                                    {{ share.file.file_name }}
+                                </div>
+
+                                <div class="sharing-meta">
+
+                                    <span>
+                                        Shared with:
+                                        <strong class="fw-medium">
+                                            {{ share.receiver.username }}
+                                        </strong>
+                                    </span>
+
+                                    <span>
+                                        Shared on:
+                                        {{ share.created_at|date:"M j, Y, g:i A" }}
+                                    </span>
+
+                                    <span
+                                        class="
+                                            sharing-permission
+                                            {% if share.is_editor %}
+                                                editor
+                                            {% else %}
+                                                viewer
+                                            {% endif %}
+                                        "
+                                    >
+                                        <i
+                                            class="
+                                                bi
+                                                {% if share.is_editor %}
+                                                    bi-pencil-square
+                                                {% else %}
+                                                    bi-eye
+                                                {% endif %}
+                                            "
+                                        ></i>
+
+                                        {{ share.permission_label }}
+                                    </span>
+
+                                </div>
+
+                            </div>
+
+
+                            <!-- File share actions -->
+
+                            <div class="sharing-actions d-flex align-items-center gap-2">
+
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-outline-primary js-change-permission"
+                                    data-permission-url="{% url 'change_share_permission' share.id %}"
+                                    data-receiver="{{ share.receiver.username }}"
+                                    data-current-permission="{{ share.permission }}"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#changePermissionModal"
+                                >
+                                    <i class="bi bi-shield-lock me-1"></i>
+                                    Change access
+                                </button>
+
+
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-outline-danger js-revoke-share"
+                                    data-revoke-url="{% url 'revoke_share' share.id %}"
+                                    data-receiver="{{ share.receiver.username }}"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#revokeShareModal"
+                                >
+                                    <i class="bi bi-person-x me-1"></i>
+                                    Revoke
+                                </button>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                <!-- =================================================
+                     SHARED FOLDER
+                ================================================== -->
+
+                {% else %}
+
+                    <div
+                        class="
+                            sharing-row
+                            {% if share.folder.deleted_at %}
+                                sharing-unavailable
+                            {% endif %}
+                        "
+                    >
+
+                        <div class="d-flex align-items-center gap-3">
+
+                            <!-- Folder icon -->
+
+                            <div class="flex-shrink-0">
+                                <i class="bi bi-folder-fill fs-4 text-warning"></i>
+                            </div>
+
+
+                            <!-- Folder information -->
+
+                            <div class="sharing-main">
+
+                                <div
+                                    class="sharing-name"
+                                    title="{{ share.folder.folder_name }}"
+                                >
+                                    {{ share.folder.folder_name }}
+                                </div>
+
+                                <div class="sharing-meta">
+
+                                    <span>
+                                        Shared with:
+                                        <strong class="fw-medium">
+                                            {{ share.receiver.username }}
+                                        </strong>
+                                    </span>
+
+                                    <span>
+                                        Shared on:
+                                        {{ share.created_at|date:"M j, Y, g:i A" }}
+                                    </span>
+
+                                    <span
+                                        class="
+                                            sharing-permission
+                                            {% if share.is_editor %}
+                                                editor
+                                            {% else %}
+                                                viewer
+                                            {% endif %}
+                                        "
+                                    >
+                                        <i
+                                            class="
+                                                bi
+                                                {% if share.is_editor %}
+                                                    bi-pencil-square
+                                                {% else %}
+                                                    bi-eye
+                                                {% endif %}
+                                            "
+                                        ></i>
+
+                                        {{ share.permission_label }}
+                                    </span>
+
+                                </div>
+
+                            </div>
+
+
+                            <!-- Folder share actions -->
+
+                            <div class="sharing-actions d-flex align-items-center gap-2">
+
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-outline-primary js-change-permission"
+                                    data-permission-url="{% url 'change_share_permission' share.id %}"
+                                    data-receiver="{{ share.receiver.username }}"
+                                    data-current-permission="{{ share.permission }}"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#changePermissionModal"
+                                >
+                                    <i class="bi bi-shield-lock me-1"></i>
+                                    Change access
+                                </button>
+
+
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-outline-danger js-revoke-share"
+                                    data-revoke-url="{% url 'revoke_share' share.id %}"
+                                    data-receiver="{{ share.receiver.username }}"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#revokeShareModal"
+                                >
+                                    <i class="bi bi-person-x me-1"></i>
+                                    Revoke
+                                </button>
+
+                            </div>
+
+                        </div>
+
+                    </div>
+
+                {% endif %}
+
+            {% empty %}
+
+                <div class="text-center text-muted sharing-empty">
+
+                    <i class="bi bi-share sharing-empty-icon"></i>
+
+                    <p class="mt-3 mb-0">
+                        You have not shared anything yet.
+                    </p>
+
+                </div>
+
+            {% endfor %}
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =============================================================
+     DETAILS MODAL
+============================================================== -->
+
+<div
+    class="modal fade"
+    id="shareDetailModal"
+    tabindex="-1"
+    aria-labelledby="shareDetailModalLabel"
+    aria-hidden="true"
+>
+
+    <div class="modal-dialog modal-dialog-centered">
+
+        <div class="modal-content border-0 shadow">
+
+            <div class="modal-header">
+
+                <h5
+                    class="modal-title"
+                    id="shareDetailModalLabel"
+                >
+                    Details
+                </h5>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="modal"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+
+            <div class="modal-body">
+
+                <div
+                    class="text-center py-4"
+                    id="shareDetailLoading"
+                >
+                    <div
+                        class="spinner-border spinner-border-sm text-primary"
+                        role="status"
+                    ></div>
+
+                    <span class="ms-2">
+                        Loading details...
+                    </span>
+                </div>
+
+
+                <dl
+                    class="row mb-0 d-none"
+                    id="shareDetailContent"
+                >
+
+                    <dt class="col-sm-4">
+                        Name
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="name"
+                    ></dd>
+
+
+                    <dt class="col-sm-4">
+                        Type
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="type"
+                    ></dd>
+
+
+                    <dt class="col-sm-4">
+                        Owner
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="owner"
+                    ></dd>
+
+
+                    <dt class="col-sm-4">
+                        Access
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="access"
+                    ></dd>
+
+
+                    <dt class="col-sm-4">
+                        Shared by
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="shared_by"
+                    ></dd>
+
+
+                    <dt class="col-sm-4">
+                        Created
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="created_at"
+                    ></dd>
+
+
+                    <dt class="col-sm-4">
+                        Modified
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="modified_at"
+                    ></dd>
+
+
+                    <dt class="col-sm-4">
+                        Location
+                    </dt>
+
+                    <dd
+                        class="col-sm-8"
+                        data-detail="location"
+                    ></dd>
+
+
+                    <dt class="col-sm-4 detail-extra d-none">
+                        Size
+                    </dt>
+
+                    <dd
+                        class="col-sm-8 detail-extra d-none"
+                        data-detail="size"
+                    ></dd>
+
+
+                    <dt class="col-sm-4 detail-extra d-none">
+                        MIME type
+                    </dt>
+
+                    <dd
+                        class="col-sm-8 detail-extra d-none"
+                        data-detail="mime_type"
+                    ></dd>
+
+
+                    <dt class="col-sm-4 detail-extra d-none">
+                        Files
+                    </dt>
+
+                    <dd
+                        class="col-sm-8 detail-extra d-none"
+                        data-detail="file_count"
+                    ></dd>
+
+
+                    <dt class="col-sm-4 detail-extra d-none">
+                        Folders
+                    </dt>
+
+                    <dd
+                        class="col-sm-8 detail-extra d-none"
+                        data-detail="folder_count"
+                    ></dd>
+
+                </dl>
+
+
+                <div
+                    class="alert alert-danger d-none mb-0"
+                    id="shareDetailError"
+                ></div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =============================================================
+     CHANGE PERMISSION MODAL
+============================================================== -->
+
+<div
+    class="modal fade"
+    id="changePermissionModal"
+    tabindex="-1"
+    aria-labelledby="changePermissionModalLabel"
+    aria-hidden="true"
+>
+
+    <div class="modal-dialog modal-dialog-centered">
+
+        <div class="modal-content border-0 shadow">
+
+            <div class="modal-header">
+
+                <h5
+                    class="modal-title"
+                    id="changePermissionModalLabel"
+                >
+                    Change access
+                </h5>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="modal"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+
+            <form
+                method="POST"
+                id="changePermissionForm"
+            >
+
+                {% csrf_token %}
+
+                <div class="modal-body">
+
+                    <p class="mb-3">
+                        Change access for
+                        <strong id="changePermissionReceiver"></strong>.
+                    </p>
+
+
+                    <label
+                        for="sharePermissionSelect"
+                        class="form-label fw-medium"
+                    >
+                        Permission
+                    </label>
+
+
+                    <select
+                        name="permission"
+                        id="sharePermissionSelect"
+                        class="form-select"
+                        required
+                    >
+
+                        <option value="viewer">
+                            Viewer — can view and download
+                        </option>
+
+                        <option value="editor">
+                            Editor — can view, download, and modify
+                        </option>
+
+                    </select>
+
+                </div>
+
+
+                <div class="modal-footer">
+
+                    <button
+                        type="button"
+                        class="btn btn-light"
+                        data-bs-dismiss="modal"
+                    >
+                        Cancel
+                    </button>
+
+
+                    <button
+                        type="submit"
+                        class="btn btn-primary"
+                    >
+                        <i class="bi bi-check2 me-1"></i>
+                        Save access
+                    </button>
+
+                </div>
+
+            </form>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =============================================================
+     REVOKE MODAL
+============================================================== -->
+
+<div
+    class="modal fade"
+    id="revokeShareModal"
+    tabindex="-1"
+    aria-labelledby="revokeShareModalLabel"
+    aria-hidden="true"
+>
+
+    <div class="modal-dialog modal-dialog-centered">
+
+        <div class="modal-content border-0 shadow">
+
+            <div class="modal-header">
+
+                <h5
+                    class="modal-title"
+                    id="revokeShareModalLabel"
+                >
+                    Revoke access
+                </h5>
+
+                <button
+                    type="button"
+                    class="btn-close"
+                    data-bs-dismiss="modal"
+                    aria-label="Close"
+                ></button>
+
+            </div>
+
+
+            <div class="modal-body">
+
+                <p class="mb-0">
+                    Are you sure you want to revoke access for
+                    <strong id="revokeReceiverName"></strong>?
+                </p>
+
+            </div>
+
+
+            <div class="modal-footer">
+
+                <button
+                    type="button"
+                    class="btn btn-light"
+                    data-bs-dismiss="modal"
+                >
+                    Cancel
+                </button>
+
+
+                <form
+                    method="POST"
+                    id="revokeShareForm"
+                >
+
+                    {% csrf_token %}
+
+                    <button
+                        type="submit"
+                        class="btn btn-danger"
+                    >
+                        <i class="bi bi-person-x me-1"></i>
+                        Revoke access
+                    </button>
+
+                </form>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =============================================================
+     JAVASCRIPT
+============================================================== -->
+
+<script>
+(function () {
+
+    /* =========================================================
+       DETAILS MODAL
+    ========================================================== */
+
+    const detailModal = document.getElementById("shareDetailModal");
+
+    if (detailModal) {
+
+        detailModal.addEventListener("show.bs.modal", async function (event) {
+
+            const trigger = event.relatedTarget;
+
+            const url = trigger
+                ? trigger.dataset.detailUrl
+                : null;
+
+            const loading = document.getElementById(
+                "shareDetailLoading"
+            );
+
+            const content = document.getElementById(
+                "shareDetailContent"
+            );
+
+            const error = document.getElementById(
+                "shareDetailError"
+            );
+
+
+            loading.classList.remove("d-none");
+            content.classList.add("d-none");
+            error.classList.add("d-none");
+
+
+            try {
+
+                if (!url) {
+                    throw new Error("Missing details URL");
+                }
+
+
+                const response = await fetch(
+                    url,
+                    {
+                        headers: {
+                            "X-Requested-With": "XMLHttpRequest"
+                        }
+                    }
+                );
+
+
+                if (!response.ok) {
+                    throw new Error("Request failed");
+                }
+
+
+                const data = await response.json();
+
+
+                const setDetail = function (name, value) {
+
+                    const element = document.querySelector(
+                        '[data-detail="' + name + '"]'
+                    );
+
+                    if (element) {
+                        element.textContent = value || "—";
+                    }
+
+                };
+
+
+                setDetail(
+                    "name",
+                    data.name
+                );
+
+                setDetail(
+                    "type",
+                    data.type === "folder"
+                        ? "Folder"
+                        : "File"
+                );
+
+                setDetail(
+                    "owner",
+                    data.owner
+                );
+
+                setDetail(
+                    "access",
+                    data.access
+                );
+
+                setDetail(
+                    "shared_by",
+                    data.shared_by || data.owner
+                );
+
+                setDetail(
+                    "created_at",
+                    data.created_at
+                );
+
+                setDetail(
+                    "modified_at",
+                    data.modified_at
+                );
+
+                setDetail(
+                    "location",
+                    data.location
+                );
+
+
+                setDetail(
+                    "size",
+                    data.size !== undefined
+                        ? formatBytes(data.size)
+                        : "—"
+                );
+
+                setDetail(
+                    "mime_type",
+                    data.mime_type
+                );
+
+                setDetail(
+                    "file_count",
+                    data.file_count !== undefined
+                        ? data.file_count
+                        : "—"
+                );
+
+                setDetail(
+                    "folder_count",
+                    data.folder_count !== undefined
+                        ? data.folder_count
+                        : "—"
+                );
+
+
+                const showExtras =
+                    data.type === "file"
+                        ? (
+                            data.size !== undefined ||
+                            data.mime_type !== undefined
+                        )
+                        : (
+                            data.file_count !== undefined ||
+                            data.folder_count !== undefined
+                        );
+
+
+                document
+                    .querySelectorAll(".detail-extra")
+                    .forEach(function (element) {
+
+                        element.classList.toggle(
+                            "d-none",
+                            !showExtras
+                        );
+
+                    });
+
+
+                loading.classList.add("d-none");
+                content.classList.remove("d-none");
+
+            } catch (errorValue) {
+
+                console.error(
+                    "Could not load share details:",
+                    errorValue
+                );
+
+                loading.classList.add("d-none");
+
+                error.textContent =
+                    "Could not load details.";
+
+                error.classList.remove("d-none");
+
+            }
+
+        });
+
+    }
+
+
+    /* =========================================================
+       CHANGE PERMISSION
+    ========================================================== */
+
+    const permissionModal = document.getElementById(
+        "changePermissionModal"
+    );
+
+    const permissionForm = document.getElementById(
+        "changePermissionForm"
+    );
+
+    const permissionReceiver = document.getElementById(
+        "changePermissionReceiver"
+    );
+
+    const permissionSelect = document.getElementById(
+        "sharePermissionSelect"
+    );
+
+
+    if (
+        permissionModal &&
+        permissionForm &&
+        permissionReceiver &&
+        permissionSelect
+    ) {
+
+        permissionModal.addEventListener(
+            "show.bs.modal",
+            function (event) {
+
+                const trigger = event.relatedTarget;
+
+                if (!trigger) {
+                    return;
+                }
+
+
+                const permissionUrl =
+                    trigger.dataset.permissionUrl || "";
+
+
+                const receiver =
+                    trigger.dataset.receiver ||
+                    "this user";
+
+
+                const currentPermission =
+                    trigger.dataset.currentPermission ||
+                    "viewer";
+
+
+                permissionForm.action =
+                    permissionUrl;
+
+
+                permissionReceiver.textContent =
+                    receiver;
+
+
+                permissionSelect.value =
+                    currentPermission;
+
+            }
+        );
+
+    }
+
+
+    /* =========================================================
+       REVOKE SHARE
+    ========================================================== */
+
+    const revokeModal = document.getElementById(
+        "revokeShareModal"
+    );
+
+    const revokeForm = document.getElementById(
+        "revokeShareForm"
+    );
+
+    const receiverName = document.getElementById(
+        "revokeReceiverName"
+    );
+
+
+    if (
+        revokeModal &&
+        revokeForm &&
+        receiverName
+    ) {
+
+        revokeModal.addEventListener(
+            "show.bs.modal",
+            function (event) {
+
+                const trigger =
+                    event.relatedTarget;
+
+
+                if (!trigger) {
+                    return;
+                }
+
+
+                revokeForm.action =
+                    trigger.dataset.revokeUrl || "";
+
+
+                receiverName.textContent =
+                    trigger.dataset.receiver ||
+                    "this user";
+
+            }
+        );
+
+    }
+
+
+    /* =========================================================
+       FORMAT BYTES
+    ========================================================== */
+
+    function formatBytes(bytes) {
+
+        const value =
+            Number(bytes || 0);
+
+
+        if (value < 1024) {
+            return value + " B";
+        }
+
+
+        const units = [
+            "KB",
+            "MB",
+            "GB",
+            "TB"
+        ];
+
+
+        let size =
+            value / 1024;
+
+
+        let index = 0;
+
+
+        while (
+            size >= 1024 &&
+            index < units.length - 1
+        ) {
+
+            size /= 1024;
+            index += 1;
+
+        }
+
+
+        return (
+            size >= 10
+                ? size.toFixed(0)
+                : size.toFixed(1)
+        ) + " " + units[index];
+
+    }
+
+
+    /* =========================================================
+       BULK SELECTION
+    ========================================================== */
+
+    const bulkForm =
+        document.getElementById(
+            "sharedBulkForm"
+        );
+
+
+    const selectedCount =
+        document.getElementById(
+            "sharedSelectedCount"
+        );
+
+
+    const clearSelection =
+        document.getElementById(
+            "clearSharedSelection"
+        );
+
+
+    if (
+        !bulkForm ||
+        !selectedCount
+    ) {
+        return;
+    }
+
+
+    function syncSelection() {
+
+        const selected =
+            Array.from(
+                document.querySelectorAll(
+                    ".shared-select:checked"
+                )
+            );
+
+
+        selectedCount.textContent =
+            selected.length;
+
+
+        bulkForm.classList.toggle(
+            "d-none",
+            selected.length === 0
+        );
+
+
+        bulkForm
+            .querySelectorAll(
+                "input[data-generated]"
+            )
+            .forEach(function (input) {
+
+                input.remove();
+
+            });
+
+
+        selected.forEach(function (item) {
+
+            const input =
+                document.createElement(
+                    "input"
+                );
+
+
+            input.type =
+                "hidden";
+
+
+            input.name =
+                "file_ids";
+
+
+            input.value =
+                item.value;
+
+
+            input.dataset.generated =
+                "1";
+
+
+            bulkForm.appendChild(
+                input
+            );
+
+        });
+
+    }
+
+
+    document.addEventListener(
+        "change",
+        function (event) {
+
+            if (
+                event.target &&
+                event.target.classList.contains(
+                    "shared-select"
+                )
+            ) {
+
+                syncSelection();
+
+            }
+
+        }
+    );
+
+
+    if (clearSelection) {
+
+        clearSelection.addEventListener(
+            "click",
+            function () {
+
+                document
+                    .querySelectorAll(
+                        ".shared-select"
+                    )
+                    .forEach(function (item) {
+
+                        item.checked = false;
+
+                    });
+
+
+                syncSelection();
+
+            }
+        );
+
+    }
+
+
+    syncSelection();
+
+})();
+</script>
+
+{% endblock %}

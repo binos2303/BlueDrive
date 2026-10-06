@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+
+{% block title %}
+Trash | {{ current_folder.folder_name }}
+{% endblock %}
+
+{% block content %}
+<style>
+.trash-subitem { border: 0; border-top: 1px solid #eef0f2; padding: 14px 18px; }
+.trash-subitem:first-child { border-top: 0; }
+</style>
+
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+
+    <div>
+
+        <h3 class="mb-1">
+            {{ current_folder.folder_name }}
+        </h3>
+
+        <p class="text-muted mb-0">
+            Viewing deleted folder
+        </p>
+
+    </div>
+
+    <a
+        href="{% url 'trash' %}"
+        class="btn btn-light"
+    >
+        <i class="bi bi-arrow-left me-2"></i>
+        Back to Trash
+    </a>
+
+</div>
+
+
+<!-- Breadcrumb -->
+
+<nav aria-label="breadcrumb" class="mb-4">
+
+    <ol class="breadcrumb">
+
+        <li class="breadcrumb-item">
+
+            <a
+                href="{% url 'trash' %}"
+                class="text-decoration-none"
+            >
+                Trash
+            </a>
+
+        </li>
+
+        <li class="breadcrumb-item active">
+
+            {{ current_folder.folder_name }}
+
+        </li>
+
+    </ol>
+
+</nav>
+
+
+<!-- Folders -->
+
+<div class="mb-4">
+
+    <h5 class="mb-3">
+        Folders
+    </h5>
+
+    <div class="row g-3">
+
+        {% for folder in folders %}
+
+        <div class="col-md-4 col-lg-3">
+
+            <div class="card border-0 shadow-sm h-100 ">
+
+                <div class="card-body">
+
+                    <a
+                        href="{% url 'trash_folder_open' folder.id %}"
+                        class="text-decoration-none text-dark"
+                    >
+
+                        <div class="d-flex align-items-center">
+
+                            <i
+                                class="bi bi-folder-fill text-warning fs-2 me-3"
+                            ></i>
+
+                            <div class="text-truncate">
+
+                                <h6 class="mb-1 text-truncate">
+                                    {{ folder.folder_name }}
+                                </h6>
+
+                                <small class="text-muted">
+                                    Deleted
+                                </small>
+
+                            </div>
+
+                        </div>
+
+                    </a>
+
+                </div>
+
+            </div>
+
+        </div>
+
+        {% empty %}
+
+        <div class="col-12">
+
+            <p class="text-muted">
+                No subfolders.
+            </p>
+
+        </div>
+
+        {% endfor %}
+
+    </div>
+
+</div>
+
+
+<!-- Files -->
+
+<div>
+
+    <h5 class="mb-3">
+        Files
+    </h5>
+
+    <div class="card border-0 shadow-sm">
+
+        <div class="card-body p-0">
+
+            {% if files %}
+
+            <div class="list-group list-group-flush">
+
+                {% for file in files %}
+
+                <div class="list-group-item trash-subitem">
+
+                    <div class="d-flex align-items-center">
+
+                        <i
+                            class="bi bi-file-earmark-x fs-3 text-muted me-3"
+                        ></i>
+
+                        <div class="flex-grow-1">
+
+                            <div class="fw-medium">
+                                {{ file.file_name }}
+                            </div>
+
+                            <small class="text-muted">
+
+                                Deleted:
+                                {{ file.deleted_at|date:"M j, Y, g:i A" }}
+
+                            </small>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+                {% endfor %}
+
+            </div>
+
+            {% else %}
+
+            <div class="text-center py-5 text-muted">
+
+                <i class="bi bi-file-earmark fs-1"></i>
+
+                <h5 class="mt-3">
+                    No files
+                </h5>
+
+            </div>
+
+            {% endif %}
+
+        </div>
+
+    </div>
+
+</div>
+
+{% endblock %}

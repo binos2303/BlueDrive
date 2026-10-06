@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+
+{% block title %}Search | SecureDrive{% endblock %}
+
+{% block content %}
+<style>
+.search-result-card{min-width:0}.search-result-card .drive-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.search-result-card .card-body{min-width:0}
+</style>
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h3 class="mb-1">Search</h3>
+            <p class="text-muted mb-0">Results for “{{ query }}”</p>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            <div class="dropdown">
+                <button
+                    class="btn btn-sm btn-light border dropdown-toggle"
+                    type="button"
+                    data-bs-toggle="dropdown"
+                >
+                    <i class="bi bi-sort-down me-1"></i>Sort:
+                    {% if sort_key == "modified" %}Modified{% elif sort_key == "size" %}Size{% elif sort_key == "type" %}Type{% else %}Name{% endif %}
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                    {% for key, option in sort_options.items %}
+                        <li>
+                            <a
+                                class="dropdown-item"
+                                href="?q={{ query|urlencode }}&sort={{ key }}&direction=asc"
+                                >{{ option.label }} ↑</a
+                            >
+                        </li>
+                        <li>
+                            <a
+                                class="dropdown-item"
+                                href="?q={{ query|urlencode }}&sort={{ key }}&direction=desc"
+                                >{{ option.label }} ↓</a
+                            >
+                        </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            <a href="{% url 'dashboard' %}" class="btn btn-light"
+                ><i class="bi bi-arrow-left me-2"></i>My Drive</a
+            >
+        </div>
+    </div>
+
+    <form
+        method="POST"
+        action="{% url 'bulk_action' %}"
+        id="searchBulkForm"
+        class="bulk-toolbar d-none mb-4"
+    >
+        {% csrf_token %}
+        <input type="hidden" name="source" value="search" />
+        <input type="hidden" name="q" value="{{ query }}" />
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <span class="fw-medium me-2"><span id="searchSelectedCount">0</span> selected</span>
+            <button class="btn btn-sm btn-outline-primary" name="action" value="copy">
+                <i class="bi bi-copy me-1"></i>Copy
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" name="action" value="cut">
+                <i class="bi bi-scissors me-1"></i>Cut
+            </button>
+            <button class="btn btn-sm btn-outline-danger" name="action" value="trash">
+                <i class="bi bi-trash me-1"></i>Move to Trash
+            </button>
+            <select
+                name="destination_id"
+                class="form-select form-select-sm"
+                style="max-width:230px"
+            >
+                <option value="">My Drive</option>
+                {% for folder in all_folders %}
+                    <option value="{{ folder.id }}">{{ folder.folder_name }}</option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-sm btn-outline-success" name="action" value="move">
+                <i class="bi bi-folder-symlink me-1"></i>Move
+            </button>
+            <button type="button" class="btn btn-sm btn-light" id="clearSearchSelection">
+                Clear
+            </button>
+        </div>
+    </form>
+
+    <div class="mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="mb-0">Folders</h5>
+            {% if folders %}
+                <button type="button" class="btn btn-sm btn-light" data-search-select-all="folder">
+                    <i class="bi bi-check2-square me-1"></i>Select all
+                </button>
+            {% endif %}
+        </div>
+        <div class="row g-3">
+            {% for folder in folders %}
+                <div class="col-md-4 col-lg-3">
+                    <div class="card border-0 shadow-sm h-100 search-result-card">
+                        <div class="card-body">
+                            <div class="d-flex align-items-center">
+                                <input
+                                    class="form-check-input me-2 search-select"
+                                    type="checkbox"
+                                    data-select-type="folder"
+                                    value="{{ folder.id }}"
+                                    {% if folder.deleted_at %}disabled{% endif %}
+                                    aria-label="Select {{ folder.folder_name }}"
+                                />
+                                <a
+                                    href="{% if folder.deleted_at %}{% url 'trash_folder_open' folder.id %}{% else %}{% url 'folder_open' folder.id %}{% endif %}"
+                                    class="text-decoration-none text-dark drive-name-wrap"
+                                >
+                                    <div class="d-flex align-items-center">
+                                        <i class="bi bi-folder-fill text-warning fs-2 me-3"></i>
+                                        <div class="drive-name-wrap">
+                                            <div class="fw-medium drive-name">
+                                                {{ folder.folder_name }}
+                                            </div>
+                                            <small class="text-muted d-block"
+                                                >{{ folder.created_at|date:"M j, Y, g:i A" }}</small
+                                            >
+                                            {% if folder.deleted_at %}
+                                                <span
+                                                    class="badge bg-danger-subtle text-danger mt-1"
+                                                    >In Trash</span
+                                                >
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% empty %}
+                <div class="col-12 text-muted">No matching folders.</div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div>
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="mb-0">Files</h5>
+            {% if files %}
+                <button type="button" class="btn btn-sm btn-light" data-search-select-all="file">
+                    <i class="bi bi-check2-square me-1"></i>Select all
+                </button>
+            {% endif %}
+        </div>
+        <div class="card border-0 shadow-sm">
+            <div class="card-body p-0">
+                {% for file in files %}
+                    <div class="list-group-item">
+                        <div class="d-flex align-items-center">
+                            <input
+                                class="form-check-input me-3 search-select"
+                                type="checkbox"
+                                data-select-type="file"
+                                value="{{ file.id }}"
+                                {% if file.deleted_at %}disabled{% endif %}
+                                aria-label="Select {{ file.file_name }}"
+                            />
+                            <i class="bi bi-file-earmark-lock fs-3 text-primary me-3"></i>
+                            <div class="drive-name-wrap">
+                                {% if file.deleted_at %}
+                                    <a
+                                        href="{% if file.folder and file.folder.deleted_at %}{% url 'trash_folder_open' file.folder.id %}{% else %}{% url 'trash' %}{% endif %}"
+                                        class="text-decoration-none fw-medium drive-name d-block"
+                                        >{{ file.file_name }}</a
+                                    >
+                                {% else %}
+                                    <a
+                                        href="{% url 'file_view' file.id %}"
+                                        class="text-decoration-none fw-medium drive-name d-block"
+                                        >{{ file.file_name }}</a
+                                    >
+                                {% endif %}
+                                <small class="d-block text-muted"
+                                    >{{ file.file_size|filesizeformat }} · {{
+                                    file.created_at|date:"M j, Y, g:i A" }}</small
+                                >
+                            </div>
+                            {% if file.deleted_at %}
+                                <span class="badge bg-danger-subtle text-danger ms-2"
+                                    >In Trash</span
+                                >
+                            {% else %}
+                                <span class="badge bg-success-subtle text-success ms-2"
+                                    >Encrypted</span
+                                >
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% empty %}
+                    <div class="text-center py-5 text-muted">No matching files.</div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            const form = document.getElementById("searchBulkForm"),
+                count = document.getElementById("searchSelectedCount");
+            if (!form) return;
+            function boxes() {
+                return [...document.querySelectorAll(".search-select:checked:not(:disabled)")];
+            }
+            function sync() {
+                const selected = boxes();
+                count.textContent = selected.length;
+                form.classList.toggle("d-none", !selected.length);
+                form.querySelectorAll("input[data-generated]").forEach((e) => e.remove());
+                selected.forEach((cb) => {
+                    const i = document.createElement("input");
+                    i.type = "hidden";
+                    i.name = cb.dataset.selectType === "file" ? "file_ids" : "folder_ids";
+                    i.value = cb.value;
+                    i.dataset.generated = "1";
+                    form.appendChild(i);
+                });
+            }
+            document.addEventListener("change", (e) => {
+                if (e.target.classList.contains("search-select")) sync();
+            });
+            document.addEventListener("click", (e) => {
+                const b = e.target.closest("[data-search-select-all]");
+                if (b) {
+                    document
+                        .querySelectorAll(
+                            '.search-select[data-select-type="' + b.dataset.searchSelectAll + '"]',
+                        )
+                        .forEach((x) => {
+                            if (!x.disabled) x.checked = true;
+                        });
+                    sync();
+                }
+                if (e.target.closest("#clearSearchSelection")) {
+                    document.querySelectorAll(".search-select").forEach((x) => (x.checked = false));
+                    sync();
+                }
+            });
+            sync();
+        })();
+    </script>
+{% endblock %}

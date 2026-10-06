@@ -1,0 +1,170 @@
+<div class="mb-4">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <h5 class="mb-0">Folders</h5>
+        {% if folders and not is_shared_access %}
+            <button type="button" class="btn btn-sm btn-light bg-body-secondary" data-select-all="folder">
+                <i class="bi bi-check2-square me-1"></i>Select all
+            </button>
+        {% endif %}
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-0">
+            {% if folders %}
+                <div class="list-group list-group-flush">
+                    {% for folder in folders %}
+                        <div class="list-group-item drive-item">
+                            <div class="d-flex align-items-center gap-3">
+                                {% if not is_shared_access %}
+                                    <input class="form-check-input drive-select flex-shrink-0" type="checkbox" data-select-type="folder" value="{{ folder.id }}" aria-label="Select {{ folder.folder_name }}">
+                                {% endif %}
+
+                                <i class="bi bi-folder-fill text-warning fs-3 flex-shrink-0"></i>
+
+                                <div class="drive-folder-main">
+                                    <div class="drive-folder-name-row">
+                                        <a href="{% url 'folder_open' folder.id %}" class="text-decoration-none text-dark drive-name" title="{{ folder.folder_name }}">
+                                            {{ folder.folder_name }}
+                                        </a>
+
+                                        {% if folder.my_shares and not is_shared_access %}
+                                            <span class="badge bg-primary-subtle text-primary">
+                                                <i class="bi bi-people me-1"></i>Shared with {{ folder.my_shares|length }}
+                                            </span>
+                                        {% endif %}
+
+                                        {% if is_shared_access and folder.shared_permission %}
+                                            <span class="badge {% if folder.shared_permission.is_editor %}bg-success-subtle text-success{% else %}bg-primary-subtle text-primary{% endif %}">
+                                                <i class="bi {% if folder.shared_permission.is_editor %}bi-pencil-square{% else %}bi-eye{% endif %} me-1"></i>
+                                                {{ folder.shared_permission.permission_label }}
+                                            </span>
+                                        {% endif %}
+                                    </div>
+
+                                    <div class="drive-folder-meta">
+                                        <span>{{ folder.updated_at|date:"M j, Y, g:i A" }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="ms-auto flex-shrink-0">
+                                    <div class="dropdown">
+                                        <button class="btn btn-light btn-sm" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                            <i class="bi bi-three-dots-vertical"></i>
+                                        </button>
+
+                                        <ul class="dropdown-menu dropdown-menu-end">
+                                            <li>
+                                                <a class="dropdown-item" href="{% url 'folder_open' folder.id %}">
+                                                    <i class="bi bi-folder2-open me-2"></i>Open
+                                                </a>
+                                            </li>
+
+                                            <li>
+                                                <a class="dropdown-item" href="{% url 'folder_download' folder.id %}">
+                                                    <i class="bi bi-download me-2"></i>Download
+                                                </a>
+                                            </li>
+
+                                            <li>
+                                                <button type="button" class="dropdown-item js-details-button" data-details-url="{% url 'folder_details' folder.id %}">
+                                                    <i class="bi bi-info-circle me-2"></i>Details
+                                                </button>
+                                            </li>
+
+                                            {% if not is_shared_access or folder.shared_permission.is_editor %}
+                                                <li><hr class="dropdown-divider"></li>
+
+                                                <li>
+                                                    <form method="POST" action="{% url 'folder_copy' folder.id %}">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="dropdown-item">
+                                                            <i class="bi bi-copy me-2"></i>Copy
+                                                        </button>
+                                                    </form>
+                                                </li>
+
+                                                <li>
+                                                    <form method="POST" action="{% url 'folder_cut' folder.id %}">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="dropdown-item">
+                                                            <i class="bi bi-scissors me-2"></i>Cut
+                                                        </button>
+                                                    </form>
+                                                </li>
+
+                                                <li>
+                                                    <button type="button" class="dropdown-item" data-bs-toggle="modal" data-bs-target="#renameFolderModal{{ folder.id }}">
+                                                        <i class="bi bi-pencil me-2"></i>Rename
+                                                    </button>
+                                                </li>
+                                            {% endif %}
+
+                                            {% if not is_shared_access %}
+                                                <li>
+                                                    <button type="button" class="dropdown-item" data-bs-toggle="modal" data-bs-target="#shareFolderModal{{ folder.id }}">
+                                                        <i class="bi bi-person-plus me-2"></i>Share
+                                                    </button>
+                                                </li>
+
+                                                <li><hr class="dropdown-divider"></li>
+
+                                                <li>
+                                                    <form method="POST" action="{% url 'folder_delete' folder.id %}">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="dropdown-item text-danger">
+                                                            <i class="bi bi-trash me-2"></i>Move to Trash
+                                                        </button>
+                                                    </form>
+                                                </li>
+                                            {% endif %}
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div class="text-center py-4 text-muted">No folders yet.</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<style>
+    .drive-item {
+        padding: 14px 18px;
+        border-bottom: 1px solid #eef0f2;
+    }
+
+    .drive-item:last-child {
+        border-bottom: 0;
+    }
+
+    .drive-folder-main {
+        min-width: 0;
+        flex: 1 1 auto;
+    }
+
+    .drive-folder-name-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        min-width: 0;
+    }
+
+    .drive-name {
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .drive-folder-meta {
+        color: #6c757d;
+        font-size: 0.8rem;
+        margin-top: 3px;
+    }
+</style>

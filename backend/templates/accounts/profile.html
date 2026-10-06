@@ -1,0 +1,537 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Profile | SecureDrive{% endblock %}
+
+{% block extra_js %}
+    <script>
+        document.addEventListener("DOMContentLoaded", function () {
+            /*
+             * =========================================================
+             * PASSWORD FIELD PLACEHOLDERS
+             * =========================================================
+             *
+             * Django's PasswordChangeForm generates the input fields
+             * automatically, so we override their placeholders here.
+             */
+            const passwordPlaceholders = {
+                id_old_password: "Enter your current password",
+                id_new_password1: "Enter your new password",
+                id_new_password2: "Re-enter your new password",
+            };
+
+            Object.entries(passwordPlaceholders).forEach(
+                ([fieldId, placeholder]) => {
+                    const field = document.getElementById(fieldId);
+
+                    if (field) {
+                        field.placeholder = placeholder;
+                    }
+                }
+            );
+
+            /*
+             * =========================================================
+             * CONFIRM PASSWORD HELP
+             * =========================================================
+             *
+             * Show the password help text only while the confirmation
+             * field is focused, unless there is a validation error.
+             */
+            const confirmInput =
+                document.getElementById("id_new_password2");
+
+            const help = document.querySelector(
+                "[data-confirm-password-help]"
+            );
+
+            if (!confirmInput || !help) {
+                return;
+            }
+
+            const hasError = () => {
+                const fieldContainer = confirmInput.closest(".mb-3");
+
+                return !!fieldContainer?.querySelector(".text-danger");
+            };
+
+            const showHelp = () => {
+                help.classList.remove("d-none");
+            };
+
+            const hideHelp = () => {
+                if (
+                    !hasError() &&
+                    document.activeElement !== confirmInput
+                ) {
+                    help.classList.add("d-none");
+                }
+            };
+
+            confirmInput.addEventListener("focus", showHelp);
+            confirmInput.addEventListener("click", showHelp);
+            confirmInput.addEventListener("blur", hideHelp);
+
+            if (!hasError()) {
+                help.classList.add("d-none");
+            }
+        });
+    </script>
+{% endblock %}
+
+{% block content %}
+    <style>
+        .profile-page {
+            max-width: 1120px;
+            margin: 0 auto;
+        }
+
+        .profile-section {
+            border: 1px solid #e9ecef;
+            border-radius: 18px;
+            background: #ffffff;
+            box-shadow: 0 4px 18px rgba(33, 37, 41, 0.05);
+        }
+
+        .profile-section-header {
+            padding: 22px 24px 14px;
+        }
+
+        .profile-section-body {
+            padding: 8px 24px 24px;
+        }
+
+        .profile-label {
+            font-size: 13px;
+            font-weight: 600;
+            color: #6c757d;
+            margin-bottom: 7px;
+        }
+
+        .profile-readonly {
+            min-height: 42px;
+            display: flex;
+            align-items: center;
+            padding: 10px 13px;
+            border: 1px solid #e9ecef;
+            border-radius: 10px;
+            background: #f8f9fa;
+            color: #343a40;
+        }
+
+        .profile-meta {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 13px 0;
+            border-bottom: 1px solid #f1f3f5;
+        }
+
+        .profile-meta:last-child {
+            border-bottom: 0;
+        }
+
+        .profile-meta-icon {
+            width: 36px;
+            height: 36px;
+            flex: 0 0 36px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f1f3f5;
+            color: #495057;
+        }
+
+        .profile-input {
+            min-height: 42px;
+            border-radius: 10px;
+        }
+
+        .profile-save-btn {
+            min-height: 42px;
+            border-radius: 10px;
+            padding-inline: 18px;
+            white-space: nowrap;
+        }
+
+        .profile-password-card {
+            background: linear-gradient(
+                180deg,
+                #ffffff 0%,
+                #fafbfc 100%
+            );
+        }
+
+        .profile-confirm-password-help {
+            margin-top: 6px;
+        }
+
+        .profile-page input.form-control {
+            min-height: 42px;
+            border-radius: 10px;
+        }
+
+        .profile-page .form-label {
+            margin-bottom: 7px;
+        }
+
+        .profile-page .form-text {
+            line-height: 1.5;
+        }
+
+        .profile-page .text-danger {
+            line-height: 1.4;
+        }
+
+        @media (max-width: 767.98px) {
+            .profile-section-header {
+                padding-left: 18px;
+                padding-right: 18px;
+            }
+
+            .profile-section-body {
+                padding-left: 18px;
+                padding-right: 18px;
+            }
+
+            .profile-save-btn {
+                padding-inline: 14px;
+            }
+
+            .profile-meta {
+                align-items: flex-start;
+            }
+        }
+
+        @media (max-width: 575.98px) {
+            .profile-page {
+                width: 100%;
+            }
+
+            .profile-page > .d-flex {
+                align-items: flex-start !important;
+                flex-direction: column;
+            }
+
+            .profile-page > .d-flex > a {
+                width: 100%;
+            }
+
+            .profile-page > .d-flex > a .btn {
+                width: 100%;
+            }
+
+            .profile-page .d-flex.gap-2 {
+                flex-direction: column;
+            }
+
+            .profile-page .profile-save-btn {
+                width: 100%;
+            }
+        }
+    </style>
+
+    <div class="profile-page">
+        <!-- =========================================================
+             PAGE HEADER
+        ========================================================== -->
+
+        <div class="d-flex justify-content-between align-items-center mb-4 gap-3">
+            <div>
+                <h3 class="mb-1 fw-semibold">
+                    Profile
+                </h3>
+            </div>
+
+            <a
+                href="{% url 'dashboard' %}"
+                class="btn btn-light border"
+            >
+                <i class="bi bi-arrow-left me-2"></i>
+                My Drive
+            </a>
+        </div>
+
+
+        <!-- =========================================================
+             PROFILE CONTENT
+        ========================================================== -->
+
+        <div class="row g-4">
+
+            <!-- =====================================================
+                 ACCOUNT INFORMATION
+            ====================================================== -->
+
+            <div class="col-lg-7">
+                <div class="profile-section h-100">
+
+                    <div class="profile-section-header">
+                        <h5 class="mb-1 fw-semibold">
+                            Account information
+                        </h5>
+                    </div>
+
+
+                    <div class="profile-section-body">
+
+                        <!-- Username -->
+
+                        <div class="mb-4">
+                            <div class="profile-label">
+                                Username
+                            </div>
+
+                            <div class="profile-readonly">
+                                <i class="bi bi-person me-2 text-muted"></i>
+
+                                {{ request.user.username }}
+                            </div>
+
+                        </div>
+
+
+                        <!-- Email -->
+
+                        <div class="mb-4">
+                            <div class="profile-label">
+                                Email address
+                            </div>
+
+                            <form
+                                method="POST"
+                                novalidate
+                            >
+                                {% csrf_token %}
+
+                                <input
+                                    type="hidden"
+                                    name="action"
+                                    value="update_email"
+                                />
+
+                                <div class="d-flex gap-2">
+
+                                    <div class="flex-grow-1">
+                                        {{ email_form.email }}
+
+                                        {% for error in email_form.email.errors %}
+                                            <div class="text-danger small mt-1">
+                                                {{ error }}
+                                            </div>
+                                        {% endfor %}
+                                    </div>
+
+
+                                    <button
+                                        type="submit"
+                                        class="btn btn-primary profile-save-btn"
+                                    >
+                                        <i class="bi bi-check2 me-1"></i>
+                                        Save changes
+                                    </button>
+
+                                </div>
+                            </form>
+                        </div>
+
+
+                        <!-- Date joined -->
+
+                        <div class="profile-meta">
+
+                            <div class="profile-meta-icon">
+                                <i class="bi bi-calendar3"></i>
+                            </div>
+
+                            <div>
+                                <div class="profile-label mb-1">
+                                    Date joined
+                                </div>
+
+                                <div>
+                                    {{ request.user.date_joined|date:"M j, Y, g:i A" }}
+                                </div>
+                            </div>
+
+                        </div>
+
+
+                        <!-- Last login -->
+
+                        <div class="profile-meta">
+
+                            <div class="profile-meta-icon">
+                                <i class="bi bi-clock-history"></i>
+                            </div>
+
+                            <div>
+                                <div class="profile-label mb-1">
+                                    Last login
+                                </div>
+
+                                <div>
+                                    {% if request.user.last_login %}
+                                        {{ request.user.last_login|date:"M j, Y, g:i A" }}
+                                    {% else %}
+                                        First login
+                                    {% endif %}
+                                </div>
+                            </div>
+
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+
+            <!-- =====================================================
+                 SECURITY
+            ====================================================== -->
+
+            <div class="col-lg-5">
+
+                <div class="profile-section profile-password-card h-100">
+
+                    <!-- Security header -->
+
+                    <div class="profile-section-header">
+
+                        <div class="d-flex justify-content-between align-items-start gap-2">
+
+                            <div>
+                                <h5 class="mb-1 fw-semibold">
+                                    Security
+                                </h5>
+                            </div>
+
+                            <div class="profile-meta-icon">
+                                <i class="bi bi-shield-lock"></i>
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                    <!-- Password form -->
+
+                    <div class="profile-section-body">
+
+                        <form
+                            method="POST"
+                            novalidate
+                        >
+                            {% csrf_token %}
+
+                            <input
+                                type="hidden"
+                                name="action"
+                                value="change_password"
+                            />
+
+
+                            {% for field in password_form %}
+
+                                <div class="mb-3">
+
+                                    <!-- Label -->
+
+                                    <label
+                                        class="form-label fw-medium"
+                                        for="{{ field.id_for_label }}"
+                                    >
+                                        {% if field.name == "old_password" %}
+                                            Current password
+                                        {% elif field.name == "new_password1" %}
+                                            New password
+                                        {% elif field.name == "new_password2" %}
+                                            Confirm new password
+                                        {% else %}
+                                            {{ field.label }}
+                                        {% endif %}
+                                    </label>
+
+
+                                    <!-- Input -->
+
+                                    {{ field }}
+
+
+                                    <!-- Help text -->
+
+                                    {% if field.help_text %}
+
+                                        {% if field.name == "new_password2" %}
+
+                                            <div
+                                                class="form-text profile-confirm-password-help d-none"
+                                                data-confirm-password-help
+                                            >
+                                                {{ field.help_text|safe }}
+                                            </div>
+
+                                        {% else %}
+
+                                            <div class="form-text">
+                                                {{ field.help_text|safe }}
+                                            </div>
+
+                                        {% endif %}
+
+                                    {% endif %}
+
+
+                                    <!-- Field errors -->
+
+                                    {% for error in field.errors %}
+
+                                        <div class="text-danger small mt-1">
+                                            {{ error }}
+                                        </div>
+
+                                    {% endfor %}
+
+                                </div>
+
+                            {% endfor %}
+
+
+                            <!-- Non-field errors -->
+
+                            {% if password_form.non_field_errors %}
+
+                                {% for error in password_form.non_field_errors %}
+
+                                    <div class="text-danger small mb-3">
+                                        {{ error }}
+                                    </div>
+
+                                {% endfor %}
+
+                            {% endif %}
+
+
+                            <!-- Submit -->
+
+                            <button
+                                type="submit"
+                                class="btn btn-primary w-100 mt-2"
+                            >
+                                <i class="bi bi-shield-lock me-2"></i>
+                                Change password
+                            </button>
+
+                        </form>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+    </div>
+{% endblock %}

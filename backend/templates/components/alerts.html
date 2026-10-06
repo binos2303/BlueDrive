@@ -1,0 +1,21 @@
+{% if messages %}
+        <div class="toast-container-custom">
+          {% for message in messages %}
+          <div
+            class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show toast-custom"
+            role="alert"
+          >
+            <i class="bi {% if "error" in message.tags %}bi-exclamation-circle{% elif "warning" in message.tags %}bi-exclamation-triangle{% elif "success" in message.tags %}bi-check-circle{% else %}bi-info-circle{% endif %} me-2"></i>
+
+            {{ message }}
+
+            <button
+              type="button"
+              class="btn-close"
+              data-bs-dismiss="alert"
+              aria-label="Close"
+            ></button>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}

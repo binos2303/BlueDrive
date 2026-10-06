@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}
+    My Drive | SecureDrive
+{% endblock %}
+
+{% block content %}
+
+    {% include "drive/header.html" %}
+
+    {% include "drive/folders.html" %}
+
+    {% include "drive/files.html" %}
+
+    {% include "components/modals.html" %}
+
+    <div class="offcanvas offcanvas-end" tabindex="-1" id="detailsPanel" aria-labelledby="detailsPanelLabel" style="width:min(420px, 92vw);">
+        <div class="offcanvas-header border-bottom">
+            <div>
+                <h5 class="offcanvas-title mb-1" id="detailsPanelLabel">Details</h5>
+                <div class="small text-muted" id="detailsPanelType"></div>
+            </div>
+            <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+        </div>
+        <div class="offcanvas-body" id="detailsPanelBody">
+            <div class="text-center text-muted py-5">Loading...</div>
+        </div>
+    </div>
+
+    <script>
+    (function () {
+        const detailsPanel = document.getElementById("detailsPanel");
+        const detailsBody = document.getElementById("detailsPanelBody");
+        const detailsTitle = document.getElementById("detailsPanelLabel");
+        const detailsType = document.getElementById("detailsPanelType");
+
+        function escapeHtml(value) {
+            return String(value ?? "").replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[ch]));
+        }
+
+        function formatBytes(bytes) {
+            const value = Number(bytes || 0);
+            if (value < 1024) return `${value} B`;
+            const units = ["KB", "MB", "GB", "TB"];
+            let size = value / 1024;
+            let unitIndex = 0;
+            while (size >= 1024 && unitIndex < units.length - 1) {
+                size /= 1024;
+                unitIndex += 1;
+            }
+            return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
+        }
+
+        function renderDetails(data) {
+            const isFile = data.type === "file";
+            detailsTitle.textContent = data.name;
+            detailsType.textContent = isFile ? "File" : "Folder";
+            const rows = [
+                ["Owner", data.owner],
+                ["Location", data.location],
+                ["Created", data.created_at],
+                ["Modified", data.modified_at],
+            ];
+            if (isFile) {
+                rows.splice(3, 0, ["Type", data.mime_type]);
+                rows.splice(4, 0, ["Size", formatBytes(data.size)]);
+                rows.push(["Encryption", data.encrypted ? "Encrypted (AES-GCM)" : "Not encrypted"]);
+                if (data.hash_sha256) rows.push(["SHA-256", data.hash_sha256]);
+            } else {
+                rows.splice(3, 0, ["Items", `${data.file_count} file(s), ${data.folder_count} subfolder(s)`]);
+            }
+            detailsBody.innerHTML = rows.map(([label, value]) => `
+                <div class="py-3 border-bottom">
+                    <div class="small text-muted mb-1">${escapeHtml(label)}</div>
+                    <div class="fw-medium text-break">${escapeHtml(value)}</div>
+                </div>`).join("");
+        }
+
+        document.addEventListener("click", async event => {
+            const button = event.target.closest(".js-details-button");
+            if (!button || !detailsPanel) return;
+            detailsBody.innerHTML = '<div class="text-center text-muted py-5"><div class="spinner-border spinner-border-sm me-2"></div>Loading...</div>';
+            bootstrap.Offcanvas.getOrCreateInstance(detailsPanel).show();
+            try {
+                const response = await fetch(button.dataset.detailsUrl, { headers: { "X-Requested-With": "XMLHttpRequest" } });
+                if (!response.ok) throw new Error("Unable to load details");
+                renderDetails(await response.json());
+            } catch (error) {
+                detailsBody.innerHTML = '<div class="alert alert-danger">Unable to load details.</div>';
+            }
+        });
+
+        const toolbar = document.getElementById("bulkToolbar");
+        const count = document.getElementById("selectedCount");
+        const form = document.getElementById("bulkActionForm");
+        if (!toolbar || !count || !form) return;
+
+        function selections() {
+            return Array.from(document.querySelectorAll(".drive-select:checked"));
+        }
+
+        function sync() {
+            const selected = selections();
+            count.textContent = selected.length;
+            toolbar.classList.toggle("d-none", selected.length === 0);
+            form.querySelectorAll("input[name=\"file_ids\"], input[name=\"folder_ids\"]").forEach(el => el.remove());
+            selected.forEach(cb => {
+                const input = document.createElement("input");
+                input.type = "hidden";
+                input.name = cb.dataset.selectType === "file" ? "file_ids" : "folder_ids";
+                input.value = cb.value;
+                form.appendChild(input);
+            });
+        }
+
+        document.addEventListener("change", function (event) {
+            if (event.target.classList.contains("drive-select")) sync();
+        });
+
+        document.addEventListener("click", function (event) {
+            const button = event.target.closest("[data-select-all]");
+            if (button) {
+                const type = button.dataset.selectAll;
+                const boxes = document.querySelectorAll('.drive-select[data-select-type="' + type + '"]');
+                const shouldSelect = Array.from(boxes).some(cb => !cb.checked);
+                boxes.forEach(cb => cb.checked = shouldSelect);
+                sync();
+            }
+
+            const clear = event.target.closest("[data-clear-selection]");
+            if (clear) {
+                document.querySelectorAll(".drive-select").forEach(cb => cb.checked = false);
+                sync();
+            }
+        });
+
+        form.addEventListener("submit", function (event) {
+            if (!selections().length) {
+                event.preventDefault();
+                return;
+            }
+            const action = event.submitter ? event.submitter.value : "";
+            if (action === "move") {
+                const destination = form.querySelector("[name=\"destination_id\"]").value;
+                const selectedFolderIds = selections()
+                    .filter(cb => cb.dataset.selectType === "folder")
+                    .map(cb => cb.value);
+                if (destination && selectedFolderIds.includes(destination)) {
+                    event.preventDefault();
+                    window.alert("A folder cannot be moved into itself.");
+                }
+            }
+        });
+
+        sync();
+    })();
+    </script>
+
+{% endblock %}
