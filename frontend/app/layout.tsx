@@ -13,6 +13,11 @@ const poppins = Poppins({
 export const metadata: Metadata = {
   title: "BlueDrive",
   description: "Secure cloud storage for your files",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export default function RootLayout({
@@ -22,7 +27,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={poppins.variable}>
-      <body className="min-h-screen bg-[#F3F5F9] font-sans text-[#121523] antialiased">
+      <body className="min-h-screen bg-background font-sans text-foreground antialiased">
         {children}
       </body>
     </html>

@@ -1,7 +1,6 @@
 @import "tailwindcss";
 
 :root {
-  /* BlueDrive Brand */
   --brand-primary: #7288fa;
   --brand-primary-hover: #5f75e8;
   --brand-primary-soft: #eef1ff;
@@ -9,7 +8,6 @@
   --brand-dark: #121523;
   --brand-deep: #04050c;
 
-  /* UI */
   --background: #f6f8fc;
   --surface: #ffffff;
   --border: #e4e8f0;
@@ -38,6 +36,33 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-color: #c5cede transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: #c5cede;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--brand-primary);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 html,
@@ -50,4 +75,13 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-poppins), sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+a {
+  text-decoration: none;
 }
