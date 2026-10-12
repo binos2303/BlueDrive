@@ -1,10 +1,3 @@
-"""Django settings cho securedrive.
-
-Triết lý bảo mật:
-- Không hard-code secret. Mọi secret qua .env → os.getenv().
-- Secure-by-default headers (triển khai dưới HTTPS).
-- Crypto env-vars được khai báo tập trung để crypto modules đọc.
-"""
 import os
 from pathlib import Path
 
@@ -98,23 +91,18 @@ TEMPLATES = [
 WSGI_APPLICATION = "securedrive.wsgi.application"
 
 # --- Database ---
+
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.mysql",
+        "ENGINE": "django.db.backends.postgresql",
         "NAME": os.getenv("DB_NAME", "securedrive"),
-        "USER": os.getenv("DB_USER", "securedrive_user"),
+        "USER": os.getenv("DB_USER", "securedrive_app"),
         "PASSWORD": os.getenv("DB_PASSWORD", ""),
         "HOST": os.getenv("DB_HOST", "127.0.0.1"),
-        "PORT": os.getenv("DB_PORT", "3306"),
-        "OPTIONS": {
-            "charset": "utf8mb4",
-            "init_command": (
-                "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION',"
-                "innodb_strict_mode=1"
-            ),
-        },
+        "PORT": os.getenv("DB_PORT", "5432"),
     }
 }
+
 
 # --- Auth password validators ---
 AUTH_PASSWORD_VALIDATORS = [
