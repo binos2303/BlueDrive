@@ -1,21 +1,31 @@
-import io
+﻿import io
 import uuid
+import re
+import unicodedata
+from datetime import timedelta
 
 from cryptography.exceptions import InvalidTag
+from securedrive.frontend_redirects import redirect_to_frontend
 from django.contrib import messages
-from django.contrib.auth.decorators import login_required
 from django.core.files.base import ContentFile
+from django.db import transaction
 from django.http import FileResponse, Http404, JsonResponse
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
+from django.utils.http import content_disposition_header
 from django.views.decorators.http import require_POST
-from django.db.models import Q
 
+from accounts.access import (
+    active_tenant_ids,
+    active_tenant_required as login_required,
+    get_default_tenant,
+)
 from folders.models import Folder
 from sharing.services import (
     can_edit_destination_folder,
     can_edit_file,
     can_edit_folder,
+    can_view_file,
     get_receiver_share_for_file,
 )
 from security.hash_service import verify_sha256
@@ -30,10 +40,20 @@ from security.aes_service import (
 )
 
 from .forms import FileRenameForm, FileUploadForm
-from .models import File
-from .services import clone_encrypted_file, unique_copy_name, unique_upload_name
+from .models import File, UploadSession
+from .services import (
+    clone_encrypted_file_with_quota,
+    unique_copy_name,
+    unique_upload_name,
+)
 from logs.models import ActivityLog
 from logs.services import get_last_activity, log_action
+from .quota import (
+    QuotaExceeded,
+    QuotaStateError,
+    finalize_upload_quota,
+    reserve_upload_quota,
+)
 
 
 @login_required
@@ -101,10 +121,29 @@ def file_upload(request):
 
         drive_file = None
         stored_name = None
+        upload_session = None
+        quota_reserved = False
         try:
+            tenant = (
+                target_folder.tenant
+                if target_folder is not None
+                else get_default_tenant(request.user)
+            )
+            upload_session = UploadSession.objects.create(
+                tenant=tenant,
+                initiated_by=request.user,
+                target_folder=target_folder,
+                client_name=uploaded.name[:255],
+                expected_size_bytes=uploaded.size,
+                expires_at=timezone.now() + timedelta(hours=1),
+            )
+            reserve_upload_quota(upload_session.pk, request.user)
+            quota_reserved = True
+
             uploaded.seek(0)
             plaintext = uploaded.read()
             drive_file = File(
+                tenant=tenant,
                 owner=resource_owner,
                 folder=target_folder,
                 file_name=upload_name,
@@ -137,10 +176,43 @@ def file_upload(request):
             drive_file.save(update_fields=[
                 "file_path", "encryption_nonce", "wrapped_dek", "dek_nonce", "updated_at"
             ])
+            with transaction.atomic():
+                finalize_upload_quota(
+                    upload_session.pk,
+                    completed=True,
+                    actual_size_bytes=uploaded.size,
+                    actor=request.user,
+                )
+                upload_session.file = drive_file
+                upload_session.state = UploadSession.State.COMPLETED
+                upload_session.completed_at = timezone.now()
+                upload_session.save(
+                    update_fields=["file", "state", "completed_at", "updated_at"]
+                )
+            quota_reserved = False
 
             log_action(request.user, ActivityLog.Action.UPLOAD, f"Uploaded and encrypted {drive_file.file_name}", obj=drive_file)
             log_action(request.user, ActivityLog.Action.ENCRYPT, f"Encrypted {drive_file.file_name} with AES-256-GCM", obj=drive_file)
             uploaded_count += 1
+        except (QuotaExceeded, QuotaStateError):
+            failed_count += 1
+            if stored_name and drive_file is not None:
+                drive_file.file_path.storage.delete(stored_name)
+            if drive_file is not None:
+                drive_file.delete()
+            messages.error(
+                request,
+                f"{uploaded.name}: upload exceeds the available workspace quota or is not authorized.",
+            )
+            if upload_session is not None:
+                if quota_reserved:
+                    finalize_upload_quota(
+                        upload_session.pk,
+                        completed=False,
+                    )
+                upload_session.state = UploadSession.State.FAILED
+                upload_session.failure_code = "quota_or_access_denied"
+                upload_session.save(update_fields=["state", "failure_code", "updated_at"])
         except Exception:
             failed_count += 1
             if stored_name and drive_file is not None:
@@ -150,6 +222,16 @@ def file_upload(request):
                     pass
             if drive_file is not None:
                 drive_file.delete()
+            if upload_session is not None:
+                if quota_reserved:
+                    finalize_upload_quota(
+                        upload_session.pk,
+                        completed=False,
+                        actor=request.user,
+                    )
+                upload_session.state = UploadSession.State.FAILED
+                upload_session.failure_code = "upload_failed"
+                upload_session.save(update_fields=["state", "failure_code", "updated_at"])
             messages.error(request, f"{uploaded.name}: upload could not be completed.")
 
     if uploaded_count:
@@ -176,21 +258,85 @@ def _get_accessible_file(file_id, user):
     drive_file = get_object_or_404(File, id=file_id)
 
     is_owner = drive_file.owner_id == user.id
-    share = None
-
-    if is_owner:
-        if drive_file.deleted_at is not None:
-            raise Http404
-    else:
-        if drive_file.deleted_at is not None or (
-            drive_file.folder_id and drive_file.folder.deleted_at is not None
-        ):
-            raise Http404
-        share = get_receiver_share_for_file(drive_file, user)
-        if share is None:
-            raise Http404
+    share = None if is_owner else get_receiver_share_for_file(drive_file, user)
+    if not can_view_file(drive_file, user):
+        raise Http404
 
     return drive_file, is_owner, share
+
+
+def _download_block_reason(drive_file):
+    """Return a user-safe reason when the current file version is not releasable."""
+    versions = drive_file.versions.all()
+    if not versions.exists():
+        return None if drive_file.file_path else "File storage is unavailable. Contact support."
+
+    version = versions.filter(is_current=True).first()
+    if version is None:
+        return "This file is still being prepared. Try again later."
+    if version.state == "scanning":
+        return "This file is being security-scanned and cannot be downloaded yet."
+    if version.state == "quarantined":
+        return "This file was quarantined by a security check. Contact support if you think this is a mistake."
+    if version.state == "failed":
+        return "This file could not be prepared for download. Contact support."
+    if version.state != "available":
+        return "This file is still being prepared. Try again later."
+    if not drive_file.file_path:
+        from .models import StorageLocation
+        location = (
+            StorageLocation.objects.filter(
+                tenant_id=drive_file.tenant_id,
+                file_version=version,
+                state=StorageLocation.State.AVAILABLE,
+            )
+            .select_related("storage_config")
+            .order_by("-created_at")
+            .first()
+        )
+        if location is None:
+            return "The stored file is unavailable. Contact support."
+        if location.storage_config.status == "disabled":
+            return "This file's storage is temporarily unavailable. Retry later."
+    return None
+
+
+def _unavailable_download_response(request, reason, *, is_owner=True):
+    if "application/json" in request.headers.get("Accept", ""):
+        response = JsonResponse({"detail": reason}, status=409)
+        response["Cache-Control"] = "private, no-store"
+        response["Referrer-Policy"] = "no-referrer"
+        return response
+    messages.warning(request, reason)
+    return redirect("dashboard" if is_owner else "shared_with_me")
+
+
+def _download_failure_response(request, *, is_owner, status, reason):
+    if "application/json" in request.headers.get("Accept", ""):
+        response = JsonResponse({"detail": reason}, status=status)
+        response["Cache-Control"] = "private, no-store"
+        response["Referrer-Policy"] = "no-referrer"
+        return response
+    messages.error(request, reason)
+    return redirect("dashboard" if is_owner else "shared_with_me")
+
+
+def _safe_content_type(mime_type):
+    """Return only a simple, syntactically safe media type; otherwise force download."""
+    candidate = (mime_type or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", candidate):
+        return "application/octet-stream"
+    return candidate
+
+
+def _safe_download_filename(filename):
+    name = (filename or "download").replace("/", "_").replace("\\", "_")
+    name = "".join(
+        character
+        for character in name
+        if unicodedata.category(character) not in {"Cc", "Cf"}
+    ).strip()
+    return name[:255] or "download"
 
 
 def _decrypt_file(drive_file):
@@ -199,7 +345,6 @@ def _decrypt_file(drive_file):
         or not drive_file.encryption_nonce
         or not drive_file.wrapped_dek
         or not drive_file.dek_nonce
-        or not drive_file.file_path
     ):
         raise Http404
 
@@ -215,8 +360,23 @@ def _decrypt_file(drive_file):
             file_id=drive_file.id,
             version=drive_file.encryption_version,
         )
-        with drive_file.file_path.open("rb") as stored_file:
-            ciphertext = stored_file.read()
+        if drive_file.file_path:
+            with drive_file.file_path.open("rb") as stored_file:
+                ciphertext = stored_file.read()
+        else:
+            from .models import StorageLocation
+            from .storage_adapters import get_storage_adapter
+            location = StorageLocation.objects.filter(
+                tenant_id=drive_file.tenant_id,
+                file_version__file_id=drive_file.pk,
+                state=StorageLocation.State.AVAILABLE,
+                file_version__state="available",
+                file_version__is_current=True,
+            ).order_by("-created_at").first()
+            if location is None:
+                raise Http404
+            with get_storage_adapter().open_object(location.object_ref) as stored_file:
+                ciphertext = stored_file.read()
 
         plaintext = decrypt_bytes(
             ciphertext,
@@ -246,21 +406,38 @@ def file_view(request, file_id):
     Owners and shared recipients can view live files.
     Shared access also permits downloading through the download endpoint.
     """
-    is_owner = False
-    try:
-        drive_file, is_owner, _share = _get_accessible_file(
-            file_id,
-            request.user,
+    drive_file, is_owner, _share = _get_accessible_file(file_id, request.user)
+    block_reason = _download_block_reason(drive_file)
+    if block_reason:
+        return _unavailable_download_response(
+            request, block_reason, is_owner=is_owner
         )
+    mime_type = _safe_content_type(drive_file.mime_type)
+    if mime_type not in {
+        "image/jpeg", "image/png", "image/gif", "image/webp", "text/plain",
+    }:
+        return _unavailable_download_response(
+            request,
+            "Preview is not available for this file type. Download the file instead.",
+            is_owner=is_owner,
+        )
+    try:
         plaintext = _decrypt_file(drive_file)
     except InvalidTag:
-        messages.error(request, "File integrity verification failed.")
-        return redirect("shared_with_me" if not is_owner else "dashboard")
+        return _download_failure_response(
+            request, is_owner=is_owner, status=422,
+            reason="File integrity verification failed. Download was blocked.",
+        )
     except Http404:
-        raise
+        return _download_failure_response(
+            request, is_owner=is_owner, status=404,
+            reason="The stored file is unavailable. Contact support.",
+        )
     except Exception:
-        messages.error(request, "Unable to decrypt file.")
-        return redirect("shared_with_me" if not is_owner else "dashboard")
+        return _download_failure_response(
+            request, is_owner=is_owner, status=503,
+            reason="The file could not be prepared for preview. Retry later.",
+        )
 
     if is_owner:
         File.objects.filter(pk=drive_file.pk).update(
@@ -277,14 +454,17 @@ def file_view(request, file_id):
     response = FileResponse(
         io.BytesIO(plaintext),
         as_attachment=False,
-        filename=drive_file.file_name,
-        content_type=drive_file.mime_type or "application/octet-stream",
+        filename=_safe_download_filename(drive_file.file_name),
+        content_type=mime_type,
     )
     response["Content-Length"] = str(len(plaintext))
-    response["Content-Disposition"] = (
-        f'inline; filename="{drive_file.file_name.replace(chr(34), "")}"'
+    response["Content-Disposition"] = content_disposition_header(
+        False, _safe_download_filename(drive_file.file_name)
     )
     response["X-Content-Type-Options"] = "nosniff"
+    response["Cache-Control"] = "private, no-store"
+    response["Referrer-Policy"] = "no-referrer"
+    response["Content-Security-Policy"] = "sandbox"
     return response
 
 
@@ -351,20 +531,38 @@ def file_download(request, file_id):
         request.user,
     )
 
+    block_reason = _download_block_reason(drive_file)
+    if block_reason:
+        return _unavailable_download_response(
+            request, block_reason, is_owner=is_owner
+        )
+
     try:
         plaintext = _decrypt_file(drive_file)
     except InvalidTag:
-        messages.error(request, "File integrity verification failed.")
-        return redirect("shared_with_me" if not is_owner else "dashboard")
+        return _download_failure_response(
+            request, is_owner=is_owner, status=422,
+            reason="File integrity verification failed. Download was blocked.",
+        )
+    except Http404:
+        return _download_failure_response(
+            request, is_owner=is_owner, status=404,
+            reason="The stored file is unavailable. Contact support.",
+        )
     except Exception:
-        messages.error(request, "Unable to decrypt file.")
-        return redirect("shared_with_me" if not is_owner else "dashboard")
+        return _download_failure_response(
+            request, is_owner=is_owner, status=503,
+            reason="The file could not be prepared for download. Retry later.",
+        )
 
     response = FileResponse(
         io.BytesIO(plaintext),
         as_attachment=True,
-        filename=drive_file.file_name,
-        content_type=drive_file.mime_type or "application/octet-stream",
+        filename=_safe_download_filename(drive_file.file_name),
+        content_type="application/octet-stream",
+    )
+    response["Content-Disposition"] = content_disposition_header(
+        True, _safe_download_filename(drive_file.file_name)
     )
 
     if is_owner:
@@ -386,6 +584,8 @@ def file_download(request, file_id):
     )
     response["Content-Length"] = str(len(plaintext))
     response["X-Content-Type-Options"] = "nosniff"
+    response["Cache-Control"] = "private, no-store"
+    response["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -396,6 +596,7 @@ def file_move_to_trash(request, file_id):
         File,
         id=file_id,
         owner=request.user,
+        tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
     drive_file.deleted_at = timezone.now()
@@ -411,22 +612,7 @@ def file_move_to_trash(request, file_id):
 
 @login_required
 def trash(request):
-    files = File.objects.filter(
-        owner=request.user,
-        deleted_at__isnull=False,
-    ).filter(
-        Q(folder__isnull=True) | Q(folder__deleted_at__isnull=True)
-    ).order_by("-deleted_at")
-
-    folders = Folder.objects.filter(
-        owner=request.user,
-        deleted_at__isnull=False,
-    ).filter(
-        Q(parent__isnull=True) | Q(parent__deleted_at__isnull=True)
-    ).order_by("-deleted_at")
-
-    return render(request, "trash/index.html", {"files": files, "folders": folders})
-
+    return redirect_to_frontend("/drive/trash")
 
 @login_required
 @require_POST
@@ -435,6 +621,7 @@ def file_restore(request, file_id):
         File,
         id=file_id,
         owner=request.user,
+        tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=False,
     )
 
@@ -447,6 +634,7 @@ def file_restore(request, file_id):
 
     conflict = File.objects.filter(
         owner=request.user,
+        tenant=drive_file.tenant,
         folder=drive_file.folder,
         file_name__iexact=drive_file.file_name,
         deleted_at__isnull=True,
@@ -472,6 +660,7 @@ def file_delete_permanently(request, file_id):
         File,
         id=file_id,
         owner=request.user,
+        tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=False,
     )
     try:
@@ -503,8 +692,9 @@ def trash_bulk_action(request):
             if value > 0 and value not in target:
                 target.append(value)
 
-    files = list(File.objects.filter(owner=request.user, id__in=file_ids, deleted_at__isnull=False))
-    folders = list(Folder.objects.filter(owner=request.user, id__in=folder_ids, deleted_at__isnull=False))
+    tenant_ids = active_tenant_ids(request.user)
+    files = list(File.objects.filter(owner=request.user, tenant__in=tenant_ids, id__in=file_ids, deleted_at__isnull=False))
+    folders = list(Folder.objects.filter(owner=request.user, tenant__in=tenant_ids, id__in=folder_ids, deleted_at__isnull=False))
     if len(files) != len(file_ids) or len(folders) != len(folder_ids):
         messages.error(request, "One or more selected Trash items are no longer available.")
         return redirect("trash")
@@ -516,7 +706,7 @@ def trash_bulk_action(request):
         result = [root]
         index = 0
         while index < len(result):
-            result.extend(Folder.objects.filter(owner=request.user, parent=result[index], deleted_at__isnull=False))
+            result.extend(Folder.objects.filter(owner=request.user, tenant=result[index].tenant, parent=result[index], deleted_at__isnull=False))
             index += 1
         return result
 
@@ -528,26 +718,26 @@ def trash_bulk_action(request):
             tree = subtree(folder)
             ids = {item.id for item in tree}
             for item in tree:
-                if Folder.objects.filter(owner=request.user, parent=item.parent, folder_name__iexact=item.folder_name, deleted_at__isnull=True).exclude(id__in=ids).exists():
+                if Folder.objects.filter(owner=request.user, tenant=item.tenant, parent=item.parent, folder_name__iexact=item.folder_name, deleted_at__isnull=True).exclude(id__in=ids).exists():
                     messages.error(request, f'A folder named "{item.folder_name}" already exists at the destination.')
                     return redirect("trash")
-            for item in File.objects.filter(owner=request.user, folder_id__in=ids, deleted_at__isnull=False):
-                if File.objects.filter(owner=request.user, folder=item.folder, file_name__iexact=item.file_name, deleted_at__isnull=True).exists():
+            for item in File.objects.filter(owner=request.user, tenant=folder.tenant, folder_id__in=ids, deleted_at__isnull=False):
+                if File.objects.filter(owner=request.user, tenant=item.tenant, folder=item.folder, file_name__iexact=item.file_name, deleted_at__isnull=True).exists():
                     messages.error(request, f'A file named "{item.file_name}" already exists in the destination folder.')
                     return redirect("trash")
         for item in files:
             if item.folder_id and item.folder.deleted_at is not None:
                 messages.error(request, f'Restore the parent folder before restoring "{item.file_name}".')
                 return redirect("trash")
-            if File.objects.filter(owner=request.user, folder=item.folder, file_name__iexact=item.file_name, deleted_at__isnull=True).exists():
+            if File.objects.filter(owner=request.user, tenant=item.tenant, folder=item.folder, file_name__iexact=item.file_name, deleted_at__isnull=True).exists():
                 messages.error(request, f'A file named "{item.file_name}" already exists in the destination folder.')
                 return redirect("trash")
         with transaction.atomic():
             for folder in folders:
                 ids = [item.id for item in subtree(folder)]
-                Folder.objects.filter(owner=request.user, id__in=ids).update(deleted_at=None)
-                File.objects.filter(owner=request.user, folder_id__in=ids, deleted_at__isnull=False).update(deleted_at=None)
-            File.objects.filter(owner=request.user, id__in=file_ids).update(deleted_at=None)
+                Folder.objects.filter(owner=request.user, tenant=folder.tenant, id__in=ids).update(deleted_at=None)
+                File.objects.filter(owner=request.user, tenant=folder.tenant, folder_id__in=ids, deleted_at__isnull=False).update(deleted_at=None)
+            File.objects.filter(owner=request.user, tenant__in=tenant_ids, id__in=file_ids).update(deleted_at=None)
         log_action(request.user, ActivityLog.Action.RESTORE, f"Restored {len(files)} file(s) and {len(folders)} folder(s) from Trash")
         messages.success(request, "Selected items restored successfully.")
         return redirect("trash")
@@ -556,7 +746,7 @@ def trash_bulk_action(request):
         with transaction.atomic():
             for folder in folders:
                 ids = [item.id for item in subtree(folder)]
-                subtree_files = File.objects.filter(owner=request.user, folder_id__in=ids)
+                subtree_files = File.objects.filter(owner=request.user, tenant=folder.tenant, folder_id__in=ids)
                 for item in subtree_files:
                     if item.file_path:
                         try:
@@ -564,14 +754,14 @@ def trash_bulk_action(request):
                         except Exception:
                             pass
                 subtree_files.delete()
-                Folder.objects.filter(owner=request.user, id__in=ids).delete()
+                Folder.objects.filter(owner=request.user, tenant=folder.tenant, id__in=ids).delete()
             for item in files:
                 if item.file_path:
                     try:
                         item.file_path.delete(save=False)
                     except Exception:
                         pass
-            File.objects.filter(owner=request.user, id__in=file_ids).delete()
+            File.objects.filter(owner=request.user, tenant__in=tenant_ids, id__in=file_ids).delete()
         log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted {len(files)} file(s) and {len(folders)} folder(s) from Trash")
         messages.success(request, "Selected items permanently deleted.")
         return redirect("trash")
@@ -597,6 +787,7 @@ def file_rename(request, file_id):
         new_name = form.cleaned_data["file_name"]
         duplicate = File.objects.filter(
             owner=drive_file.owner,
+            tenant=drive_file.tenant,
             folder=drive_file.folder,
             file_name__iexact=new_name,
             deleted_at__isnull=True,
@@ -641,6 +832,7 @@ def file_move(request, file_id):
             Folder,
             id=folder_id,
             owner=drive_file.owner,
+            tenant=drive_file.tenant,
             deleted_at__isnull=True,
         )
 
@@ -655,6 +847,7 @@ def file_move(request, file_id):
 
     duplicate = File.objects.filter(
         owner=drive_file.owner,
+        tenant=drive_file.tenant,
         folder=destination,
         file_name__iexact=drive_file.file_name,
         deleted_at__isnull=True,
@@ -754,6 +947,9 @@ def file_paste(request):
         if destination is not None and destination.owner_id != source_file.owner_id:
             messages.error(request, "The destination is not part of the shared resource.")
             return redirect(request.META.get("HTTP_REFERER", "shared_with_me"))
+        if destination is not None and destination.tenant_id != source_file.tenant_id:
+            messages.error(request, "Files cannot be copied or moved across workspaces.")
+            return redirect(request.META.get("HTTP_REFERER", "dashboard"))
 
         same_folder = source_file.folder_id == (destination.id if destination else None)
         if clipboard_type == "file_cut" and same_folder:
@@ -785,13 +981,23 @@ def file_paste(request):
             log_action(request.user, ActivityLog.Action.MOVE, f"Moved file: {source_file.file_name}", obj=source_file)
             messages.success(request, f'"{source_file.file_name}" moved successfully.')
         else:
+            if source_file.owner_id != request.user.id:
+                messages.error(
+                    request,
+                    "Copying a shared file requires a workspace quota allocation for your account.",
+                )
+                return redirect(request.META.get("HTTP_REFERER", "shared_with_me"))
             try:
-                new_file = clone_encrypted_file(
+                new_file = clone_encrypted_file_with_quota(
                     source_file,
                     owner=source_file.owner,
                     folder=destination,
                     file_name=copy_name,
+                    tenant=source_file.tenant,
                 )
+            except (QuotaExceeded, QuotaStateError):
+                messages.error(request, "The workspace or member quota does not allow this file copy.")
+                return redirect(request.META.get("HTTP_REFERER", "dashboard"))
             except InvalidTag:
                 messages.error(request, "File integrity verification failed. Copy was cancelled.")
                 return redirect(request.META.get("HTTP_REFERER", "dashboard"))
@@ -811,4 +1017,3 @@ def file_paste(request):
     request.session.pop("clipboard", None)
     messages.error(request, "Invalid clipboard data.")
     return redirect("dashboard")
-

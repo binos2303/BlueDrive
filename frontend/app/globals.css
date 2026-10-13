@@ -4,6 +4,7 @@
   --brand-primary: #7288fa;
   --brand-primary-hover: #5f75e8;
   --brand-primary-soft: #eef1ff;
+  --brand-primary-contrast: #4e61c5;
 
   --brand-dark: #121523;
   --brand-deep: #04050c;
@@ -11,9 +12,18 @@
   --background: #f6f8fc;
   --surface: #ffffff;
   --border: #e4e8f0;
+  --border-strong: #c5cede;
 
   --foreground: #121523;
-  --muted: #71809a;
+  --muted: #65728a;
+  --success: #15803d;
+  --warning: #a16207;
+  --danger: #be123c;
+  --focus-ring: #536bdc;
+  --radius-control: 0.75rem;
+  --shadow-popover: 0 12px 32px rgb(18 21 35 / 12%);
+  --motion-fast: 140ms;
+  --motion-normal: 180ms;
 }
 
 @theme inline {
@@ -23,13 +33,18 @@
   --color-brand: var(--brand-primary);
   --color-brand-hover: var(--brand-primary-hover);
   --color-brand-soft: var(--brand-primary-soft);
+  --color-brand-contrast: var(--brand-primary-contrast);
 
   --color-brand-dark: var(--brand-dark);
   --color-brand-deep: var(--brand-deep);
 
   --color-surface: var(--surface);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-muted: var(--muted);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
 
   --font-sans: var(--font-poppins);
 }
@@ -78,10 +93,43 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
 a {
   text-decoration: none;
+}
+
+:where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  background: var(--brand-primary-soft);
+  color: var(--foreground);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid Highlight;
+  }
 }

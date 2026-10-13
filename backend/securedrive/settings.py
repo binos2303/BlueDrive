@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -20,6 +21,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _env_list(name: str) -> list[str]:
     raw = os.getenv(name, "").strip()
     return [v.strip() for v in raw.split(",") if v.strip()]
@@ -35,7 +43,6 @@ ALLOWED_HOSTS = _env_list("ALLOWED_HOSTS") or ["localhost", "127.0.0.1"]
 
 # --- Apps & middleware ---
 INSTALLED_APPS = [
-    "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -66,29 +73,46 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-CORS_ALLOWED_ORIGINS = [
+CORS_ALLOWED_ORIGINS = _env_list("CORS_ALLOWED_ORIGINS") or [
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
+CORS_ALLOW_CREDENTIALS = True
+CORS_EXPOSE_HEADERS = ["Content-Disposition"]
+CSRF_TRUSTED_ORIGINS = _env_list("CSRF_TRUSTED_ORIGINS") or [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+NEXTJS_FRONTEND_URL = os.getenv(
+    "NEXTJS_FRONTEND_URL",
+    "http://127.0.0.1:3000" if DEBUG else "",
+).rstrip("/")
+if NEXTJS_FRONTEND_URL:
+    frontend_url = urlsplit(NEXTJS_FRONTEND_URL)
+    if (
+        frontend_url.scheme not in {"http", "https"}
+        or not frontend_url.netloc
+        or frontend_url.path
+        or frontend_url.query
+        or frontend_url.fragment
+        or frontend_url.username
+        or frontend_url.password
+    ):
+        raise RuntimeError("NEXTJS_FRONTEND_URL must be an HTTP(S) origin.")
+    if not DEBUG and frontend_url.scheme != "https":
+        raise RuntimeError("NEXTJS_FRONTEND_URL must use HTTPS when DEBUG is false.")
 
 
 ROOT_URLCONF = "securedrive.urls"
 
-TEMPLATES = [
-    {
-        "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates"],
-        "APP_DIRS": True,
-        "OPTIONS": {
-            "context_processors": [
-                "django.template.context_processors.request",
-                "django.contrib.auth.context_processors.auth",
-                "django.contrib.messages.context_processors.messages",
-            ],
-        },
-    },
-]
-
 WSGI_APPLICATION = "securedrive.wsgi.application"
+
+REST_FRAMEWORK = {
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+    ],
+}
 
 # --- Database ---
 
@@ -124,13 +148,55 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+# S3-compatible adapter is opt-in. Existing FileField workflows remain on MEDIA_ROOT
+# until the ADR's multipart/session/finalization flow is integrated separately.
+SECUREDRIVE_STORAGE_ENDPOINT_URL = os.getenv("SECUREDRIVE_STORAGE_ENDPOINT_URL", "").strip()
+SECUREDRIVE_STORAGE_BUCKET = os.getenv("SECUREDRIVE_STORAGE_BUCKET", "").strip()
+SECUREDRIVE_STORAGE_REGION = os.getenv("SECUREDRIVE_STORAGE_REGION", "us-east-1").strip()
+SECUREDRIVE_STORAGE_ADDRESSING_STYLE = os.getenv(
+    "SECUREDRIVE_STORAGE_ADDRESSING_STYLE", "path"
+).strip()
+SECUREDRIVE_STORAGE_ACCESS_KEY_ID = os.getenv("SECUREDRIVE_STORAGE_ACCESS_KEY_ID", "").strip()
+SECUREDRIVE_STORAGE_SECRET_ACCESS_KEY = os.getenv("SECUREDRIVE_STORAGE_SECRET_ACCESS_KEY", "")
+SECUREDRIVE_STORAGE_TLS_VERIFY = os.getenv("SECUREDRIVE_STORAGE_TLS_VERIFY", "true").lower() in (
+    "true", "1", "yes"
+)
+SECUREDRIVE_STORAGE_CA_BUNDLE = os.getenv("SECUREDRIVE_STORAGE_CA_BUNDLE", "").strip()
+SECUREDRIVE_STORAGE_CONNECT_TIMEOUT = _env_float("SECUREDRIVE_STORAGE_CONNECT_TIMEOUT", 2.0)
+SECUREDRIVE_STORAGE_READ_TIMEOUT = _env_float("SECUREDRIVE_STORAGE_READ_TIMEOUT", 10.0)
+SECUREDRIVE_STORAGE_MAX_ATTEMPTS = _env_int("SECUREDRIVE_STORAGE_MAX_ATTEMPTS", 3)
+SECUREDRIVE_STORAGE_RETRY_BASE_SECONDS = _env_float(
+    "SECUREDRIVE_STORAGE_RETRY_BASE_SECONDS", 0.1
+)
+SECUREDRIVE_STORAGE_RETRY_MAX_SECONDS = _env_float(
+    "SECUREDRIVE_STORAGE_RETRY_MAX_SECONDS", 1.0
+)
+SECUREDRIVE_STORAGE_PRESIGN_MAX_SECONDS = _env_int(
+    "SECUREDRIVE_STORAGE_PRESIGN_MAX_SECONDS", 300
+)
+SECUREDRIVE_STORAGE_SSE = os.getenv("SECUREDRIVE_STORAGE_SSE", "").strip()
+SECUREDRIVE_STORAGE_KMS_KEY_ID = os.getenv("SECUREDRIVE_STORAGE_KMS_KEY_ID", "").strip()
+SECUREDRIVE_UPLOAD_SCANNER = os.getenv("SECUREDRIVE_UPLOAD_SCANNER", "").strip()
+if SECUREDRIVE_STORAGE_ENDPOINT_URL:
+    storage_endpoint = urlsplit(SECUREDRIVE_STORAGE_ENDPOINT_URL)
+    if storage_endpoint.scheme not in {"http", "https"} or not storage_endpoint.netloc:
+        raise RuntimeError("SECUREDRIVE_STORAGE_ENDPOINT_URL must be an HTTP(S) URL.")
+    if not DEBUG and storage_endpoint.scheme != "https":
+        raise RuntimeError("Object storage must use HTTPS when DEBUG is false.")
+    if not DEBUG and not SECUREDRIVE_STORAGE_TLS_VERIFY:
+        raise RuntimeError("Object storage TLS certificate verification cannot be disabled.")
+    if not DEBUG and SECUREDRIVE_STORAGE_SSE not in {"AES256", "aws:kms"}:
+        raise RuntimeError("Server-side encryption must be configured for deployed object storage.")
+    if not SECUREDRIVE_STORAGE_BUCKET:
+        raise RuntimeError("SECUREDRIVE_STORAGE_BUCKET is required when storage is configured.")
+
 # --- File upload limits (đồng bộ chunk 4 MB ở client) ---
 DATA_UPLOAD_MAX_MEMORY_SIZE = 110 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 110 * 1024 * 1024
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000
 
 # --- Security headers (HTTPS đứng trước) ---
-SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", False)
+SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", not DEBUG)
 SECURE_HSTS_SECONDS = _env_int("SECURE_HSTS_SECONDS", 31536000)
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
@@ -141,12 +207,27 @@ SECURE_REFERRER_POLICY = "same-origin"
 X_FRAME_OPTIONS = "DENY"
 
 # --- Cookies ---
-SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", False)
-CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", False)
+SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", not DEBUG)
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = "Lax"
-CSRF_COOKIE_SAMESITE = "Lax"
+
+
+def _same_site_cookie(name: str) -> str:
+    value = os.getenv(name, "Lax")
+    if value not in {"Strict", "Lax", "None"}:
+        raise RuntimeError(f"{name} must be Strict, Lax, or None")
+    return value
+
+
+SESSION_COOKIE_SAMESITE = _same_site_cookie("SESSION_COOKIE_SAMESITE")
+CSRF_COOKIE_SAMESITE = _same_site_cookie("CSRF_COOKIE_SAMESITE")
+if (SESSION_COOKIE_SAMESITE == "None" or CSRF_COOKIE_SAMESITE == "None") and not (
+    SESSION_COOKIE_SECURE and CSRF_COOKIE_SECURE
+):
+    raise RuntimeError("SameSite=None cookies require secure session and CSRF cookies")
+if not DEBUG and not (SESSION_COOKIE_SECURE and CSRF_COOKIE_SECURE):
+    raise RuntimeError("Secure session and CSRF cookies are required when DEBUG is false")
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 
 # --- Crypto env-vars ---

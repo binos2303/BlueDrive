@@ -1,14 +1,18 @@
-from django.contrib import messages
+﻿from django.contrib import messages
 from django.http import FileResponse, Http404
 import io
 import zipfile
-from django.contrib.auth.decorators import login_required
-from django.db.models import Q
-from django.shortcuts import get_object_or_404, redirect, render
+from accounts.access import (
+    active_tenant_ids,
+    active_tenant_required as login_required,
+)
+from django.shortcuts import get_object_or_404, redirect
 from django.views.decorators.http import require_POST
+from securedrive.frontend_redirects import redirect_to_frontend
 
 from files.models import File
 from folders.models import Folder
+from .services import get_receiver_share_for_file, get_receiver_share_for_folder
 from logs.models import ActivityLog
 from logs.services import log_action
 from security.aes_service import build_file_aad, decrypt_bytes, get_master_key, unwrap_dek
@@ -26,6 +30,7 @@ def share_file(request, file_id):
         File,
         id=file_id,
         owner=request.user,
+        tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
 
@@ -56,6 +61,7 @@ def share_file(request, file_id):
         file=drive_file,
         receiver=receiver,
         defaults={
+            "tenant": drive_file.tenant,
             "owner": request.user,
             "permission": permission,
         },
@@ -102,6 +108,7 @@ def share_folder(request, folder_id):
         Folder,
         id=folder_id,
         owner=request.user,
+        tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
 
@@ -132,6 +139,7 @@ def share_folder(request, folder_id):
         folder=folder,
         receiver=receiver,
         defaults={
+            "tenant": folder.tenant,
             "owner": request.user,
             "permission": permission,
         },
@@ -177,6 +185,7 @@ def change_share_permission(request, share_id):
         Share,
         id=share_id,
         owner=request.user,
+        tenant__in=active_tenant_ids(request.user),
     )
 
     permission = request.POST.get("permission", "").strip()
@@ -237,44 +246,17 @@ def change_share_permission(request, share_id):
 
 @login_required
 def shared_with_me(request):
-    """
-    Display resources shared with the user and resources shared by the user.
-
-    Share records are retained for audit/history, while soft-deleted targets
-    are shown as unavailable until the owner restores them or revokes access.
-    """
-    received_shares = (
-        Share.objects
-        .filter(receiver=request.user)
-        .select_related("owner", "receiver", "file__folder", "folder")
-        .order_by("-created_at")
-    )
-
-    sent_shares = (
-        Share.objects
-        .filter(owner=request.user)
-        .select_related("owner", "receiver", "file__folder", "folder")
-        .order_by("-created_at")
-    )
-
-    return render(
-        request,
-        "sharing/index.html",
-        {
-            "received_shares": received_shares,
-            "sent_shares": sent_shares,
-        },
-    )
-
+    return redirect_to_frontend("/drive/shared")
 
 @login_required
 @require_POST
 def revoke_share(request, share_id):
-    """Chỉ owner ban đầu mới có thể thu hồi quyền."""
+    """Chá»‰ owner ban Ä‘áº§u má»›i cĂ³ thá»ƒ thu há»“i quyá»n."""
     share = get_object_or_404(
         Share,
         id=share_id,
         owner=request.user,
+        tenant__in=active_tenant_ids(request.user),
     )
 
     receiver_name = share.receiver.username

@@ -8,6 +8,12 @@ from folders.models import Folder
 
 class Share(models.Model):
 
+    tenant = models.ForeignKey(
+        "accounts.Tenant",
+        on_delete=models.PROTECT,
+        related_name="shares",
+    )
+
     class Permission(models.TextChoices):
         VIEWER = "viewer", "Viewer"
         EDITOR = "editor", "Editor"
@@ -79,6 +85,20 @@ class Share(models.Model):
             models.UniqueConstraint(
                 fields=["folder", "receiver"],
                 name="unique_folder_receiver_share",
+            ),
+            models.UniqueConstraint(
+                fields=["tenant", "id"],
+                name="share_tenant_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "owner"],
+                name="share_tenant_owner_idx",
+            ),
+            models.Index(
+                fields=["tenant", "receiver"],
+                name="share_tenant_receiver_idx",
             ),
         ]
 

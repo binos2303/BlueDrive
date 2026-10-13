@@ -1,16 +1,24 @@
 "use client";
 
+import type { Ref } from "react";
 import {
     Clock3,
     HardDrive,
-    Plus,
     Share2,
     Star,
     Trash2,
+    X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { BrandLogo } from "@/components/ui/BrandLogo";
+import DriveNewMenu from "@/components/drive/DriveNewMenu";
+
+type SidebarProps = {
+    mobileOpen: boolean;
+    onNavigate: () => void;
+    navigationRef: Ref<HTMLElement>;
+};
 
 const navigationItems = [
     {
@@ -40,25 +48,33 @@ const navigationItems = [
     },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({
+    mobileOpen,
+    onNavigate,
+    navigationRef,
+}: SidebarProps) {
     const pathname = usePathname();
 
     return (
-        <aside className="flex h-screen w-[230px] shrink-0 flex-col border-r border-border bg-surface">
-            <div className="flex h-[72px] shrink-0 items-center px-4">
-                <Link href="/drive" className="flex min-w-0 items-center">
+        <aside ref={navigationRef} id="drive-navigation" className={`fixed inset-y-0 left-0 z-50 flex h-screen w-[230px] shrink-0 flex-col border-r border-border bg-surface transition-transform duration-[var(--motion-normal)] lg:static lg:z-auto lg:translate-x-0 ${
+            mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"
+        }`}>
+            <div className="flex h-[72px] shrink-0 items-center justify-between px-4">
+                <Link href="/drive" onClick={onNavigate} className="flex min-w-0 items-center">
                     <BrandLogo />
                 </Link>
+                <button
+                    type="button"
+                    aria-label="Close navigation"
+                    onClick={onNavigate}
+                    className="flex h-9 w-9 items-center justify-center rounded-lg text-muted transition-colors duration-[var(--motion-fast)] hover:bg-brand-soft hover:text-brand-contrast lg:hidden"
+                >
+                    <X size={18} />
+                </button>
             </div>
 
             <div className="px-3 pb-5">
-                <button
-                    type="button"
-                    className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-brand text-sm font-semibold text-white transition hover:bg-brand-hover"
-                >
-                    <Plus size={16} strokeWidth={2} />
-                    New
-                </button>
+                <DriveNewMenu />
             </div>
 
             <nav className="flex-1 px-2">
@@ -69,16 +85,18 @@ export default function Sidebar() {
                         const active =
                             item.href === "/drive"
                                 ? pathname === "/drive"
-                                : pathname.startsWith(item.href);
+                                : pathname === item.href || pathname.startsWith(`${item.href}/`);
 
                         return (
                             <Link
                                 key={item.href}
                                 href={item.href}
+                                onClick={onNavigate}
+                                aria-current={active ? "page" : undefined}
                                 className={[
-                                    "flex h-10 items-center gap-3 rounded-xl px-3 text-[14px] transition",
+                                    "flex h-10 items-center gap-3 rounded-xl px-3 text-[14px] transition-colors duration-[var(--motion-fast)]",
                                     active
-                                        ? "bg-brand-soft font-medium text-brand"
+                                        ? "bg-brand-soft font-semibold text-brand-contrast shadow-[inset_3px_0_0_var(--brand-primary-contrast)]"
                                         : "font-medium text-muted hover:bg-background hover:text-foreground",
                                 ].join(" ")}
                             >
@@ -97,13 +115,13 @@ export default function Sidebar() {
                     </span>
 
                     <span className="text-[12px] font-medium text-foreground">
-                        0 GB / 10 GB
+                        Not connected
                     </span>
                 </div>
 
-                <div className="h-[6px] overflow-hidden rounded-full bg-border">
-                    <div className="h-full w-0 rounded-full bg-brand" />
-                </div>
+                <p className="mt-2 text-[11px] text-muted">
+                    Usage details will appear when storage is connected.
+                </p>
             </div>
         </aside>
     );

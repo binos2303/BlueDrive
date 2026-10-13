@@ -1,80 +1,56 @@
 from django import forms
-from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
+from django.contrib.auth import logout, update_session_auth_hash
 from django.contrib.auth.forms import PasswordChangeForm
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
+from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
+from django.http import HttpResponseRedirect
 from django.shortcuts import render, redirect
+from django.views.decorators.http import require_POST
+from urllib.parse import urlencode, urlsplit
 
-from .forms import RegisterForm
 from logs.models import ActivityLog
 from logs.services import log_action
 
 
+def _next_auth_redirect(request, path):
+    frontend_url = settings.NEXTJS_FRONTEND_URL
+    if not frontend_url:
+        raise ImproperlyConfigured(
+            "NEXTJS_FRONTEND_URL must be configured for legacy auth routes."
+        )
+
+    query = {}
+    next_path = request.GET.get("next", "")
+    parsed_next = urlsplit(next_path)
+    if (
+        next_path.startswith("/")
+        and not next_path.startswith("//")
+        and not parsed_next.netloc
+        and not parsed_next.scheme
+        and "\\" not in next_path
+        and not any(ord(char) < 32 or ord(char) == 127 for char in next_path)
+        and not any(token in next_path.lower() for token in ("%2f", "%5c"))
+    ):
+        query["next"] = next_path
+
+    target = f"{frontend_url}{path}"
+    if query:
+        target = f"{target}?{urlencode(query)}"
+    return HttpResponseRedirect(target)
+
+
 def register_view(request):
-    if request.user.is_authenticated:
-        return redirect("dashboard")
-
-    if request.method == "POST":
-        form = RegisterForm(request.POST)
-
-        if form.is_valid():
-            user = form.save()
-
-            login(request, user)
-
-            messages.success(
-                request,
-                "Tạo tài khoản thành công."
-            )
-
-            return redirect("dashboard")
-
-    else:
-        form = RegisterForm()
-
-    return render(
-        request,
-        "accounts/register.html",
-        {"form": form}
-    )
+    return _next_auth_redirect(request, "/register")
 
 
 def login_view(request):
-    if request.user.is_authenticated:
-        return redirect("dashboard")
-
-    if request.method == "POST":
-        username = request.POST.get("username")
-        password = request.POST.get("password")
-
-        user = authenticate(
-            request,
-            username=username,
-            password=password
-        )
-
-        if user is not None:
-
-            login(request, user)
-            log_action(user, ActivityLog.Action.LOGIN, "Successful login")
-
-            if user.is_staff:
-                return redirect("admin:index")
-
-            return redirect("dashboard")
-
-        messages.error(
-            request,
-            "Username hoặc password không chính xác."
-        )
-
-    return render(
-        request,
-        "accounts/login.html"
-    )
+    return _next_auth_redirect(request, "/login")
 
 
 @login_required
+@require_POST
 def logout_view(request):
     user = request.user
     log_action(user, ActivityLog.Action.LOGOUT, "User logout")

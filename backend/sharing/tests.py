@@ -3,9 +3,10 @@ import os
 
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
+from accounts.models import Membership, Tenant
 from files.models import File
 from folders.models import Folder
 from security.aes_service import (
@@ -19,6 +20,7 @@ from security.aes_service import (
 from .models import Share
 
 
+@override_settings(NEXTJS_FRONTEND_URL="http://127.0.0.1:3000")
 class SharingAccessTests(TestCase):
     def setUp(self):
         os.environ["SECUREDRIVE_AES_KEY"] = base64.b64encode(
@@ -35,6 +37,7 @@ class SharingAccessTests(TestCase):
         )
 
         self.folder_a = Folder.objects.create(
+            tenant=self.user_a.personal_tenant,
             owner=self.user_a,
             folder_name="Shared Folder",
         )
@@ -57,6 +60,7 @@ class SharingAccessTests(TestCase):
         mime_type,
     ):
         drive_file = File.objects.create(
+            tenant=folder.tenant,
             owner=owner,
             folder=folder,
             file_name=name,
@@ -204,7 +208,7 @@ class SharingAccessTests(TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertTrue(Share.objects.filter(id=share.id).exists())
 
-    def test_search_includes_soft_deleted_items(self):
+    def test_search_redirects_to_nextjs_preserving_query(self):
         self.file_a.deleted_at = "2026-08-01T00:00:00Z"
         self.file_a.save(update_fields=["deleted_at"])
 
@@ -217,15 +221,21 @@ class SharingAccessTests(TestCase):
             reverse("search"),
             {"q": "secret"},
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "secret.txt")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            "http://127.0.0.1:3000/drive?q=secret",
+        )
 
         response = self.client.get(
             reverse("search"),
             {"q": "Shared Folder"},
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Shared Folder")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            "http://127.0.0.1:3000/drive?q=Shared+Folder",
+        )
 
     def test_other_user_cannot_open_private_folder_or_file(self):
         self.client.force_login(self.user_b)
@@ -235,12 +245,169 @@ class SharingAccessTests(TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
+    def test_suspended_business_member_cannot_access_owned_tenant_files(self):
+        business = Tenant.objects.create(
+            kind=Tenant.Kind.BUSINESS,
+            name="Suspended Workspace",
+        )
+        membership = Membership.objects.create(
+            tenant=business,
+            user=self.user_a,
+            role=Membership.Role.MEMBER,
+        )
+        folder = Folder.objects.create(
+            tenant=business,
+            owner=self.user_a,
+            folder_name="Business folder",
+        )
+        drive_file = File.objects.create(
+            tenant=business,
+            owner=self.user_a,
+            folder=folder,
+            file_name="business.txt",
+            file_size=0,
+            mime_type="text/plain",
+            is_encrypted=False,
+        )
+        membership.status = Membership.Status.SUSPENDED
+        membership.save(update_fields=["status", "updated_at"])
+
+        self.client.force_login(self.user_a)
+        response = self.client.get(reverse("file_details", args=[drive_file.id]))
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(
+            reverse("file_move_to_trash", args=[drive_file.id])
+        )
+        self.assertEqual(response.status_code, 404)
+        drive_file.refresh_from_db()
+        self.assertIsNone(drive_file.deleted_at)
+
+    def test_suspended_member_does_not_keep_access_through_an_existing_share(self):
+        Membership.objects.create(
+            tenant=self.user_a.personal_tenant,
+            user=self.user_b,
+            role=Membership.Role.MEMBER,
+            status=Membership.Status.SUSPENDED,
+        )
+        share = Share.objects.create(
+            tenant=self.user_a.personal_tenant,
+            file=self.file_a,
+            owner=self.user_a,
+            receiver=self.user_b,
+            permission=Share.Permission.VIEWER,
+        )
+
+        self.client.force_login(self.user_b)
+
+        response = self.client.get(reverse("file_details", args=[self.file_a.id]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Share.objects.filter(pk=share.pk).exists())
+
+    def test_active_member_of_another_business_tenant_cannot_access_resource_by_id(self):
+        owner_tenant = Tenant.objects.create(
+            kind=Tenant.Kind.BUSINESS,
+            name="Owner Workspace",
+        )
+        Membership.objects.create(
+            tenant=owner_tenant,
+            user=self.user_a,
+            role=Membership.Role.ADMIN,
+        )
+        other_tenant = Tenant.objects.create(
+            kind=Tenant.Kind.BUSINESS,
+            name="Other Workspace",
+        )
+        Membership.objects.create(
+            tenant=other_tenant,
+            user=self.user_b,
+            role=Membership.Role.MEMBER,
+        )
+        drive_file = File.objects.create(
+            tenant=owner_tenant,
+            owner=self.user_a,
+            file_name="tenant-private.txt",
+            file_size=0,
+            mime_type="text/plain",
+            is_encrypted=False,
+        )
+
+        self.client.force_login(self.user_b)
+
+        for route in ("file_details", "file_download", "file_view"):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route, args=[drive_file.id]))
+                self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(
+            reverse("file_rename", args=[drive_file.id]),
+            {"file_name": "renamed.txt"},
+        )
+        self.assertEqual(response.status_code, 302)
+        response = self.client.post(
+            reverse("file_move_to_trash", args=[drive_file.id])
+        )
+        self.assertEqual(response.status_code, 404)
+        response = self.client.post(
+            reverse("share_file", args=[drive_file.id]),
+            {"username": self.user_b.username},
+        )
+        self.assertEqual(response.status_code, 404)
+        drive_file.refresh_from_db()
+        self.assertEqual(drive_file.file_name, "tenant-private.txt")
+        self.assertIsNone(drive_file.deleted_at)
+        self.assertFalse(Share.objects.filter(file=drive_file).exists())
+
+    def test_platform_staff_does_not_bypass_file_permissions(self):
+        platform_admin = User.objects.create_user(
+            username="platform_admin",
+            is_staff=True,
+        )
+        self.client.force_login(platform_admin)
+
+        response = self.client.get(reverse("file_view", args=[self.file_a.id]))
+
+        self.assertEqual(response.status_code, 404)
+
         response = self.client.get(
             reverse("file_view", args=[self.file_a.id])
         )
         self.assertEqual(response.status_code, 404)
 
+        response = self.client.get(
+            reverse("file_download", args=[self.file_a.id])
+        )
+        self.assertEqual(response.status_code, 404)
 
+        response = self.client.get(
+            reverse("file_details", args=[self.file_a.id])
+        )
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(
+            reverse("file_rename", args=[self.file_a.id]),
+            {"file_name": "unauthorized.txt"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.file_a.refresh_from_db()
+        self.assertEqual(self.file_a.file_name, "secret.txt")
+
+        response = self.client.post(
+            reverse("file_move_to_trash", args=[self.file_a.id])
+        )
+        self.assertEqual(response.status_code, 404)
+        self.file_a.refresh_from_db()
+        self.assertIsNone(self.file_a.deleted_at)
+
+        response = self.client.post(
+            reverse("share_file", args=[self.file_a.id]),
+            {"username": self.user_b.username},
+        )
+        self.assertEqual(response.status_code, 404)
+
+
+@override_settings(NEXTJS_FRONTEND_URL="http://127.0.0.1:3000")
 class SharingFolderTests(TestCase):
     def setUp(self):
         self.user_a = User.objects.create_user(
@@ -252,10 +419,12 @@ class SharingFolderTests(TestCase):
             password="TestPass123!",
         )
         self.folder = Folder.objects.create(
+            tenant=self.user_a.personal_tenant,
             owner=self.user_a,
             folder_name="Project",
         )
         self.child = Folder.objects.create(
+            tenant=self.folder.tenant,
             owner=self.user_a,
             folder_name="Documents",
             parent=self.folder,
@@ -303,6 +472,7 @@ class SharingFolderTests(TestCase):
         self.child.save(update_fields=["deleted_at"])
 
         deleted_child = Folder.objects.create(
+            tenant=self.folder.tenant,
             owner=self.user_a,
             folder_name="Deleted child",
             parent=self.folder,
@@ -310,12 +480,14 @@ class SharingFolderTests(TestCase):
         )
 
         File.objects.create(
+            tenant=self.folder.tenant,
             owner=self.user_a,
             folder=self.folder,
             file_name="active.txt",
         )
 
         File.objects.create(
+            tenant=self.folder.tenant,
             owner=self.user_a,
             folder=deleted_child,
             file_name="deleted.txt",
@@ -395,10 +567,15 @@ class SharingFolderTests(TestCase):
         response = self.client.get(
             reverse("folder_open", args=[self.child.id])
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            f"http://127.0.0.1:3000/drive?folder={self.child.id}",
+        )
 
     def test_shared_child_file_details_exposes_shared_location_only(self):
         child_file = File.objects.create(
+            tenant=self.folder.tenant,
             owner=self.user_a,
             folder=self.child,
             file_name="child.txt",
@@ -423,12 +600,14 @@ class SharingFolderTests(TestCase):
     def test_deleted_shared_file_becomes_unavailable(self):
         # Reuse the file fixture from SharingAccessTests semantics with a simple DB object.
         file_obj = File.objects.create(
+            tenant=self.folder.tenant,
             owner=self.user_a,
             folder=self.folder,
             file_name="deleted.txt",
             deleted_at="2026-08-01T00:00:00Z",
         )
         Share.objects.create(
+            tenant=self.folder.tenant,
             owner=self.user_a,
             receiver=self.user_b,
             file=file_obj,
@@ -479,10 +658,12 @@ class AuthorizationIDORTests(TestCase):
             password="TestPass123!",
         )
         self.folder_a = Folder.objects.create(
+            tenant=self.user_a.personal_tenant,
             owner=self.user_a,
             folder_name="Private",
         )
         self.file_a = File.objects.create(
+            tenant=self.folder_a.tenant,
             owner=self.user_a,
             folder=self.folder_a,
             file_name="secret.txt",

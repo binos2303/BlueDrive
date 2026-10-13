@@ -1,8 +1,13 @@
 from django.urls import path
 
-from . import views
+from . import views, upload_api
 
 urlpatterns = [
+    path("files/api/uploads/", upload_api.create_upload, name="api-upload-create"),
+    path("files/api/uploads/<uuid:upload_id>/", upload_api.upload_status, name="api-upload-status"),
+    path("files/api/uploads/<uuid:upload_id>/parts/<int:part_number>/authorization/", upload_api.authorize_part, name="api-upload-part-authorization"),
+    path("files/api/uploads/<uuid:upload_id>/complete/", upload_api.complete_upload, name="api-upload-complete"),
+    path("files/api/uploads/<uuid:upload_id>/abort/", upload_api.abort_upload, name="api-upload-abort"),
     path("drive/upload/", views.file_upload, name="file_upload"),
     path("drive/files/<int:file_id>/view/", views.file_view, name="file_view"),
     path("drive/files/<int:file_id>/details/", views.file_details, name="file_details"),

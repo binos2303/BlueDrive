@@ -2,6 +2,7 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path("drive/api/items/", views.drive_items_api, name="drive_items_api"),
     path("", views.dashboard, name="dashboard"),
     path(
         "recent/",

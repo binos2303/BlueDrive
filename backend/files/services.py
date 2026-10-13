@@ -1,7 +1,16 @@
 import uuid
+from datetime import timedelta
 
 from django.core.files.base import ContentFile
+from django.db import transaction
+from django.utils import timezone
 
+from accounts.services import get_personal_tenant
+from .models import File, UploadSession
+from .quota import (
+    finalize_upload_quota,
+    reserve_upload_quota,
+)
 from security.aes_service import (
     build_file_aad,
     decrypt_bytes,
@@ -12,7 +21,6 @@ from security.aes_service import (
     wrap_dek,
 )
 
-from .models import File
 
 
 def unique_copy_name(model, field_name, original_name, *, folder=None, owner=None, exclude_id=None):
@@ -51,7 +59,7 @@ def unique_copy_name(model, field_name, original_name, *, folder=None, owner=Non
     return candidate
 
 
-def clone_encrypted_file(source_file, *, owner, folder, file_name):
+def _clone_encrypted_file(source_file, *, owner, folder, file_name, tenant=None):
     """Clone a SecureDrive file with a fresh file ID, DEK and nonce."""
     if (
         not source_file.is_encrypted
@@ -85,6 +93,11 @@ def clone_encrypted_file(source_file, *, owner, folder, file_name):
     )
 
     cloned = File(
+        tenant=(
+            folder.tenant
+            if folder is not None
+            else tenant or get_personal_tenant(owner)
+        ),
         owner=owner,
         folder=folder,
         file_name=file_name,
@@ -139,6 +152,71 @@ def clone_encrypted_file(source_file, *, owner, folder, file_name):
         raise
 
 
+def clone_encrypted_file_with_quota(
+    source_file,
+    *,
+    owner,
+    folder,
+    file_name,
+    tenant,
+):
+    """Copy a file while reserving and consuming the target tenant quota."""
+    if owner.pk != source_file.owner_id:
+        raise ValueError("A file copy must retain its current owner.")
+    if tenant.pk != source_file.tenant_id:
+        raise ValueError("A file copy cannot cross tenant boundaries.")
+    if folder is not None and folder.tenant_id != tenant.pk:
+        raise ValueError("The destination folder belongs to another tenant.")
+
+    upload = UploadSession.objects.create(
+        tenant=tenant,
+        initiated_by=owner,
+        target_folder=folder,
+        client_name=file_name[:255],
+        expected_size_bytes=source_file.file_size,
+        expires_at=timezone.now() + timedelta(hours=1),
+    )
+    reserved = False
+    cloned = None
+    try:
+        reserve_upload_quota(upload.pk, owner)
+        reserved = True
+        upload.state = UploadSession.State.UPLOADING
+        upload.save(update_fields=["state", "updated_at"])
+        cloned = _clone_encrypted_file(
+            source_file,
+            owner=owner,
+            folder=folder,
+            file_name=file_name,
+            tenant=tenant,
+        )
+        with transaction.atomic():
+            finalize_upload_quota(
+                upload.pk,
+                completed=True,
+                actual_size_bytes=cloned.file_size,
+                actor=owner,
+            )
+            upload.file = cloned
+            upload.state = UploadSession.State.COMPLETED
+            upload.completed_at = timezone.now()
+            upload.save(
+                update_fields=["file", "state", "completed_at", "updated_at"]
+            )
+        return cloned
+    except Exception:
+        if cloned is not None:
+            if cloned.file_path:
+                cloned.file_path.delete(save=False)
+            cloned.delete()
+        if reserved:
+            finalize_upload_quota(upload.pk, completed=False)
+        upload.state = UploadSession.State.FAILED
+        upload.failure_code = "copy_failed"
+        upload.save(update_fields=["state", "failure_code", "updated_at"])
+        raise
+
+
 def unique_upload_name(model, field_name, original_name, *, folder=None, owner=None):
     """Return a collision-free upload name using (1), (2), ... suffixes."""
     from pathlib import PurePath
@@ -150,7 +228,8 @@ def unique_upload_name(model, field_name, original_name, *, folder=None, owner=N
     number = 1
 
     while True:
-        filters = {field_name: candidate, "deleted_at__isnull": True}
+        # Match File's case-insensitive live sibling-name constraint.
+        filters = {f"{field_name}__iexact": candidate, "deleted_at__isnull": True}
         if owner is not None:
             filters["owner"] = owner
         if folder is not None:

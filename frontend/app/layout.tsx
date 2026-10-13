@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 
 import { Poppins } from "next/font/google";
 import "./globals.css";
+import UploadManager from "@/components/drive/UploadManager";
+import AccountProvider from "@/components/account/AccountProvider";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -28,7 +30,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={poppins.variable}>
       <body className="min-h-screen bg-background font-sans text-foreground antialiased">
-        {children}
+        <AccountProvider>
+          <UploadManager>{children}</UploadManager>
+        </AccountProvider>
       </body>
     </html>
   );

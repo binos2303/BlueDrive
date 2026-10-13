@@ -1,6 +1,6 @@
 # SecureDrive
 
-SecureDrive is a Django-based centralized web file-management application for a university thesis project.
+SecureDrive uses a Next.js frontend and Django backend for centralized file management. Next.js is the only user-facing UI; Django provides API and file-operation endpoints and redirects legacy page URLs to the configured Next.js origin.
 
 ## Core requirements
 
@@ -16,17 +16,15 @@ SecureDrive is a Django-based centralized web file-management application for a 
 
 ## Storage architecture
 
-The database stores metadata and encryption metadata. The encrypted file content is stored under Django `MEDIA_ROOT` on the server. The original plaintext file is not persisted as a normal server file.
+The database stores metadata and encryption metadata. Legacy form uploads still store encrypted content under Django `MEDIA_ROOT`. The browser multipart API stores incoming bytes in a private S3-compatible quarantine object, then a durable Django management-command worker validates and AES-GCM encrypts them before publishing final metadata. Downloads remain Django-mediated and read either legacy local content or final object-store ciphertext.
 
 ```text
-Browser
-   |
-   v
-Django application
-   |--------------------> MySQL (metadata, wrapped DEK, nonce, hash)
-   |
-   `--------------------> MEDIA_ROOT/uploads/*.enc (ciphertext)
+Browser -- signed multipart parts --> private MinIO quarantine
+   |                                      |
+   `--> Django API (auth/quota/state)      `--> scheduled finalizer --> AES-GCM final object
 ```
+
+See [the MinIO adapter guide](../docs/MINIO_STORAGE_ADAPTER.md) for local setup, integration tests, and deployment configuration.
 
 ## Encryption model
 
@@ -75,3 +73,10 @@ python manage.py runserver
 - Never expose the master encryption key in source code.
 - For production, use HTTPS and enable secure cookies/HSTS only when the deployment is actually behind HTTPS.
 - The current implementation reads a complete file into memory during encryption/decryption. This is acceptable for the thesis scope and 100 MB upload limit, but a production-scale implementation should use chunked/streaming encryption.
+# Direct multipart upload
+
+Set `SECUREDRIVE_STORAGE_ENDPOINT_URL`, bucket and service-account credentials in the backend environment. Keep the bucket private. Allow only the frontend origin in bucket CORS for `PUT`, allow the signed request headers, and expose `ETag`; presigned URLs are short-lived bearer credentials. Production endpoints must use TLS and the service identity must be limited to the configured bucket and multipart/object operations.
+
+Run `python manage.py finalize_uploads` repeatedly (for example, every minute) to verify downloaded quarantine bytes, run the optional configured scanner, encrypt using the existing AES-GCM service, publish the final private object, and commit quota. Run `python manage.py cleanup_uploads` regularly to abort expired multipart uploads and release reservations. Both commands are safe to re-run; monitor their summarized output and Django command exit status.
+
+To enable the optional scanner, set `SECUREDRIVE_UPLOAD_SCANNER` to a trusted Python import path for a callable accepting `(plaintext_bytes, filename)` and returning exactly `True` only for a clean result. With the setting empty, SCANNING is skipped and the app does not claim a clean scan. This integration point is not itself an antivirus engine.

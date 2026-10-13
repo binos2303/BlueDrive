@@ -16,6 +16,7 @@ def log_action(user, action, description="", *, obj=None):
     if obj is not None:
         kwargs["content_type"] = ContentType.objects.get_for_model(obj, for_concrete_model=False)
         kwargs["object_id"] = obj.pk
+        kwargs["tenant_id"] = getattr(obj, "tenant_id", None)
 
     return ActivityLog.objects.create(**kwargs)
 

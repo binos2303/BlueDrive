@@ -10,3 +10,4 @@ staticfiles/
 .vscode/
 .env.*
 !.env.example
+minio.local.env

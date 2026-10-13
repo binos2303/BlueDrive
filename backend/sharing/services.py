@@ -1,4 +1,19 @@
 from .models import Share
+from accounts.access import active_membership, has_active_membership
+from accounts.models import Membership, Tenant
+
+
+def _resource_tenant_is_active(resource):
+    return resource.tenant.status == Tenant.Status.ACTIVE
+
+
+def _receiver_membership_allows(resource, user):
+    if active_membership(user, resource.tenant_id) is not None:
+        return True
+    return not Membership.objects.filter(
+        user_id=getattr(user, "pk", None),
+        tenant_id=resource.tenant_id,
+    ).exists()
 
 
 def get_folder_ancestor_ids(folder):
@@ -34,6 +49,12 @@ def get_receiver_share_for_folder(folder, user):
     """
     if folder is None or _folder_has_deleted_ancestor(folder):
         return None
+    if (
+        not _resource_tenant_is_active(folder)
+        or not has_active_membership(user)
+        or not _receiver_membership_allows(folder, user)
+    ):
+        return None
 
     folder_ids = get_folder_ancestor_ids(folder)
 
@@ -42,6 +63,7 @@ def get_receiver_share_for_folder(folder, user):
         .filter(
             receiver=user,
             owner_id=folder.owner_id,
+            tenant_id=folder.tenant_id,
             folder_id__in=folder_ids,
         )
         .select_related(
@@ -76,6 +98,12 @@ def get_receiver_share_for_file(drive_file, user):
 
     if drive_file.deleted_at is not None:
         return None
+    if (
+        not _resource_tenant_is_active(drive_file)
+        or not has_active_membership(user)
+        or not _receiver_membership_allows(drive_file, user)
+    ):
+        return None
 
     if drive_file.folder is None:
         direct_share = (
@@ -83,6 +111,7 @@ def get_receiver_share_for_file(drive_file, user):
             .filter(
                 receiver=user,
                 owner_id=drive_file.owner_id,
+                tenant_id=drive_file.tenant_id,
                 file=drive_file,
             )
             .select_related(
@@ -102,6 +131,7 @@ def get_receiver_share_for_file(drive_file, user):
         .filter(
             receiver=user,
             owner_id=drive_file.owner_id,
+            tenant_id=drive_file.tenant_id,
             file=drive_file,
         )
         .select_related(
@@ -124,7 +154,11 @@ def get_receiver_share_for_file(drive_file, user):
 def can_view_file(drive_file, user):
     """Return True when the user can view the file."""
     if drive_file.owner_id == user.id:
-        return drive_file.deleted_at is None
+        return (
+            drive_file.deleted_at is None
+            and _resource_tenant_is_active(drive_file)
+            and active_membership(user, drive_file.tenant_id) is not None
+        )
 
     return get_receiver_share_for_file(
         drive_file,
@@ -146,7 +180,11 @@ def can_edit_file(drive_file, user):
         Read/download only.
     """
     if drive_file.owner_id == user.id:
-        return drive_file.deleted_at is None
+        return (
+            drive_file.deleted_at is None
+            and _resource_tenant_is_active(drive_file)
+            and active_membership(user, drive_file.tenant_id) is not None
+        )
 
     share = get_receiver_share_for_file(
         drive_file,
@@ -162,7 +200,11 @@ def can_edit_file(drive_file, user):
 def can_view_folder(folder, user):
     """Return True when the user can open/view the folder."""
     if folder.owner_id == user.id:
-        return folder.deleted_at is None
+        return (
+            folder.deleted_at is None
+            and _resource_tenant_is_active(folder)
+            and active_membership(user, folder.tenant_id) is not None
+        )
 
     return get_receiver_share_for_folder(
         folder,
@@ -184,7 +226,11 @@ def can_edit_folder(folder, user):
         Read-only.
     """
     if folder.owner_id == user.id:
-        return folder.deleted_at is None
+        return (
+            folder.deleted_at is None
+            and _resource_tenant_is_active(folder)
+            and active_membership(user, folder.tenant_id) is not None
+        )
 
     share = get_receiver_share_for_folder(
         folder,
@@ -235,7 +281,11 @@ def can_edit_folder_tree(folder, user):
         return False
 
     if folder.owner_id == user.id:
-        return not _folder_has_deleted_ancestor(folder)
+        return (
+            not _folder_has_deleted_ancestor(folder)
+            and _resource_tenant_is_active(folder)
+            and active_membership(user, folder.tenant_id) is not None
+        )
 
     if _folder_has_deleted_ancestor(folder):
         return False
@@ -313,6 +363,11 @@ def can_edit_destination_folder(
         return False
 
     if folder.owner_id == user.id:
+        if (
+            not _resource_tenant_is_active(folder)
+            or active_membership(user, folder.tenant_id) is None
+        ):
+            return False
         if shared_root is not None:
             return is_descendant_or_same(folder, shared_root)
         return True

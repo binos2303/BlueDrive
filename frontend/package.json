@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:upload-manager": "node --experimental-strip-types --test components/drive/upload-manager-model.test.mts",
+    "test:auth": "node --experimental-strip-types --test lib/auth-redirect.test.mts"
   },
   "dependencies": {
     "lucide-react": "^1.52.0",

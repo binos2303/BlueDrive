@@ -8,6 +8,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
+from accounts.services import get_personal_tenant
 from files.models import File
 from folders.models import Folder
 from security.aes_service import (
@@ -76,6 +77,7 @@ class Command(BaseCommand):
 
         for user_index, (user, created) in enumerate(created_users, start=1):
             now = timezone.now()
+            tenant = get_personal_tenant(user)
 
             with transaction.atomic():
                 folder_count = max(6, min(50, file_count // 8))
@@ -83,6 +85,7 @@ class Command(BaseCommand):
 
                 for folder_index in range(folder_count):
                     root = Folder.objects.create(
+                        tenant=tenant,
                         owner=user,
                         folder_name=f"{DEMO_PREFIX} User {user_index:02d} Folder {folder_index + 1:02d}",
                         last_accessed_at=now - timedelta(
@@ -97,6 +100,7 @@ class Command(BaseCommand):
                 ):
                     nested.append(
                         Folder.objects.create(
+                            tenant=tenant,
                             owner=user,
                             folder_name=f"{DEMO_PREFIX} User {user_index:02d} Subfolder {folder_index + 1:02d}",
                             parent=root,
@@ -134,6 +138,7 @@ class Command(BaseCommand):
                     ).encode("utf-8")
 
                     drive_file = File.objects.create(
+                        tenant=tenant,
                         owner=user,
                         folder=folder,
                         file_name=name,
