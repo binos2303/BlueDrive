@@ -13,6 +13,10 @@ from files.quota import finalize_upload_quota
 from files.storage_adapters import get_storage_adapter
 from files.storage_adapters.base import MultipartPart, StorageIntegrityError, StorageRetryableError
 from files.validators import MAX_UPLOAD_SIZE
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 PART_SIZE = 8 * 1024 * 1024
 
@@ -54,6 +58,7 @@ class Command(BaseCommand):
                         expected_size=upload.expected_size_bytes,
                         expected_part_size=PART_SIZE,
                         expected_part_count=(upload.expected_size_bytes + PART_SIZE - 1) // PART_SIZE,
+                        expected_upload_session_id=str(upload.pk),
                     )
                     if stat.metadata.get("securedrive-upload-id") != str(upload.pk):
                         raise StorageIntegrityError("Completed object metadata failed verification.")
@@ -69,7 +74,9 @@ class Command(BaseCommand):
                     plaintext = source.read(MAX_UPLOAD_SIZE + 1)
                 finally:
                     source.close()
-                if len(plaintext) != upload.actual_size_bytes or len(plaintext) > MAX_UPLOAD_SIZE:
+                # actual_size_bytes is populated only after this validation. Compare
+                # the downloaded quarantine object with the server-owned expected size.
+                if len(plaintext) != upload.expected_size_bytes or len(plaintext) > MAX_UPLOAD_SIZE:
                     raise ValueError("Verified object size changed before finalization.")
                 digest = hashlib.sha256(plaintext).hexdigest()
                 if upload.expected_sha256 and digest != upload.expected_sha256:
@@ -85,6 +92,15 @@ class Command(BaseCommand):
                 UploadFinalizationJob.objects.filter(pk=job.pk).update(state=UploadFinalizationJob.State.DONE)
                 done += 1
             except Exception as error:
+                logger.exception(
+                    "Upload finalization failed: upload_id=%s, job_id=%s, "
+                    "attempt=%s, error_type=%s, error=%s",
+                    upload.pk,
+                    job.pk,
+                    job.attempts,
+                    type(error).__name__,
+                    error,
+                )
                 # A live-name uniqueness race is resolved on a bounded retry;
                 # the next transaction observes the winner and picks (2), (3), … .
                 transient = isinstance(error, (StorageRetryableError, IntegrityError))

@@ -265,6 +265,7 @@ class S3CompatibleStorageAdapter:
         expected_size: int,
         expected_part_size: int | None = None,
         expected_part_count: int | None = None,
+        expected_upload_session_id: str | None = None,
     ) -> ObjectStat:
         self._validate_object_key(object_key)
         if not upload_id or expected_size < 0:
@@ -275,11 +276,15 @@ class S3CompatibleStorageAdapter:
         try:
             provider_parts = self._list_all_parts(object_key, upload_id)
         except StorageNotFoundError:
-            return self._verify_completed_upload(object_key, upload_id, expected_size)
+            return self._verify_completed_upload(
+                object_key, expected_size, expected_upload_session_id
+            )
         except StorageNonRetryableError as error:
             if getattr(error, "provider_code", "") not in _MISSING_UPLOAD_CODES:
                 raise
-            return self._verify_completed_upload(object_key, upload_id, expected_size)
+            return self._verify_completed_upload(
+                object_key, expected_size, expected_upload_session_id
+            )
         if [(p.part_number, p.etag) for p in normalized] != [
             (p.part_number, p.etag) for p in provider_parts
         ]:
@@ -318,7 +323,9 @@ class S3CompatibleStorageAdapter:
         except (StorageRetryableError, StorageNotFoundError) as completion_error:
             # Complete may have succeeded while its response was lost. HEAD resolves that ambiguity.
             try:
-                return self._verify_completed_upload(object_key, upload_id, expected_size)
+                return self._verify_completed_upload(
+                    object_key, expected_size, expected_upload_session_id
+                )
             except StorageNotFoundError:
                 raise completion_error
             except StorageError:
@@ -326,8 +333,12 @@ class S3CompatibleStorageAdapter:
         except StorageNonRetryableError as error:
             if getattr(error, "provider_code", "") not in _MISSING_UPLOAD_CODES:
                 raise
-            return self._verify_completed_upload(object_key, upload_id, expected_size)
-        return self._verify_completed_upload(object_key, upload_id, expected_size)
+            return self._verify_completed_upload(
+                object_key, expected_size, expected_upload_session_id
+            )
+        return self._verify_completed_upload(
+            object_key, expected_size, expected_upload_session_id
+        )
 
     def abort_multipart(self, object_key: str, upload_id: str) -> None:
         self._validate_object_key(object_key)
@@ -547,11 +558,19 @@ class S3CompatibleStorageAdapter:
         return normalized
 
     def _verify_completed_upload(
-        self, object_key: str, upload_id: str, expected_size: int
+        self,
+        object_key: str,
+        expected_size: int,
+        expected_upload_session_id: str | None = None,
     ) -> ObjectStat:
+        # Validate the SecureDrive session UUID stored in object metadata. This is
+        # not the independent S3 Multipart UploadId used to complete the upload.
         stat = self.stat_object(object_key)
-        if stat.metadata.get("securedrive-upload-id") != str(upload_id):
-            raise StorageIntegrityError("Object does not belong to the requested multipart upload.")
+        if (
+            expected_upload_session_id is not None
+            and stat.metadata.get("securedrive-upload-id") != str(expected_upload_session_id)
+        ):
+            raise StorageIntegrityError("Completed object does not match the SecureDrive upload session.")
         if stat.size_bytes != expected_size:
             raise StorageIntegrityError("Completed object size does not match the expected size.")
         return stat

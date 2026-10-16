@@ -10,9 +10,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { CheckCircle2, CircleAlert, Pause, Play, RotateCcw, Upload, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, LoaderCircle, Pause, Play, RotateCcw, Upload, X } from "lucide-react";
 import Button from "@/components/ui/Button";
-import Dialog from "@/components/ui/Dialog";
 import Toast from "@/components/ui/Toast";
 import {
   createUploadTask,
@@ -30,6 +29,8 @@ import {
   type UploadProgressReport,
   type UploadService,
 } from "./upload-service";
+
+export const DRIVE_UPLOAD_COMPLETED_EVENT = "securedrive:upload-completed";
 
 export type UploadFileInput = {
   file: File;
@@ -50,6 +51,7 @@ type UploadManagerValue = {
 const UploadManagerContext = createContext<UploadManagerValue | null>(null);
 
 const MAX_RETRIES = 3;
+const MAX_CONCURRENT_UPLOADS = 3;
 const ACTIVE_STATUSES: UploadStatus[] = [
   "queued", "preparing", "uploading", "paused", "verifying", "scanning",
 ];
@@ -107,7 +109,9 @@ export default function UploadManager({
 }) {
   const [tasks, setTasks] = useState<UploadTask[]>([]);
   const [open, setOpen] = useState(false);
+  const [visible, setVisible] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
+  const dismissedTaskIdsRef = useRef(new Set<string>());
   const tasksRef = useRef(tasks);
   const filesRef = useRef(new Map<string, File>());
   const controllersRef = useRef(new Map<string, AbortController>());
@@ -137,7 +141,9 @@ export default function UploadManager({
         validationError,
       });
     });
+    incoming.forEach((task) => dismissedTaskIdsRef.current.delete(task.id));
     commit((current) => markDuplicateTasks([...current, ...incoming]));
+    setVisible(true);
     setOpen(true);
   }, [commit]);
 
@@ -228,6 +234,11 @@ export default function UploadManager({
             updateTask(id, (task) => confirmTaskCompleted(task, true));
             backendConfirmedComplete = true;
             filesRef.current.delete(id);
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent(DRIVE_UPLOAD_COMPLETED_EVENT, {
+                detail: { destinationId: latest.destinationId },
+              }));
+            }
           },
         },
         controller.signal,
@@ -273,12 +284,24 @@ export default function UploadManager({
 
   const cancel = useCallback((id: string) => {
     const current = tasksRef.current.find((task) => task.id === id);
-    if (!current || current.status === "completed" || current.status === "canceled") return;
+    if (!current || ["completed", "failed", "canceled"].includes(current.status)) return;
     controllersRef.current.get(id)?.abort();
     updateTask(id, (task) => transitionTask(task, "canceled"));
     filesRef.current.delete(id);
     controllersRef.current.delete(id);
   }, [updateTask]);
+
+  const cancelAll = useCallback(() => {
+    const cancellable = tasksRef.current.filter((task) =>
+      ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
+    );
+    cancellable.forEach((task) => cancel(task.id));
+  }, [cancel]);
+
+  const closeManager = useCallback(() => {
+    tasksRef.current.forEach((task) => dismissedTaskIdsRef.current.add(task.id));
+    setVisible(false);
+  }, []);
 
   const setConflictResolution = useCallback((id: string, value: UploadConflictResolution) => {
     updateTask(id, (task) => ({ ...task, conflictResolution: value }));
@@ -308,16 +331,30 @@ export default function UploadManager({
     }
   }, [service, updateTask]);
 
-  const clearFinished = useCallback(() => {
-    commit((current) => {
-      const retained = current.filter((task) => isActive(task));
-      const retainedIds = new Set(retained.map((task) => task.id));
-      for (const task of current) {
-        if (!retainedIds.has(task.id)) filesRef.current.delete(task.id);
-      }
-      return markDuplicateTasks(retained);
-    });
-  }, [commit]);
+  // Start selected files automatically, but bound concurrent files to avoid
+  // launching hundreds of transfers when a folder contains many files.
+  useEffect(() => {
+    if (!service.connected) return;
+
+    const activeIds = new Set(
+      tasks
+        .filter((task) => ["preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status))
+        .map((task) => task.id),
+    );
+    for (const id of controllersRef.current.keys()) activeIds.add(id);
+
+    const freeSlots = MAX_CONCURRENT_UPLOADS - activeIds.size;
+    if (freeSlots <= 0) return;
+
+    const startable = tasks.filter((task) =>
+      task.status === "queued"
+      && (!task.duplicate || Boolean(task.conflictResolution))
+      && !controllersRef.current.has(task.id),
+    );
+    for (const task of startable.slice(0, freeSlots)) {
+      start(task.id);
+    }
+  }, [service.connected, start, tasks]);
 
   useEffect(() => {
     function warnBeforeUnload(event: BeforeUnloadEvent) {
@@ -340,114 +377,150 @@ export default function UploadManager({
     serviceConnected: service.connected,
     supportsPauseResume: service.supportsPauseResume,
     enqueue,
-    openManager: () => setOpen(true),
+    openManager: () => {
+      setVisible(true);
+      setOpen(true);
+    },
   }), [enqueue, service.connected, service.supportsPauseResume, tasks]);
 
-  const groupedProgress = useMemo(() => {
-    const measured = tasks.some((task) => task.progress !== null);
-    if (!measured) return null;
-    const total = tasks.reduce((sum, task) => sum + task.size, 0);
-    if (total <= 0) return null;
-    const uploaded = tasks.reduce((sum, task) => {
-      if (task.status === "completed") return sum + task.size;
-      return sum + (task.progress?.uploadedBytes ?? 0);
-    }, 0);
-    return { total, uploaded: Math.min(uploaded, total) };
-  }, [tasks]);
-  const queuedCount = tasks.filter((task) => task.status === "queued").length;
-  const activeCount = tasks.filter((task) =>
+
+  const visibleTasks = tasks.filter((task) => !dismissedTaskIdsRef.current.has(task.id));
+  const queuedCount = visibleTasks.filter((task) => task.status === "queued").length;
+  const activeCount = visibleTasks.filter((task) =>
     ["preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
   ).length;
-  const completedCount = tasks.filter((task) => task.status === "completed").length;
-  const failedCount = tasks.filter((task) => task.status === "failed").length;
+  const completedCount = visibleTasks.filter((task) => task.status === "completed").length;
+  const failedCount = visibleTasks.filter((task) => task.status === "failed").length;
+
+  const visibleCount = queuedCount + activeCount;
+  const cancellableCount = visibleTasks.filter((task) =>
+    ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
+  ).length;
+  const etaSeconds = visibleTasks
+    .filter((task) => task.status === "uploading" && Number.isFinite(task.progress?.etaSeconds))
+    .map((task) => task.progress?.etaSeconds ?? 0)
+    .filter((seconds) => seconds > 0);
+  const etaLabel = etaSeconds.length
+    ? `About ${formatDuration(Math.max(...etaSeconds))} remaining…`
+    : activeCount > 0
+      ? (visibleTasks.some((task) => task.status === "verifying" || task.status === "scanning")
+        ? "Verifying upload…"
+        : visibleTasks.some((task) => task.status === "preparing")
+          ? "Starting upload…"
+          : "Uploading…")
+      : failedCount > 0
+        ? `${failedCount} failed`
+        : `${completedCount} completed`;
+  const trayTitle = visibleCount > 0
+    ? `Uploading ${visibleCount} item${visibleCount === 1 ? "" : "s"}`
+    : completedCount > 0
+      ? `Uploaded ${completedCount} item${completedCount === 1 ? "" : "s"}`
+      : "Uploads";
 
   return (
     <UploadManagerContext.Provider value={contextValue}>
       {children}
-      {tasks.length > 0 && (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          aria-label={`Open upload manager: ${queuedCount} queued, ${activeCount} in progress, ${completedCount} completed, ${failedCount} failed`}
-          className="fixed bottom-4 right-4 z-[60] inline-flex min-h-11 items-center gap-2 rounded-xl border border-border bg-surface px-4 text-sm font-semibold text-foreground shadow-[var(--shadow-popover)] transition-colors hover:bg-background"
-        >
-          <Upload size={17} aria-hidden="true" />
-          Uploads
-          {activeCount > 0 && <span className="rounded-full bg-brand-soft px-2 py-0.5 text-xs text-brand-contrast">{activeCount}</span>}
-        </button>
-      )}
-      <Dialog
-        open={open}
-        title="Upload manager"
-        description="This queue stays available while navigating within the app. It is held in memory only and will be lost on refresh or tab close."
-        onClose={() => setOpen(false)}
-        className="max-h-[min(90vh,52rem)] w-[min(100%-2rem,54rem)]"
-      >
-        <div className="space-y-4">
-          {notification && (
-            <Toast title="Upload manager" variant="warning" onDismiss={() => setNotification(null)}>
-              {notification}
-            </Toast>
-          )}
-          <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-warning">
-            Refreshing or closing this tab discards the in-memory queue and file handles. Active transfers may stop. This service does not support resumable uploads.
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-muted">
-            <span role="status" aria-live="polite">{queuedCount} queued · {activeCount} in progress · {completedCount} completed · {failedCount} failed</span>
-            {!service.connected && <span className="font-medium text-warning">Upload service not connected</span>}
-          </div>
-          {groupedProgress && (
-            <div className="space-y-1" aria-label="Measured aggregate upload progress">
-              <div className="flex justify-between text-xs text-muted">
-                <span>Measured transfer progress</span>
-                <span>{formatBytes(groupedProgress.uploaded)} / {formatBytes(groupedProgress.total)}</span>
+      {visibleTasks.length > 0 && (
+        visible ? (
+          <section
+            aria-label="Upload status"
+            className="fixed bottom-0 right-0 z-[80] flex max-h-[min(65vh,30rem)] w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-border bg-background shadow-[var(--shadow-popover)]"
+          >
+            <div className="flex min-h-12 items-center gap-2 border-b border-border bg-surface px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-semibold text-foreground">{trayTitle}</p>
               </div>
-              <progress
-                aria-label="Aggregate bytes transferred"
-                max={groupedProgress.total}
-                value={groupedProgress.uploaded}
-                className="h-2 w-full accent-brand-contrast"
-              />
+              <button
+                type="button"
+                onClick={() => setOpen((current) => !current)}
+                aria-label={open ? "Collapse upload status" : "Expand upload status"}
+                title={open ? "Collapse" : "Expand"}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
+              >
+                {open ? <ChevronDown size={22} /> : <ChevronUp size={22} />}
+              </button>
+              <button
+                type="button"
+                onClick={closeManager}
+                aria-label="Close and clear upload status"
+                title="Hide"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
+              >
+                <X size={21} />
+              </button>
             </div>
-          )}
-          <ul aria-label="Upload items" className="max-h-[min(48vh,28rem)] space-y-2 overflow-y-auto">
-            {tasks.map((task) => (
-              <UploadTaskRow
-                key={task.id}
-                task={task}
-                connected={service.connected}
-                canPause={service.supportsPauseResume && Boolean(task.uploadSessionId)}
-                onStart={() => start(task.id)}
-                onCancel={() => cancel(task.id)}
-                onRetry={() => retry(task.id)}
-                onPause={() => { void pause(task.id); }}
-                onResume={() => { void resume(task.id); }}
-                onConflictResolution={(value) => setConflictResolution(task.id, value)}
-              />
-            ))}
-          </ul>
-          {tasks.length === 0 && (
-            <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted">No uploads queued.</p>
-          )}
-          <div className="flex flex-wrap justify-between gap-2 border-t border-border pt-4">
-            <Button variant="secondary" onClick={clearFinished} disabled={!tasks.some((task) => !isActive(task))}>
-              Clear finished
-            </Button>
-            <div className="flex gap-2">
-              {service.connected && (
-                <Button
-                  variant="secondary"
-                  onClick={() => tasks.filter((task) => task.status === "queued").forEach((task) => start(task.id))}
-                  disabled={!tasks.some((task) => task.status === "queued")}
-                >
-                  Start queued
-                </Button>
-              )}
-              <Button variant="secondary" onClick={() => setOpen(false)}>Close</Button>
-            </div>
-          </div>
-        </div>
-      </Dialog>
+
+            {open && (
+              <>
+            {activeCount > 0 && (
+              <div className="flex min-h-8 items-center justify-between gap-2 border-b border-border bg-surface px-3 py-1.5">
+                <p className="min-w-0 flex-1 truncate text-[12px] text-muted" role="status">
+                  {visibleTasks.some((task) => task.status === "verifying" || task.status === "scanning")
+                    ? "Processing upload…"
+                    : etaLabel}
+                </p>
+                {cancellableCount > 0 && (
+                  <span
+                    className="flex h-8 w-8 shrink-0 items-center justify-center text-muted"
+                    role="status"
+                    aria-label="Upload in progress"
+                    title="Upload in progress"
+                  >
+                    <LoaderCircle size={19} className="animate-spin" aria-hidden="true" />
+                  </span>
+                )}
+              </div>
+            )}
+            {notification && (
+              <div className="px-3 pt-3">
+                <Toast title="Upload notice" variant="warning" onDismiss={() => setNotification(null)}>
+                  {notification}
+                </Toast>
+              </div>
+            )}
+
+            {!service.connected && (
+              <p className="border-b border-border px-4 py-2 text-xs text-warning" role="status">
+                Upload service is not connected.
+              </p>
+            )}
+
+            <ul aria-label="Upload items" className="min-h-0 space-y-0 overflow-y-auto">
+              {visibleTasks.map((task) => (
+                <UploadTaskRow
+                  key={task.id}
+                  task={task}
+                  connected={service.connected}
+                  canPause={service.supportsPauseResume && Boolean(task.uploadSessionId)}
+                  onCancel={() => cancel(task.id)}
+                  onRetry={() => retry(task.id)}
+                  onPause={() => { void pause(task.id); }}
+                  onResume={() => { void resume(task.id); }}
+                  onConflictResolution={(value) => setConflictResolution(task.id, value)}
+                />
+              ))}
+            </ul>
+
+              </>
+            )}
+          </section>
+        ) : (
+          <button
+            type="button"
+            onClick={() => { setVisible(true); setOpen(true); }}
+            aria-label={`Show upload status: ${queuedCount} queued, ${activeCount} in progress, ${completedCount} completed, ${failedCount} failed`}
+            className="fixed bottom-0 right-0 z-[80] inline-flex min-h-11 items-center gap-2 rounded-xl border border-border bg-background px-4 text-sm font-semibold text-foreground shadow-[var(--shadow-popover)] transition-colors hover:bg-surface"
+          >
+            {visibleCount > 0 ? <Upload size={17} aria-hidden="true" /> : <CheckCircle2 size={17} className="text-success" aria-hidden="true" />}
+            {visibleCount > 0
+              ? `Uploading ${visibleCount}`
+              : completedCount > 0
+                ? `Uploaded ${completedCount}`
+                : `Uploads (${tasks.length})`}
+            {activeCount > 0 && <span className="rounded-full bg-brand-soft px-2 py-0.5 text-xs text-brand-contrast">{activeCount}</span>}
+          </button>
+        )
+      )}
     </UploadManagerContext.Provider>
   );
 }
@@ -456,7 +529,6 @@ function UploadTaskRow({
   task,
   connected,
   canPause,
-  onStart,
   onCancel,
   onRetry,
   onPause,
@@ -466,7 +538,6 @@ function UploadTaskRow({
   task: UploadTask;
   connected: boolean;
   canPause: boolean;
-  onStart: () => void;
   onCancel: () => void;
   onRetry: () => void;
   onPause: () => void;
@@ -474,73 +545,77 @@ function UploadTaskRow({
   onConflictResolution: (value: UploadConflictResolution) => void;
 }) {
   const terminal = task.status === "completed" || task.status === "failed" || task.status === "canceled";
+  const canCancel = ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status);
+  const showProgress = Boolean(task.progress)
+    && ["uploading", "verifying", "scanning"].includes(task.status);
+  const transferred = task.progress?.uploadedBytes ?? 0;
+  const total = task.progress?.totalBytes ?? task.size;
+  const progressPercent = total > 0 ? Math.min(100, Math.round((transferred / total) * 100)) : 0;
+
   return (
-    <li className="rounded-xl border border-border bg-background p-3">
-      <div className="flex min-w-0 items-start gap-3">
-        {task.status === "completed"
-          ? <CheckCircle2 size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-success" />
-          : task.status === "failed"
-            ? <CircleAlert size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
-            : <Upload size={18} aria-hidden="true" className="mt-0.5 shrink-0 text-brand-contrast" />}
+    <li className="border-b border-border px-3 py-2 last:border-b-0">
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-surface text-muted">
+          <Upload size={17} aria-hidden="true" />
+        </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-foreground" title={task.fileName}>{task.fileName}</p>
-          <p className="truncate text-xs text-muted" title={task.relativePath}>{task.relativePath} · {formatBytes(task.size)}</p>
-          <p className={`mt-1 text-xs font-semibold ${task.status === "failed" ? "text-danger" : task.status === "completed" ? "text-success" : "text-muted"}`}>
-            {statusLabel(task.status)}
+          <p className="truncate text-[13px] font-medium text-foreground" title={task.fileName}>{task.fileName}</p>
+          <p className="truncate text-[11px] text-muted" title={task.relativePath}>
+            {task.relativePath === task.fileName ? formatBytes(task.size) : `${task.relativePath} · ${formatBytes(task.size)}`}
           </p>
-          {task.progress && task.status === "uploading" && (
-            <div className="mt-2 space-y-1">
-              <div className="flex justify-between text-xs text-muted">
-                <span>{formatBytes(task.progress.uploadedBytes)} / {formatBytes(task.progress.totalBytes)}</span>
-                {task.progress.bytesPerSecond !== undefined && (
-                  <span>{formatBytes(task.progress.bytesPerSecond)}/s{task.progress.etaSeconds !== undefined ? ` · ${formatDuration(task.progress.etaSeconds)} left` : ""}</span>
-                )}
-              </div>
-              <progress
-                aria-label={`Transfer progress for ${task.fileName}`}
-                max={Math.max(task.progress.totalBytes, 1)}
-                value={Math.min(task.progress.uploadedBytes, task.progress.totalBytes)}
-                className="h-2 w-full accent-brand-contrast"
-              />
-            </div>
-          )}
-          {task.error && (
-            <p role="alert" className="mt-1 text-xs text-danger">
-              {task.error}
-              {task.retryPolicy.retryable && <span> Retry {task.retryPolicy.retries}/{task.retryPolicy.maxRetries}.</span>}
-            </p>
-          )}
-          {task.duplicate && (
-            <fieldset className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-warning">
-              <legend className="px-1 font-medium">Duplicate path conflict</legend>
-              <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {([
-                  ["skip", "Skip"],
-                  ["keep-both", "Keep both"],
-                  ["replace", "Replace"],
-                ] as const).map(([value, label]) => (
-                  <label key={value} className="inline-flex items-center gap-1">
-                    <input
-                      type="radio"
-                      name={`conflict-${task.id}`}
-                      checked={task.conflictResolution === value}
-                      onChange={() => onConflictResolution(value)}
-                    />
-                    {label}
-                  </label>
-                ))}
-              </div>
-              <span className="block pt-1">Policy is passed to the service; the server must authorize and enforce it.</span>
-            </fieldset>
-          )}
         </div>
-        <div className="flex shrink-0 flex-wrap justify-end gap-1">
-          {task.status === "queued" && (
-            <Button size="sm" variant="secondary" onClick={onStart} disabled={!connected || (task.duplicate && !task.conflictResolution)}>
-              Start
-            </Button>
-          )}
-          {task.status === "failed" && task.retryPolicy.retryable && (
+
+        {task.status === "completed" ? (
+          <CheckCircle2 size={21} aria-label="Upload completed" className="shrink-0 text-success" />
+        ) : task.status === "failed" ? (
+          <CircleAlert size={21} aria-label="Upload failed" className="shrink-0 text-danger" />
+        ) : task.status === "canceled" ? (
+          <X size={19} aria-label="Upload canceled" className="shrink-0 text-muted" />
+        ) : canCancel ? (
+          <button
+            type="button"
+            onClick={onCancel}
+            aria-label={`Stop upload of ${task.fileName}`}
+            title="Stop upload"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface hover:text-foreground"
+          >
+            <X size={18} />
+          </button>
+        ) : !terminal ? (
+          <LoaderCircle
+            size={22}
+            aria-label={`Upload ${statusLabel(task.status).toLowerCase()}`}
+            className="shrink-0 animate-spin text-muted"
+          />
+        ) : null}
+      </div>
+
+      {!terminal && task.status !== "verifying" && task.status !== "scanning" && (
+        <p className="mt-1 text-[11px] text-muted">
+          {task.status === "uploading" && task.progress
+            ? `${progressPercent}% uploaded`
+            : statusLabel(task.status)}
+        </p>
+      )}
+
+      {showProgress && task.status === "uploading" && (
+        <div className="mt-2">
+          <progress
+            aria-label={`Upload progress for ${task.fileName}`}
+            max={Math.max(total, 1)}
+            value={Math.min(transferred, total)}
+            className="h-1.5 w-full overflow-hidden rounded-full accent-success"
+          />
+        </div>
+      )}
+
+      {task.status === "failed" && (
+        <div className="mt-2 flex items-start justify-between gap-2">
+          <p role="alert" className="min-w-0 text-xs text-danger">
+            {task.error}
+            {task.retryPolicy.retryable && <span> Retry {task.retryPolicy.retries}/{task.retryPolicy.maxRetries}.</span>}
+          </p>
+          {task.retryPolicy.retryable && (
             <Button
               size="sm"
               variant="secondary"
@@ -548,26 +623,51 @@ function UploadTaskRow({
               disabled={!connected || task.retryPolicy.retries >= task.retryPolicy.maxRetries}
               aria-label={`Retry ${task.fileName}`}
             >
-              <RotateCcw size={14} /> Retry
-            </Button>
-          )}
-          {canPause && task.status === "uploading" && (
-            <Button size="sm" variant="secondary" onClick={onPause} aria-label={`Pause ${task.fileName}`}>
-              <Pause size={14} />
-            </Button>
-          )}
-          {canPause && task.status === "paused" && (
-            <Button size="sm" variant="secondary" onClick={onResume} aria-label={`Resume ${task.fileName}`}>
-              <Play size={14} />
-            </Button>
-          )}
-          {!terminal && (
-            <Button size="sm" variant="ghost" onClick={onCancel} aria-label={`Cancel ${task.fileName}`}>
-              <X size={14} /> Cancel
+              <RotateCcw size={13} /> Retry
             </Button>
           )}
         </div>
-      </div>
+      )}
+
+      {task.duplicate && !terminal && (
+        <fieldset className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-warning">
+          <legend className="px-1 font-medium">Duplicate path</legend>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {([
+              ["skip", "Skip"],
+              ["keep-both", "Keep both"],
+              ["replace", "Replace"],
+            ] as const).map(([value, label]) => (
+              <label key={value} className="inline-flex items-center gap-1">
+                <input
+                  type="radio"
+                  name={`conflict-${task.id}`}
+                  checked={task.conflictResolution === value}
+                  onChange={() => onConflictResolution(value)}
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      )}
+
+      {canPause && task.status === "uploading" && (
+        <button type="button" onClick={onPause} className="mt-2 text-xs text-muted underline" aria-label={`Pause ${task.fileName}`}>
+          <Pause size={12} className="mr-1 inline" />Pause
+        </button>
+      )}
+      {canPause && task.status === "paused" && (
+        <button type="button" onClick={onResume} className="mt-2 text-xs text-muted underline" aria-label={`Resume ${task.fileName}`}>
+          <Play size={12} className="mr-1 inline" />Resume
+        </button>
+      )}
+      {task.status === "queued" && !task.duplicate && !connected && (
+        <p className="mt-2 text-xs text-warning">Upload service is not connected.</p>
+      )}
+      {task.status === "queued" && task.duplicate && !task.conflictResolution && (
+        <p className="mt-2 text-xs text-warning">Choose how to handle this duplicate to continue.</p>
+      )}
     </li>
   );
 }

@@ -16,4 +16,5 @@ urlpatterns = [
     path("folders/<int:folder_id>/cut/", views.folder_cut, name="folder_cut"),
     path("folders/paste/", views.folder_paste, name="folder_paste"),
     path("drive/folder-upload/", views.folder_upload, name="folder_upload"),
+    path("drive/api/folders/", views.folder_create_api, name="folder_create_api"),
 ]

@@ -482,6 +482,100 @@ def folder_create(request):
 
 
 @login_required
+@require_POST
+def folder_create_api(request):
+    """Create a folder and return JSON for the Next.js drive UI."""
+    import json
+
+    if not request.content_type or "application/json" not in request.content_type:
+        return JsonResponse(
+            {"error": "Content-Type must be application/json."},
+            status=415,
+        )
+
+    try:
+        data = json.loads(request.body or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+    name = data.get("name")
+    parent_id = data.get("parent_id")
+
+    if not isinstance(name, str) or not name.strip():
+        return JsonResponse({"error": "Folder name is required."}, status=400)
+
+    name = name.strip()
+    if len(name) > 255 or "/" in name or "\\" in name:
+        return JsonResponse({"error": "Invalid folder name."}, status=400)
+
+    parent = None
+    if parent_id not in (None, ""):
+        try:
+            parent_id = int(parent_id)
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "Invalid parent folder."}, status=400)
+
+        parent = get_object_or_404(
+            Folder,
+            id=parent_id,
+            deleted_at__isnull=True,
+        )
+
+        if not can_edit_folder(parent, request.user):
+            return JsonResponse(
+                {"error": "You do not have permission to create a folder here."},
+                status=403,
+            )
+
+    resource_owner = parent.owner if parent else request.user
+    tenant = parent.tenant if parent else get_default_tenant(request.user)
+
+    if Folder.objects.filter(
+        owner=resource_owner,
+        tenant=tenant,
+        parent=parent,
+        folder_name__iexact=name,
+        deleted_at__isnull=True,
+    ).exists():
+        return JsonResponse(
+            {"error": "A folder with this name already exists here."},
+            status=409,
+        )
+
+    try:
+        with transaction.atomic():
+            folder = Folder.objects.create(
+                owner=resource_owner,
+                tenant=tenant,
+                parent=parent,
+                folder_name=name,
+            )
+    except Exception:
+        # Do not expose database details to the client.
+        return JsonResponse(
+            {"error": "Could not create the folder."},
+            status=400,
+        )
+
+    log_action(
+        request.user,
+        ActivityLog.Action.CREATE_FOLDER,
+        f"Created folder: {folder.folder_name}",
+        obj=folder,
+    )
+
+    return JsonResponse(
+        {
+            "id": folder.id,
+            "name": folder.folder_name,
+            "parent_id": folder.parent_id,
+            "type": "folder",
+        },
+        status=201,
+    )
+
+
+@login_required
 def folder_download(request, folder_id):
     """Download a shared folder as a ZIP. Owner and shared recipients are allowed."""
     folder = get_object_or_404(Folder, id=folder_id)
@@ -590,19 +684,35 @@ def folder_details(request, folder_id):
         deleted_at__isnull=True,
     ).count()
 
-    parts = []
+    ancestors = []
+
     if is_owner or not share or share.folder_id != folder.id:
         current = folder.parent
+        reverse_ancestors = []
+
         while current is not None:
-            # For shared resources, do not expose ancestors outside the shared root.
-            if not is_owner and share and current.id == share.folder_id:
+            # Preserve the existing shared-folder access boundary.
+            if (
+                not is_owner
+                and share
+                and current.id == share.folder_id
+            ):
                 break
-            parts.insert(0, current.folder_name)
+
+            reverse_ancestors.append({
+                "id": current.id,
+                "name": current.folder_name,
+            })
             current = current.parent
 
-    location_root = "My Drive" if is_owner else "Shared with me"
-    location = location_root + (" / " + " / ".join(parts) if parts else "")
+        ancestors = list(reversed(reverse_ancestors))
 
+    parts = [item["name"] for item in ancestors]
+
+    location_root = "My Drive" if is_owner else "Shared with me"
+    location = location_root + (
+        " / " + " / ".join(parts) if parts else ""
+    )
     return JsonResponse({
         "type": "folder",
         "name": folder.folder_name,
@@ -610,13 +720,13 @@ def folder_details(request, folder_id):
         "created_at": folder.created_at.strftime("%b %d, %Y, %I:%M %p"),
         "modified_at": folder.updated_at.strftime("%b %d, %Y, %I:%M %p"),
         "location": location,
+        "ancestors": ancestors,
         "folder_count": folder_count,
         "file_count": file_count,
         "access": "Owner" if is_owner else share.permission_label,
         "shared_by": None if is_owner else share.owner.username,
         "last_action": activity.get_action_display() if activity else "No recorded action",
     })
-
 
 @login_required
 def trash_folder_open(request, folder_id):

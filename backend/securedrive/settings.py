@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
-
+from corsheaders.defaults import default_headers
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -79,6 +79,12 @@ CORS_ALLOWED_ORIGINS = _env_list("CORS_ALLOWED_ORIGINS") or [
 ]
 CORS_ALLOW_CREDENTIALS = True
 CORS_EXPOSE_HEADERS = ["Content-Disposition"]
+
+CORS_ALLOW_HEADERS = [
+    *default_headers,
+    "idempotency-key",
+]
+
 CSRF_TRUSTED_ORIGINS = _env_list("CSRF_TRUSTED_ORIGINS") or [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -148,8 +154,9 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
-# S3-compatible adapter is opt-in. Existing FileField workflows remain on MEDIA_ROOT
-# until the ADR's multipart/session/finalization flow is integrated separately.
+# S3-compatible storage is enabled when SECUREDRIVE_STORAGE_ENDPOINT_URL and the
+# bucket/credentials are configured. Legacy FileField routes remain for backwards
+# compatibility; the Next.js multipart API uses this adapter.
 SECUREDRIVE_STORAGE_ENDPOINT_URL = os.getenv("SECUREDRIVE_STORAGE_ENDPOINT_URL", "").strip()
 SECUREDRIVE_STORAGE_BUCKET = os.getenv("SECUREDRIVE_STORAGE_BUCKET", "").strip()
 SECUREDRIVE_STORAGE_REGION = os.getenv("SECUREDRIVE_STORAGE_REGION", "us-east-1").strip()
@@ -190,7 +197,7 @@ if SECUREDRIVE_STORAGE_ENDPOINT_URL:
     if not SECUREDRIVE_STORAGE_BUCKET:
         raise RuntimeError("SECUREDRIVE_STORAGE_BUCKET is required when storage is configured.")
 
-# --- File upload limits (đồng bộ chunk 4 MB ở client) ---
+# --- File upload limits (multipart part size is configured in files/upload_api.py) ---
 DATA_UPLOAD_MAX_MEMORY_SIZE = 110 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 110 * 1024 * 1024
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000

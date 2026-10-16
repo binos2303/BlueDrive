@@ -58,6 +58,56 @@ class UploadApiTests(TestCase):
         self.assertEqual(response.status_code, 413)
         adapter_factory.return_value.initiate_multipart.assert_not_called()
 
+    @patch("files.upload_api.get_storage_adapter")
+    def test_batch_authorization_returns_one_url_for_each_part(self, adapter_factory):
+        adapter = adapter_factory.return_value
+        adapter.create_part_upload_url.side_effect = lambda key, provider_id, number, *, expires_in: type(
+            "Signed", (), {
+                "url": f"https://minio.invalid/part/{number}",
+                "method": "PUT",
+                "required_headers": {},
+            }
+        )()
+        upload = UploadSession.objects.create(
+            tenant=self.tenant,
+            initiated_by=self.user,
+            client_name="multi-part.bin",
+            expected_size_bytes=17 * 1024 * 1024,
+            expected_sha256="a" * 64,
+            object_key="quarantine/" + "a" * 32,
+            provider_upload_id="provider-upload-id",
+            expires_at="2035-01-01T00:00:00Z",
+            state=UploadSession.State.UPLOADING,
+        )
+        response = self.client.post(
+            f"/files/api/uploads/{upload.pk}/parts/authorizations/",
+            {"part_numbers": [2, 1, 3]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([part["part_number"] for part in response.data["parts"]], [1, 2, 3])
+        self.assertEqual(adapter.create_part_upload_url.call_count, 3)
+        self.assertTrue(all(part["expires_in"] == 180 for part in response.data["parts"]))
+
+    def test_batch_authorization_rejects_duplicate_part_numbers(self):
+        upload = UploadSession.objects.create(
+            tenant=self.tenant,
+            initiated_by=self.user,
+            client_name="multi-part.bin",
+            expected_size_bytes=9 * 1024 * 1024,
+            expected_sha256="a" * 64,
+            object_key="quarantine/" + "b" * 32,
+            provider_upload_id="provider-upload-id",
+            expires_at="2035-01-01T00:00:00Z",
+            state=UploadSession.State.UPLOADING,
+        )
+        response = self.client.post(
+            f"/files/api/uploads/{upload.pk}/parts/authorizations/",
+            {"part_numbers": [1, 1]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
     def test_repeated_complete_for_verifying_session_is_idempotent(self):
         upload = UploadSession.objects.create(
             tenant=self.tenant, initiated_by=self.user, client_name="document.txt",

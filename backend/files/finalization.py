@@ -59,7 +59,12 @@ def finalize_verified_upload(session, plaintext, actor):
     ciphertext_sha256 = ""
     visible_name = ""
     with transaction.atomic():
-        locked = UploadSession.objects.select_for_update().select_related("tenant", "target_folder").get(pk=session.pk)
+        locked = (
+            UploadSession.objects
+            .select_related("tenant", "target_folder")
+            .select_for_update(of=("self",))
+            .get(pk=session.pk)
+        )
         if locked.state in (UploadSession.State.AVAILABLE, UploadSession.State.COMPLETED):
             return {"upload_id": str(locked.pk), "state": locked.state, "file_id": locked.file_id}
         if locked.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):

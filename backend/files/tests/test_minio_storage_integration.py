@@ -65,10 +65,12 @@ class MinIOStorageIntegrationTests(unittest.TestCase):
             )
             parts = [MultipartPart(part_number=1, etag=uploaded["ETag"])]
             first = self.adapter.complete_multipart(
-                key, upload.upload_id, parts, expected_size=len(payload)
+                key, upload.upload_id, parts, expected_size=len(payload),
+                expected_upload_session_id="integration-repeat-complete",
             )
             repeated = self.adapter.complete_multipart(
-                key, upload.upload_id, parts, expected_size=len(payload)
+                key, upload.upload_id, parts, expected_size=len(payload),
+                expected_upload_session_id="integration-repeat-complete",
             )
             self.assertEqual(first.size_bytes, len(payload))
             self.assertEqual(repeated.size_bytes, first.size_bytes)

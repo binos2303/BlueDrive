@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import {
   ArrowDown,
   ArrowUp,
@@ -33,8 +34,19 @@ import DriveNewMenu, {
   DRIVE_UPLOAD_FILES_EVENT,
   DRIVE_UPLOAD_FOLDER_EVENT,
 } from "@/components/drive/DriveNewMenu";
-import { useUploadManager } from "@/components/drive/UploadManager";
-import { downloadDriveFile, getDriveItems, type DriveListView, type DownloadProgress } from "@/lib/drive-service";
+import { DRIVE_UPLOAD_COMPLETED_EVENT, useUploadManager } from "@/components/drive/UploadManager";
+import {
+  downloadDriveFile,
+  getDriveFolderDetails,
+  getDriveItems,
+  type DriveFolderDetails,
+  type DriveListView,
+  type DownloadProgress,
+} from "@/lib/drive-service";
+import {
+  accountCsrfHeaders,
+  requestAccountApi,
+} from "@/lib/account-service";
 
 type ViewMode = "list" | "grid";
 type SortDirection = "asc" | "desc";
@@ -64,7 +76,7 @@ type DriveFileBrowserProps = {
 };
 
 const MAX_UPLOAD_FILES_PER_BATCH = 500;
-const MAX_UPLOAD_FILE_SIZE = 5 * 1024 ** 3;
+const MAX_UPLOAD_FILE_SIZE = 100 * 1024 * 1024;
 const MAX_UPLOAD_PATH_LENGTH = 1024;
 const MAX_FILE_NAME_LENGTH = 255;
 
@@ -134,7 +146,7 @@ function validateUploadPath(path: string, file: File): string | null {
   if (segments.some((segment) => !segment || segment === "." || segment === "..")) return "File path contains an invalid path segment.";
   if (file.name.length > MAX_FILE_NAME_LENGTH) return "File name exceeds 255 characters.";
   if (/[<>:"|?*\u0000-\u001f]/.test(file.name)) return "File name contains characters that are not allowed.";
-  if (file.size > MAX_UPLOAD_FILE_SIZE) return "File exceeds the 5 GB browser pre-check limit.";
+  if (file.size > MAX_UPLOAD_FILE_SIZE) return "File exceeds the current 100 MB upload limit.";
   return null;
 }
 
@@ -152,14 +164,27 @@ export default function DriveFileBrowser({ title, items }: DriveFileBrowserProps
 
 function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const listView = listViewForTitle(title);
+  const pathname = usePathname();
+  const router = useRouter();
+  const currentFolderId = useMemo(() => {
+    if (title !== "My Drive") return null;
+    const match = pathname.match(/^\/drive\/folders\/([1-9]\d*)\/?$/);
+    if (!match) return null;
+    const parsed = Number(match[1]);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  }, [pathname, title]);
   const [driveItems, setDriveItems] = useState(items);
   const [loading, setLoading] = useState(listView !== null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [folderDetails, setFolderDetails] = useState<DriveFolderDetails | null>(null);
   const [view, setView] = useState<ViewMode>("list");
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
-  const [currentFolder, setCurrentFolder] = useState<DriveItem | null>(null);
+  const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("Untitled folder");
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [folderNameError, setFolderNameError] = useState("");
   const [toast, setToast] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<{
     text: string;
@@ -170,27 +195,71 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [dragMessage, setDragMessage] = useState("Drop files to upload");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const loadRequestIdRef = useRef(0);
   const { enqueue, openManager } = useUploadManager();
 
   const loadItems = useCallback(async (folderId: number | null, view: DriveListView) => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setLoadError(null);
     try {
-      setDriveItems(await getDriveItems(folderId, view));
+      if (view === "drive" && folderId !== null) {
+        setFolderDetails(null);
+        const [details, nextItems] = await Promise.all([
+          getDriveFolderDetails(folderId),
+          getDriveItems(folderId, view),
+        ]);
+        if (requestId !== loadRequestIdRef.current) return;
+        setFolderDetails(details);
+        setDriveItems(nextItems);
+      } else {
+        const nextItems = await getDriveItems(folderId, view);
+        if (requestId !== loadRequestIdRef.current) return;
+        setFolderDetails(null);
+        setDriveItems(nextItems);
+      }
     } catch (error) {
+      if (requestId !== loadRequestIdRef.current) return;
+      setFolderDetails(null);
       setLoadError(error instanceof Error ? error.message : "Could not load Drive items.");
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     if (!listView) return;
     const timer = window.setTimeout(() => {
-      void loadItems(listView === "drive" ? currentFolder?.folderId ?? null : null, listView);
+      void loadItems(listView === "drive" ? currentFolderId : null, listView);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [listView, currentFolder?.folderId, loadItems]);
+  }, [listView, currentFolderId, loadItems]);
+
+  useEffect(() => {
+    function handleUploadCompleted(event: Event) {
+      const detail = (event as CustomEvent<{ destinationId: string | null }>).detail;
+      if (!detail || !listView) return;
+
+      if (listView === "drive") {
+        const currentDestinationId = currentFolderId === null ? null : String(currentFolderId);
+        if (detail.destinationId !== currentDestinationId) return;
+        void loadItems(currentFolderId, "drive");
+        return;
+      }
+
+      // Newly uploaded files can appear immediately in Recent as well.
+      if (listView === "recent") {
+        void loadItems(null, "recent");
+      }
+    }
+
+    window.addEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, handleUploadCompleted);
+    return () => window.removeEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, handleUploadCompleted);
+  }, [currentFolderId, listView, loadItems]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [currentFolderId]);
 
   const selectedItems = useMemo(
     () => driveItems.filter((item) => selectedIds.has(item.id)),
@@ -234,7 +303,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         relativePath: normalizedPath,
         validationError,
       };
-    }), currentFolder?.folderId ? String(currentFolder.folderId) : null);
+    }), currentFolderId !== null ? String(currentFolderId) : null);
     openManager();
   }
 
@@ -257,6 +326,57 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     input.click();
   }
 
+  async function handleCreateFolder() {
+    const trimmedName = newFolderName.trim();
+
+    if (!trimmedName) {
+      setFolderNameError("Folder name cannot be empty.");
+      return;
+    }
+
+    if (trimmedName.length > 255) {
+      setFolderNameError("Folder name cannot exceed 255 characters.");
+      return;
+    }
+
+    setIsCreatingFolder(true);
+    setFolderNameError("");
+    setToast("Creating folder...");
+
+    try {
+      const result = await requestAccountApi<{
+        id: number;
+        name: string;
+        parent_id: number | null;
+        type: "folder";
+      }>("/drive/api/folders/", {
+        method: "POST",
+        headers: await accountCsrfHeaders(),
+        body: JSON.stringify({
+          name: trimmedName,
+          parent_id: currentFolderId,
+        }),
+      });
+
+      setIsCreateFolderOpen(false);
+      setNewFolderName("Untitled folder");
+
+      // Refresh the list first; hide the progress toast after the folder is shown.
+      await loadItems(
+        currentFolderId,
+        listView ?? "drive",
+      );
+      setToast(null);
+    } catch (error) {
+      setToast(null);
+      setFolderNameError(
+        error instanceof Error ? error.message : "Could not create the folder.",
+      );
+    } finally {
+      setIsCreatingFolder(false);
+    }
+  }
+
   useEffect(() => {
     function onUploadFiles() {
       fileInputRef.current?.click();
@@ -265,7 +385,14 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       openFolderPicker();
     }
     function onCreateFolder() {
-      setToast("Creating folders isn't connected yet. No folder was created.");
+      if (title !== "My Drive") {
+        setToast("Creating folders is only available in My Drive.");
+        return;
+      }
+
+      setNewFolderName("Untitled folder");
+      setFolderNameError("");
+      setIsCreateFolderOpen(true);
     }
     function onFilePickerCancel() {
       setToast("File selection canceled. Nothing was added to the queue.");
@@ -332,8 +459,12 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       showNotConnected("Opening folders from this view");
       return;
     }
-    setCurrentFolder(item);
+    if (!Number.isSafeInteger(item.folderId) || !item.folderId || item.folderId <= 0) {
+      setToast("This folder has an invalid ID and cannot be opened.");
+      return;
+    }
     setSelectedIds(new Set());
+    router.push(`/drive/folders/${item.folderId}`);
   }
 
   function runAction(action: string, item?: DriveItem) {
@@ -499,19 +630,27 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const folderPath = [
     {
       label: title,
-      href: undefined,
-      onSelect: currentFolder ? () => setCurrentFolder(null) : undefined,
+      onSelect: currentFolderId !== null ? () => router.push("/drive") : undefined,
     },
-    ...(currentFolder ? [{ label: currentFolder.name }] : []),
+    ...(folderDetails?.ancestors ?? []).map((ancestor) => ({
+      label: ancestor.name,
+      onSelect: () => router.push(`/drive/folders/${ancestor.id}`),
+    })),
+    ...(currentFolderId !== null
+      ? [{ label: folderDetails?.name ?? "Loading folder…" }]
+      : []),
   ];
-  const toastTitle = toast?.toLowerCase().includes("canceled")
-    ? "Selection canceled"
-    : toast?.toLowerCase().includes("browser")
-      || toast?.toLowerCase().includes("cannot be added")
-      || toast?.toLowerCase().includes("couldn't")
-      ? "Upload issue"
-      : "Not connected";
-  const toastVariant = toastTitle === "Selection canceled"
+  const toastTitle = toast?.toLowerCase().includes("creating folder")
+    ? "Creating folder"
+    : toast?.toLowerCase().includes("canceled")
+      ? "Selection canceled"
+      : toast?.toLowerCase().includes("browser")
+        || toast?.toLowerCase().includes("cannot be added")
+        || toast?.toLowerCase().includes("couldn't")
+        || toast?.toLowerCase().includes("could not")
+        ? "Upload issue"
+        : "Notification";
+  const toastVariant = toastTitle === "Selection canceled" || toastTitle === "Creating folder"
     ? "info"
     : toastTitle === "Upload issue"
       ? "error"
@@ -519,7 +658,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
   return (
     <section
-      className={`relative m-3 min-h-[calc(100%-24px)] bg-background p-0 sm:m-5 ${dragActive ? "ring-2 ring-inset ring-brand-contrast" : ""}`}
+      className={`relative m-2 min-h-[calc(100%-16px)] bg-background p-0 sm:m-3 ${dragActive ? "ring-2 ring-inset ring-brand-contrast" : ""}`}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -550,125 +689,114 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           event.currentTarget.value = "";
         }}
       />
-      <div className="px-1 pt-1 sm:px-2 sm:pt-2">
-        <Breadcrumb items={folderPath} className="mb-3" />
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="min-w-0 truncate text-2xl font-medium tracking-[-0.04em] text-foreground sm:text-[30px]">
-            {currentFolder?.name ?? title}
-          </h1>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-1 pt-1 sm:px-2 sm:pt-2">
+        <Breadcrumb items={folderPath} className="min-w-0 [&>ol]:text-lg [&>ol]:font-semibold sm:[&>ol]:text-xl" />
 
-          <div className="flex shrink-0 items-center gap-2">
-            <DriveNewMenu />
-            <div className="flex items-center gap-1 rounded-[14px] border border-border bg-background p-1">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <DriveNewMenu />
+          <div className="flex items-center gap-0.5 rounded-xl border border-border bg-background p-0.5">
             <button
               type="button"
               onClick={() => setView("list")}
-              className={`flex h-10 w-10 items-center justify-center rounded-[10px] border border-transparent transition-colors duration-[var(--motion-fast)] ${view === "list" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
+              className={`flex h-9 w-9 items-center justify-center rounded-[9px] border border-transparent transition-colors duration-[var(--motion-fast)] ${view === "list" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
               aria-label="List view"
               aria-pressed={view === "list"}
             >
-              <List size={17} />
+              <List size={16} />
             </button>
             <button
               type="button"
               onClick={() => setView("grid")}
-              className={`flex h-10 w-10 items-center justify-center rounded-[10px] border border-transparent transition-colors duration-[var(--motion-fast)] ${view === "grid" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
+              className={`flex h-9 w-9 items-center justify-center rounded-[9px] border border-transparent transition-colors duration-[var(--motion-fast)] ${view === "grid" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
               aria-label="Grid view"
               aria-pressed={view === "grid"}
             >
-              <Grid2x2 size={17} />
+              <Grid2x2 size={16} />
             </button>
-            </div>
           </div>
         </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2 px-1 pb-3 sm:gap-3 sm:px-2">
-        <label className="sr-only" htmlFor="drive-sort">Sort files by</label>
-        <div className="relative">
-          <select
-            id="drive-sort"
-            value={sortKey}
-            onChange={(event) => setSortKey(event.target.value as SortKey)}
-            className="h-10 appearance-none rounded-xl border border-border bg-surface py-2 pl-3 pr-9 text-sm text-foreground hover:bg-background"
-          >
-            <option value="name">Name</option>
-            <option value="modified">Last modified</option>
-            <option value="size">File size</option>
-            <option value="type">Type</option>
-          </select>
-          <ChevronDown size={15} aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted" />
-        </div>
-        <button
-          type="button"
-          onClick={() => setSortDirection((current) => (current === "asc" ? "desc" : "asc"))}
-          className="flex h-10 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-sm text-foreground transition-colors duration-[var(--motion-fast)] hover:bg-background"
-          aria-label={`Sort ${sortKey} ${sortDirection === "asc" ? "descending" : "ascending"}`}
+      {selectedItems.length > 0 ? (
+        <div
+          role="toolbar"
+          aria-label="Selected file actions"
+          className="mt-3 mb-2 flex h-10 min-h-10 flex-nowrap items-center gap-1 overflow-x-auto rounded-lg border border-brand/20 bg-brand-soft px-2 py-1 sm:gap-1.5 sm:px-2.5 [&>button]:h-8 [&>button]:shrink-0 [&>span]:shrink-0"
         >
-          <ListFilter size={16} className="text-muted" />
-          <span>{sortDirection === "asc" ? "Ascending" : "Descending"}</span>
-          {sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-        </button>
-        <span className="ml-auto text-xs font-medium text-muted">
-          {listView ? `${driveItems.length} items` : title === "Starred" ? "Starred items are not available" : "Demo UI · file actions not connected"}
-        </span>
-      </div>
-
-      <div className="mb-3 h-12">
-        {selectedItems.length > 0 ? (
-          <div
-            role="toolbar"
-            aria-label="Selected file actions"
-            className="flex h-full flex-nowrap items-center gap-2 overflow-x-auto rounded-2xl border border-brand/20 bg-brand-soft p-2 sm:px-3 [&>button]:shrink-0 [&>span]:shrink-0"
+          <span className="shrink-0 px-1 text-xs font-semibold text-brand-contrast">
+            {selectedItems.length} selected
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => runAction("Open", selectedItems[0])} disabled={selectedItems.length !== 1}>
+            <FolderOpen size={15} /> Open
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => runAction("Download")}>
+            <Download size={15} /> Download
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => runAction("Rename")} disabled={selectedItems.length !== 1}>
+            <Pencil size={15} /> Rename
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => runAction("Move")}>
+            <Move size={15} /> Move
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => runAction("Copy")}>
+            <Copy size={15} /> Copy
+          </Button>
+          {title !== "Shared with me" && title !== "Trash" && (
+            <Button size="sm" variant="ghost" onClick={() => runAction("Share")}>
+              <Share2 size={15} /> Share
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() => setPendingDestructive({
+              action: title === "Trash" ? "delete" : "trash",
+              count: selectedItems.length,
+            })}
           >
-            <span className="px-2 text-sm font-semibold text-brand-contrast">
-              {selectedItems.length} selected
-            </span>
-            <Button size="sm" variant="ghost" onClick={() => runAction("Open", selectedItems[0])} disabled={selectedItems.length !== 1}>
-              <FolderOpen size={15} /> Open
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => runAction("Download")}>
-              <Download size={15} /> Download
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => runAction("Rename")} disabled={selectedItems.length !== 1}>
-              <Pencil size={15} /> Rename
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => runAction("Move")}>
-              <Move size={15} /> Move
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => runAction("Copy")}>
-              <Copy size={15} /> Copy
-            </Button>
-            {title !== "Shared with me" && title !== "Trash" && (
-              <Button size="sm" variant="ghost" onClick={() => runAction("Share")}>
-                <Share2 size={15} /> Share
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant="destructive"
-              onClick={() => setPendingDestructive({
-                action: title === "Trash" ? "delete" : "trash",
-                count: selectedItems.length,
-              })}
+            <Trash2 size={15} /> {title === "Trash" ? "Delete permanently" : "Move to trash"}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto"
+            onClick={() => setSelectedIds(new Set())}
+          >
+            <X size={15} /> Clear selection
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3 mb-2 flex h-10 flex-wrap items-center gap-2 px-1 sm:gap-2 sm:px-2">
+          <label className="sr-only" htmlFor="drive-sort">Sort files by</label>
+          <div className="relative">
+            <select
+              id="drive-sort"
+              value={sortKey}
+              onChange={(event) => setSortKey(event.target.value as SortKey)}
+              className="h-8 appearance-none rounded-lg border border-border bg-surface py-1.5 pl-3 pr-8 text-xs text-foreground hover:bg-background"
             >
-              <Trash2 size={15} /> {title === "Trash" ? "Delete permanently" : "Move to trash"}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="ml-auto"
-              onClick={() => setSelectedIds(new Set())}
-            >
-              <X size={15} /> Clear selection
-            </Button>
+              <option value="name">Name</option>
+              <option value="modified">Last modified</option>
+              <option value="size">File size</option>
+              <option value="type">Type</option>
+            </select>
+            <ChevronDown size={15} aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted" />
           </div>
-        ) : (
-          <p className="flex h-full items-center px-3 text-xs text-muted">
-            Select items to see available actions
-          </p>
-        )}
-      </div>
+          <button
+            type="button"
+            onClick={() => setSortDirection((current) => (current === "asc" ? "desc" : "asc"))}
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 text-xs text-foreground transition-colors duration-[var(--motion-fast)] hover:bg-background"
+            aria-label={`Sort ${sortKey} ${sortDirection === "asc" ? "descending" : "ascending"}`}
+          >
+            <ListFilter size={15} className="text-muted" />
+            <span>{sortDirection === "asc" ? "Ascending" : "Descending"}</span>
+            {sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+          </button>
+          <span className="ml-auto text-xs font-medium text-muted">
+            {listView ? `${driveItems.length} items` : title === "Starred" ? "Starred items are not available" : "Demo UI · file actions not connected"}
+          </span>
+        </div>
+      )}
 
       {downloadStatus && (
         <div className="mb-3 flex min-h-10 items-center gap-3 rounded-xl border border-border bg-surface px-3 py-2 text-sm" role="status" aria-live="polite">
@@ -688,15 +816,14 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       )}
 
       <div
-        className={`relative rounded-xl border-t bg-surface transition-colors duration-[var(--motion-fast)] ${
-          dragActive ? "border-brand-contrast ring-2 ring-brand-contrast/30" : "border-border"
-        }`}
+        className={`relative rounded-xl border-t bg-surface transition-colors duration-[var(--motion-fast)] ${dragActive ? "border-brand-contrast ring-2 ring-brand-contrast/30" : "border-border"
+          }`}
       >
         {loading ? (
           <EmptyState title={`Loading ${title}`} description="Fetching items from your account…" />
         ) : loadError ? (
           <EmptyState title="Could not load your Drive" description={loadError} action={
-            <Button variant="secondary" size="sm" onClick={() => listView && void loadItems(listView === "drive" ? currentFolder?.folderId ?? null : null, listView)}>Try again</Button>
+            <Button variant="secondary" size="sm" onClick={() => listView && void loadItems(listView === "drive" ? currentFolderId : null, listView)}>Try again</Button>
           } />
         ) : sortedItems.length === 0 ? (
           <EmptyState
@@ -708,10 +835,10 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
                   ? title === "Recent"
                     ? "Files you open will appear here."
                     : "Files and folders in this location will appear here."
-                : "Items will appear here when real Drive data is connected."
+                  : "Items will appear here when real Drive data is connected."
             }
-            action={currentFolder ? (
-              <Button variant="secondary" size="sm" onClick={() => setCurrentFolder(null)}>
+            action={currentFolderId !== null ? (
+              <Button variant="secondary" size="sm" onClick={() => router.push("/drive")}>
                 Back to {title}
               </Button>
             ) : undefined}
@@ -757,23 +884,22 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
             </table>
           </div>
         ) : (
-          <div className="grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2 p-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">
             {sortedItems.map((item) => {
               const selected = selectedIds.has(item.id);
               return (
                 <article
                   key={item.id}
-                  className={`min-w-0 rounded-2xl border p-4 transition-colors duration-[var(--motion-fast)] ${
-                    selected ? "border-brand-contrast bg-brand-soft/60" : "border-border bg-surface hover:bg-background"
-                  }`}
+                  className={`min-w-0 rounded-2xl border p-4 transition-colors duration-[var(--motion-fast)] ${selected ? "border-brand-contrast bg-brand-soft/60" : "border-border bg-surface hover:bg-background"
+                    }`}
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex min-w-0 items-center gap-1.5">
                     <input
                       type="checkbox"
                       checked={selected}
                       aria-label={`Select ${item.name}`}
                       onChange={() => toggleItem(item.id)}
-                      className="h-4 w-4 shrink-0 accent-brand-contrast"
+                      className="h-3.5 w-3.5 shrink-0 accent-brand-contrast"
                     />
                     <button
                       type="button"
@@ -782,39 +908,115 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
                       onDragEnd={() => setDragActive(false)}
                       aria-label={`Drag ${item.name}`}
                       title="Drag to move"
-                      className="flex h-9 w-9 shrink-0 cursor-grab items-center justify-center rounded-lg text-muted active:cursor-grabbing"
+                      className="flex h-6 w-5 shrink-0 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
                     >
-                      <GripVertical size={17} />
+                      <GripVertical size={14} />
                     </button>
-                    <div className="flex min-w-0 flex-1 items-center gap-3">
-                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-contrast">
-                        {renderItemIcon(item.type, 19)}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => openItem(item)}
-                        className="min-w-0 truncate text-left text-sm font-medium text-foreground"
-                      >
-                        {item.name}
-                      </button>
-                    </div>
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-contrast">
+                      {renderItemIcon(item.type, 16)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => openItem(item)}
+                      className="min-w-0 flex-1 truncate text-left text-xs font-medium text-foreground"
+                      title={item.name}
+                    >
+                      {item.name}
+                    </button>
                     <ContextMenu
                       label={`Actions for ${item.name}`}
-                      trigger={<MoreHorizontal size={18} />}
+                      trigger={<MoreHorizontal size={16} />}
                       actions={createActions(item)}
                     />
                   </div>
-                  <div className="mt-3 flex items-center justify-between gap-2 pl-[5.25rem] text-xs text-muted">
-                    <span className="truncate">{item.owner}</span>
-                    <span className="shrink-0">{item.modified}</span>
-                  </div>
-                  <p className="mt-2 pl-[5.25rem] text-xs text-muted">{item.size}</p>
+                  {item.type !== "folder" && (
+                    <div className="mt-2 flex items-center justify-between gap-2 pl-[3.25rem] text-[11px] text-muted">
+                      <span className="min-w-0 truncate" title="Date modified (upload date is not currently provided by the item model)">
+                        {item.modified}
+                      </span>
+                      <span className="shrink-0">{item.size}</span>
+                    </div>
+                  )}
                 </article>
               );
             })}
           </div>
         )}
       </div>
+
+      {isCreateFolderOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !isCreatingFolder) {
+              setIsCreateFolderOpen(false);
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-folder-title"
+            className="w-full max-w-[506px] rounded-[32px] bg-background px-[30px] pb-[28px] pt-[30px] shadow-xl"
+          >
+            <h2
+              id="create-folder-title"
+              className="mb-6 text-[28px] font-normal tracking-tight text-foreground"
+            >
+              New folder
+            </h2>
+
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleCreateFolder();
+              }}
+            >
+              <input
+                autoFocus
+                autoComplete="off"
+                maxLength={255}
+                value={newFolderName}
+                onFocus={(event) => event.currentTarget.select()}
+                onChange={(event) => {
+                  setNewFolderName(event.target.value);
+                  setFolderNameError("");
+                }}
+                placeholder="Untitled folder"
+                aria-label="Folder name"
+                aria-invalid={Boolean(folderNameError)}
+                disabled={isCreatingFolder}
+                className="h-[70px] w-full rounded-[5px] border-2 border-brand bg-transparent px-[18px] text-[20px] text-foreground outline-none focus:ring-0"
+              />
+
+              {folderNameError && (
+                <p className="mt-2 text-sm text-red-600" role="alert">
+                  {folderNameError}
+                </p>
+              )}
+
+              <div className="mt-7 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={isCreatingFolder}
+                  onClick={() => setIsCreateFolderOpen(false)}
+                  className="min-w-[82px] rounded-lg px-4 py-2.5 text-base font-medium text-brand-contrast hover:bg-brand-soft disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={isCreatingFolder || !newFolderName.trim()}
+                  className="min-w-[82px] rounded-lg px-4 py-2.5 text-base font-medium text-brand-contrast hover:bg-brand-soft disabled:opacity-50"
+                >
+                  {isCreatingFolder ? "Creating..." : "Create"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div className="fixed bottom-4 right-4 z-[80] w-[min(24rem,calc(100vw-2rem))]">
@@ -902,9 +1104,8 @@ function FileRow({
   return (
     <tr
       aria-selected={selected}
-      className={`border-b border-border transition-colors duration-[var(--motion-fast)] last:border-b-0 ${
-        selected ? "bg-brand-soft/60" : "hover:bg-background"
-      }`}
+      className={`border-b border-border transition-colors duration-[var(--motion-fast)] last:border-b-0 ${selected ? "bg-brand-soft/60" : "hover:bg-background"
+        }`}
     >
       <td className="w-12 px-3 py-2">
         <input

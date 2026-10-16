@@ -178,6 +178,53 @@ def authorize_part(request, upload_id, part_number):
     return Response({"url": signed.url, "method": signed.method, "headers": signed.required_headers, "expires_in": PRESIGN_SECONDS})
 
 
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def authorize_parts(request, upload_id):
+    """Issue a batch of short-lived S3 multipart PUT URLs to the session owner."""
+    session = _owned_session(request, upload_id)
+    if session.state != UploadSession.State.UPLOADING or session.expires_at <= timezone.now():
+        return Response({"detail": "Upload session is not active."}, status=409)
+
+    raw_parts = request.data.get("part_numbers")
+    # A batch avoids one Django round-trip per chunk. Bound the request even though
+    # the current product limit (100 MiB / 8 MiB) needs at most 13 parts.
+    if not isinstance(raw_parts, list) or not raw_parts or len(raw_parts) > 1000:
+        return Response({"detail": "Provide between 1 and 1000 part numbers."}, status=400)
+    if any(type(number) is not int for number in raw_parts):
+        return Response({"detail": "Part numbers must be integers."}, status=400)
+    if len(set(raw_parts)) != len(raw_parts):
+        return Response({"detail": "Part numbers must be unique."}, status=400)
+
+    part_count = (session.expected_size_bytes + PART_SIZE - 1) // PART_SIZE
+    if any(number < 1 or number > part_count for number in raw_parts):
+        return Response({"detail": "A part number is outside the upload session bounds."}, status=400)
+
+    try:
+        adapter = get_storage_adapter()
+        signed_parts = []
+        for part_number in sorted(raw_parts):
+            signed = adapter.create_part_upload_url(
+                session.object_key,
+                session.provider_upload_id,
+                part_number,
+                expires_in=PRESIGN_SECONDS,
+            )
+            signed_parts.append({
+                "part_number": part_number,
+                "url": signed.url,
+                "method": signed.method,
+                "headers": signed.required_headers,
+                "expires_in": PRESIGN_SECONDS,
+            })
+    except StorageError:
+        return Response({"detail": "Could not authorize upload parts."}, status=503)
+
+    # These URLs are bearer credentials: never persist or log them.
+    return Response({"parts": signed_parts, "expires_in": PRESIGN_SECONDS})
+
+
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])

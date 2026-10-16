@@ -129,6 +129,47 @@ class StorageAdapterTests(unittest.TestCase):
             )
         client.complete_multipart_upload.assert_not_called()
 
+    def test_completed_object_validates_secure_drive_session_id_not_s3_upload_id(self):
+        client = Mock()
+        client.list_parts.return_value = {
+            "Parts": [{"PartNumber": 1, "ETag": '"provider-etag"', "Size": 10}],
+            "IsTruncated": False,
+        }
+        client.head_object.return_value = {
+            "ContentLength": 10,
+            "Metadata": {"securedrive-upload-id": "secure-drive-session-uuid"},
+        }
+        adapter = self.build_adapter(client)
+        stat = adapter.complete_multipart(
+            "quarantine/" + "b" * 32,
+            "s3-provider-multipart-id",
+            [MultipartPart(part_number=1, etag='"provider-etag"')],
+            expected_size=10,
+            expected_upload_session_id="secure-drive-session-uuid",
+        )
+        self.assertEqual(stat.size_bytes, 10)
+        client.complete_multipart_upload.assert_called_once()
+
+    def test_completed_object_rejects_mismatched_secure_drive_session_id(self):
+        client = Mock()
+        client.list_parts.return_value = {
+            "Parts": [{"PartNumber": 1, "ETag": '"provider-etag"', "Size": 10}],
+            "IsTruncated": False,
+        }
+        client.head_object.return_value = {
+            "ContentLength": 10,
+            "Metadata": {"securedrive-upload-id": "different-session"},
+        }
+        adapter = self.build_adapter(client)
+        with self.assertRaises(StorageIntegrityError):
+            adapter.complete_multipart(
+                "quarantine/" + "b" * 32,
+                "s3-provider-multipart-id",
+                [MultipartPart(part_number=1, etag='"provider-etag"')],
+                expected_size=10,
+                expected_upload_session_id="secure-drive-session-uuid",
+            )
+
     def test_presigned_url_lifetime_is_capped(self):
         adapter = self.build_adapter(Mock(), max_presigned_url_seconds=60)
         with self.assertRaises(StorageNonRetryableError):

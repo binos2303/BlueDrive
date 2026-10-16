@@ -87,6 +87,7 @@ class StorageAdapter(Protocol):
         expected_size: int,
         expected_part_size: int | None = None,
         expected_part_count: int | None = None,
+        expected_upload_session_id: str | None = None,
     ) -> ObjectStat: ...
 
     def abort_multipart(self, object_key: str, upload_id: str) -> None: ...

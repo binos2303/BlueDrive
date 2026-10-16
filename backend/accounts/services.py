@@ -24,13 +24,15 @@ def get_personal_tenant(user):
             "status": Membership.Status.ACTIVE,
         },
     )
+    
     QuotaAccount.objects.get_or_create(
         tenant=tenant,
         scope=QuotaAccount.Scope.TENANT,
         defaults={
-            "limit_bytes": None,
+            "limit_bytes": 10 * 1024 * 1024,
             "used_bytes": 0,
             "reserved_bytes": 0,
         },
     )
+
     return tenant

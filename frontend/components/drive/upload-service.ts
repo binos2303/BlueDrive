@@ -68,6 +68,7 @@ const removeSessionValue = (key: string) => {
 
 type UploadSessionResponse = { upload_id: string; state: string; part_size: number };
 type PartAuthorization = { url: string; method: "PUT"; headers: Record<string, string>; expires_in: number };
+type AuthorizedPart = PartAuthorization & { part_number: number };
 
 function uploadPart(url: string, headers: Record<string, string>, blob: Blob, signal: AbortSignal,
   report: (loaded: number) => void): Promise<string> {
@@ -80,7 +81,10 @@ function uploadPart(url: string, headers: Record<string, string>, blob: Blob, si
     xhr.onload = () => {
       const etag = xhr.getResponseHeader("ETag");
       if (xhr.status >= 200 && xhr.status < 300 && etag) resolve(etag);
-      else reject(Object.assign(new Error(`Storage part upload failed (${xhr.status}).`), { retryable: [408, 429, 500, 502, 503, 504].includes(xhr.status) || xhr.status === 403 }));
+      else reject(Object.assign(new Error(`Storage part upload failed (${xhr.status}).`), {
+        status: xhr.status,
+        retryable: [408, 429, 500, 502, 503, 504].includes(xhr.status) || xhr.status === 403,
+      }));
     };
     xhr.onerror = () => reject(Object.assign(new Error("Network interrupted during part upload."), { retryable: true }));
     xhr.ontimeout = () => reject(Object.assign(new Error("Upload part timed out."), { retryable: true }));
@@ -96,9 +100,27 @@ async function sha256Hex(file: File): Promise<string> {
 }
 
 async function authorize(uploadId: string, part: number): Promise<PartAuthorization> {
+  // Single-part fallback is used only when a previously issued batch URL expires.
   return requestUploadApi<PartAuthorization>(`/files/api/uploads/${uploadId}/parts/${part}/authorization/`, {
     method: "POST", headers: await accountCsrfHeaders(),
   });
+}
+
+async function authorizeBatch(uploadId: string, partNumbers: number[]): Promise<AuthorizedPart[]> {
+  if (partNumbers.length === 0) return [];
+  const response = await requestUploadApi<{ parts: AuthorizedPart[] }>(
+    `/files/api/uploads/${uploadId}/parts/authorizations/`,
+    {
+      method: "POST",
+      headers: { ...(await accountCsrfHeaders()), "Content-Type": "application/json" },
+      body: JSON.stringify({ part_numbers: partNumbers }),
+    },
+  );
+  const authorized = new Map(response.parts.map((part) => [part.part_number, part]));
+  if (partNumbers.some((partNumber) => !authorized.has(partNumber))) {
+    throw new Error("Storage authorization did not include every requested upload part.");
+  }
+  return partNumbers.map((partNumber) => authorized.get(partNumber)!);
 }
 
 async function requestUploadApi<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -164,6 +186,11 @@ export const djangoMultipartUploadService: UploadService = {
     observer.onStatus("uploading", uploadId);
     if (alreadyCompleting) observer.onStatus("verifying", uploadId);
     const count = Math.ceil(file.size / PART_SIZE);
+    const authorizedParts = new Map<number, PartAuthorization>();
+    if (!alreadyCompleting && count > 0) {
+      const batch = await authorizeBatch(uploadId!, Array.from({ length: count }, (_, index) => index + 1));
+      batch.forEach((part) => authorizedParts.set(part.part_number, part));
+    }
     const completed = new Map<number, string>();
     const loadedByPart = new Map<number, number>();
     let next = 1;
@@ -176,7 +203,8 @@ export const djangoMultipartUploadService: UploadService = {
         const part = file.slice(start, Math.min(file.size, start + PART_SIZE));
         for (let attempt = 0; attempt <= PART_RETRIES; attempt++) {
           try {
-            const permission = await authorize(uploadId!, partNumber);
+            const permission = authorizedParts.get(partNumber);
+            if (!permission) throw new Error(`Missing storage authorization for part ${partNumber}.`);
             const etag = await uploadPart(permission.url, permission.headers, part, signal, (loaded) => {
               loadedByPart.set(partNumber, loaded);
               observer.onProgress({ uploadedBytes: [...loadedByPart.values()].reduce((a, b) => a + b, 0), totalBytes: file.size });
@@ -189,6 +217,10 @@ export const djangoMultipartUploadService: UploadService = {
             if (signal.aborted) throw error;
             if (attempt === PART_RETRIES || (error as { retryable?: boolean }).retryable !== true) { fatal = error; return; }
             loadedByPart.delete(partNumber);
+            if ((error as { status?: number }).status === 403) {
+              const refreshed = await authorize(uploadId!, partNumber);
+              authorizedParts.set(partNumber, refreshed);
+            }
             await sleep(Math.min(2000, 200 * (2 ** attempt) + Math.random() * 150));
           }
         }

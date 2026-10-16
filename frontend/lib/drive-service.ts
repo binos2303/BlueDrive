@@ -111,6 +111,26 @@ export type DriveItem = Omit<DriveApiItem, "size" | "modified"> & {
 
 export type DriveListView = "drive" | "recent" | "trash" | "shared";
 
+export type DriveFolderAncestor = {
+  id: number;
+  name: string;
+};
+
+export type DriveFolderDetails = {
+  type: "folder";
+  name: string;
+  owner: string;
+  created_at: string;
+  modified_at: string;
+  location: string;
+  ancestors: DriveFolderAncestor[];
+  folder_count: number;
+  file_count: number;
+  access: string;
+  shared_by: string | null;
+  last_action: string;
+};
+
 export async function getDriveItems(folderId: number | null, view: DriveListView = "drive"): Promise<DriveItem[]> {
   const params = new URLSearchParams({ view });
   if (folderId !== null) params.set("folder", String(folderId));
@@ -120,4 +140,17 @@ export async function getDriveItems(folderId: number | null, view: DriveListView
     size: formatBytes(item.size),
     modified: new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(item.modified)),
   }));
+}
+
+
+export async function getDriveFolderDetails(
+  folderId: number,
+): Promise<DriveFolderDetails> {
+  if (!Number.isSafeInteger(folderId) || folderId <= 0) {
+    throw new Error("Invalid folder ID.");
+  }
+
+  return requestAccountApi<DriveFolderDetails>(
+    `/drive/folder/${folderId}/details/`,
+  );
 }
