@@ -11,7 +11,7 @@ export default function DriveNewMenu() {
     <ContextMenu
       label="Create or upload"
       trigger={<><span aria-hidden="true">+</span><span>New</span></>}
-      triggerClassName="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-brand px-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-brand-hover"
+      triggerClassName="flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-brand px-2.5 font-sans text-[13px] font-semibold text-white transition-colors hover:bg-brand-hover"
       actions={[
         {
           label: "Upload files",

@@ -424,7 +424,7 @@ export default function UploadManager({
         visible ? (
           <section
             aria-label="Upload status"
-            className="fixed bottom-0 right-0 z-[80] flex max-h-[min(65vh,30rem)] w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-border bg-background shadow-[var(--shadow-popover)]"
+            className="fixed bottom-0 right-0 z-[80] flex max-h-[min(65vh,30rem)] w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-border bg-background font-sans shadow-[var(--shadow-popover)]"
           >
             <div className="flex min-h-12 items-center gap-2 border-b border-border bg-surface px-3 py-2">
               <div className="min-w-0 flex-1">
