@@ -4,12 +4,15 @@ import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import Sidebar from "./Sidebar";
+import SettingsSidebar from "./SettingsSidebar";
 import Header from "./Header";
 
 export default function DashboardShell({
   children,
+  settingsNavigation,
 }: {
   children: ReactNode;
+  settingsNavigation?: { active: string; onChange: (section: string) => void };
 }) {
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const navigationRef = useRef<HTMLElement>(null);
@@ -65,11 +68,14 @@ export default function DashboardShell({
           className="fixed inset-0 z-40 bg-foreground/35 lg:hidden"
         />
       )}
-      <Sidebar
-        navigationRef={navigationRef}
-        mobileOpen={mobileNavigationOpen}
-        onNavigate={() => setMobileNavigationOpen(false)}
-      />
+      {settingsNavigation ? (
+        <SettingsSidebar navigationRef={navigationRef} mobileOpen={mobileNavigationOpen}
+          active={settingsNavigation.active} onChange={settingsNavigation.onChange}
+          onNavigate={() => setMobileNavigationOpen(false)} />
+      ) : (
+        <Sidebar navigationRef={navigationRef} mobileOpen={mobileNavigationOpen}
+          onNavigate={() => setMobileNavigationOpen(false)} />
+      )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <Header

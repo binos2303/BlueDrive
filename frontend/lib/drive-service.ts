@@ -1,4 +1,5 @@
 import { requestAccountApi } from "@/lib/account-service";
+import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 
 export type DownloadProgress = { loaded: number; total: number | null };
 
@@ -32,6 +33,8 @@ export function downloadDriveFile(
     xhr.withCredentials = true;
     xhr.responseType = "blob";
     xhr.setRequestHeader("Accept", "application/octet-stream, application/json");
+    const workspaceId = getActiveWorkspaceIdForRequest();
+    if (workspaceId) xhr.setRequestHeader("X-Workspace-ID", workspaceId);
     xhr.onprogress = (event) => onProgress({
       loaded: event.loaded,
       total: event.lengthComputable && event.total > 0 ? event.total : null,
@@ -89,6 +92,8 @@ type DriveApiItem = {
   modified: string;
   size: number | null;
   type: "folder" | "document" | "image";
+  starred?: boolean;
+  canManage?: boolean;
 };
 
 function formatBytes(bytes: number | null): string {
@@ -109,7 +114,7 @@ export type DriveItem = Omit<DriveApiItem, "size" | "modified"> & {
   modified: string;
 };
 
-export type DriveListView = "drive" | "recent" | "trash" | "shared";
+export type DriveListView = "drive" | "recent" | "trash" | "shared" | "starred";
 
 export type DriveFolderAncestor = {
   id: number;
@@ -131,13 +136,20 @@ export type DriveFolderDetails = {
   last_action: string;
 };
 
-export async function getDriveItems(folderId: number | null, view: DriveListView = "drive"): Promise<DriveItem[]> {
+export async function getDriveItems(
+  folderId: number | null,
+  view: DriveListView = "drive",
+  searchQuery = "",
+): Promise<DriveItem[]> {
   const params = new URLSearchParams({ view });
-  if (folderId !== null) params.set("folder", String(folderId));
+  const query = searchQuery.trim().slice(0, 255);
+  if (query && view === "drive") params.set("q", query);
+  else if (folderId !== null) params.set("folder", String(folderId));
   const result = await requestAccountApi<{ items: DriveApiItem[] }>(`/drive/api/items/?${params.toString()}`);
   return result.items.map((item) => ({
     ...item,
     size: formatBytes(item.size),
+    starred: Boolean(item.starred),
     modified: new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(item.modified)),
   }));
 }

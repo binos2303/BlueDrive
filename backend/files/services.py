@@ -23,7 +23,7 @@ from security.aes_service import (
 
 
 
-def unique_copy_name(model, field_name, original_name, *, folder=None, owner=None, exclude_id=None):
+def unique_copy_name(model, field_name, original_name, *, folder=None, owner=None, exclude_id=None, workspace=None):
     """Return a collision-free copy name in the target folder."""
     if "." in original_name:
         stem, extension = original_name.rsplit(".", 1)
@@ -41,6 +41,8 @@ def unique_copy_name(model, field_name, original_name, *, folder=None, owner=Non
         filters["folder"] = folder
     else:
         filters["folder__isnull"] = True
+    if workspace is not None:
+        filters["workspace"] = workspace
 
     if exclude_id is not None:
         queryset = model.objects.filter(**filters).exclude(id=exclude_id)
@@ -99,6 +101,7 @@ def _clone_encrypted_file(source_file, *, owner, folder, file_name, tenant=None)
             else tenant or get_personal_tenant(owner)
         ),
         owner=owner,
+        workspace=(folder.workspace if folder is not None else source_file.workspace),
         folder=folder,
         file_name=file_name,
         file_size=source_file.file_size,
@@ -170,6 +173,7 @@ def clone_encrypted_file_with_quota(
 
     upload = UploadSession.objects.create(
         tenant=tenant,
+        workspace=(folder.workspace if folder is not None else source_file.workspace),
         initiated_by=owner,
         target_folder=folder,
         client_name=file_name[:255],
@@ -217,7 +221,7 @@ def clone_encrypted_file_with_quota(
         raise
 
 
-def unique_upload_name(model, field_name, original_name, *, folder=None, owner=None):
+def unique_upload_name(model, field_name, original_name, *, folder=None, owner=None, workspace=None):
     """Return a collision-free upload name using (1), (2), ... suffixes."""
     from pathlib import PurePath
 
@@ -236,6 +240,8 @@ def unique_upload_name(model, field_name, original_name, *, folder=None, owner=N
             filters["folder"] = folder
         else:
             filters["folder__isnull"] = True
+        if workspace is not None:
+            filters["workspace"] = workspace
         if not model.objects.filter(**filters).exists():
             return candidate
         number += 1

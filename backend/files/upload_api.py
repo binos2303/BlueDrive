@@ -3,6 +3,8 @@ import hashlib
 import io
 import json
 import re
+import logging
+logger = logging.getLogger(__name__)
 from datetime import timedelta
 
 from django.core.exceptions import ValidationError
@@ -15,8 +17,11 @@ from rest_framework.decorators import api_view, authentication_classes, permissi
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from accounts.access import active_membership, get_default_tenant
-from files.models import File, UploadFinalizationJob, UploadSession
+from accounts.access import (
+    active_membership, can_access_workspace, get_default_tenant, get_default_workspace,
+    resolve_request_workspace,
+)
+from files.models import File, QuotaReservation, UploadFinalizationJob, UploadSession
 from files.quota import QuotaExceeded, QuotaStateError, finalize_upload_quota, reserve_upload_quota
 from files.services import unique_upload_name
 from files.storage_adapters import get_storage_adapter
@@ -31,12 +36,17 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _owned_session(request, upload_id):
-    return get_object_or_404(
-        UploadSession.objects.select_related("tenant", "target_folder"),
+    session = get_object_or_404(
+        UploadSession.objects.select_related("tenant", "target_folder", "workspace"),
         pk=upload_id,
         initiated_by=request.user,
         tenant_id__in=[m.tenant_id for m in active_membership_list(request.user)],
     )
+    if not can_access_workspace(request.user, session.workspace):
+        # Membership may have been revoked after the upload was initialized.
+        from django.http import Http404
+        raise Http404
+    return session
 
 
 def active_membership_list(user):
@@ -59,105 +69,342 @@ def _initialize_upload_session(session, user, adapter):
     session.save(update_fields=["provider_upload_id", "state", "updated_at"])
 
 
+def _release_reserved_quota_after_setup_failure(upload_session_id, actor):
+    """Release quota only when this upload has a complete active reservation.
+
+    Reservation creation is atomic. For example, a quota-exceeded exception
+    rolls back reservation writes, so attempting to finalize a nonexistent
+    reservation would only create a second, misleading error.
+    """
+    states = list(
+        QuotaReservation.objects.filter(upload_session_id=upload_session_id)
+        .order_by("quota_account_id")
+        .values_list("state", flat=True)
+    )
+    if not states:
+        logger.debug(
+            "No quota reservation to release for upload session_id=%s",
+            upload_session_id,
+        )
+        return False
+
+    if not all(state == QuotaReservation.State.RESERVED for state in states):
+        logger.warning(
+            "Skipping quota release for upload session_id=%s because reservation states are not all active: %s",
+            upload_session_id,
+            ",".join(states),
+        )
+        return False
+
+    finalize_upload_quota(upload_session_id, completed=False, actor=actor)
+    return True
+
+
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def create_upload(request):
+    """Create or resume a browser-to-S3 multipart upload session."""
     data = request.data
+
+    # Keep the request contract used by the existing frontend:
+    # {"name": str, "size_bytes": int, "sha256": hex, "folder_id": optional}
     try:
-        name = str(data.get("name", ""))
+        name = data.get("name", "")
+        if not isinstance(name, str):
+            raise ValidationError("Invalid file name.")
         validate_filename(name)
-        size = int(data.get("size_bytes", -1))
+
+        raw_size = data.get("size_bytes", -1)
+        if isinstance(raw_size, bool):
+            raise ValidationError("Invalid file size.")
+        size = int(raw_size)
         if size < 0 or size > MAX_UPLOAD_SIZE:
             raise ValidationError("File size is outside the supported limit.")
-        sha256 = str(data.get("sha256", "")).lower()
+
+        sha256 = data.get("sha256", "")
+        if not isinstance(sha256, str):
+            raise ValidationError("Invalid checksum.")
+        sha256 = sha256.lower()
         if not _SHA256.fullmatch(sha256):
             raise ValidationError("Checksum must be a SHA-256 hex digest.")
-    except (ValueError, ValidationError):
-        return Response({"detail": "Invalid file name, size, or checksum."}, status=400)
+    except (TypeError, ValueError, ValidationError):
+        return Response(
+            {"detail": "Invalid file name, size, or checksum."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
+    # Resolve the tenant and workspace server-side. The explicit workspace
+    # selector is independently authorized by membership/role; it may belong
+    # to a collaborator's tenant rather than the uploader's personal tenant.
     folder = None
     folder_id = data.get("folder_id")
     if folder_id:
-        folder = get_object_or_404(Folder, pk=folder_id, deleted_at__isnull=True)
+        folder = get_object_or_404(
+            Folder.objects.select_related("tenant", "workspace"),
+            pk=folder_id,
+            deleted_at__isnull=True,
+        )
         if not can_edit_folder(folder, request.user):
-            return Response({"detail": "Destination is unavailable."}, status=404)
+            return Response(
+                {"detail": "Destination is unavailable."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         tenant = folder.tenant
+        workspace = folder.workspace
     else:
         try:
             tenant = get_default_tenant(request.user)
+            workspace = resolve_request_workspace(request, tenant, data)
+            if workspace is None:
+                return Response(
+                    {"detail": "Workspace is unavailable or not accessible."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            tenant = workspace.tenant
         except Exception:
-            return Response({"detail": "No active workspace is available."}, status=403)
+            logger.exception(
+                "Unable to resolve default tenant/workspace for user_id=%s",
+                request.user.pk,
+            )
+            return Response(
+                {"detail": "No active workspace is available."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-    if active_membership(request.user, tenant.pk) is None:
-        return Response({"detail": "Destination is not writable."}, status=404)
+    if active_membership(request.user, tenant.pk) is None or not can_access_workspace(request.user, workspace):
+        return Response(
+            {"detail": "Destination is not writable."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
-    idem = request.headers.get("Idempotency-Key", "")[:128]
-    if idem:
-        existing = UploadSession.objects.filter(tenant=tenant, initiated_by=request.user, idempotency_key=idem).first()
-        if existing:
-            if existing.expected_size_bytes != size or existing.client_name != name or existing.expected_sha256 != sha256 or existing.target_folder_id != getattr(folder, "pk", None):
-                return Response({"detail": "Idempotency key was already used for another upload."}, status=409)
-            if existing.expires_at <= timezone.now():
-                return Response({"detail": "Upload session expired; start a new upload."}, status=409)
+    # The database column is max_length=128; do not use 255 here.
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()[:128]
+
+    def conflict_for_existing(session, message):
+        return Response(
+            {
+                "detail": message,
+                "upload_id": str(session.pk),
+                "state": session.state,
+                "failure_code": session.failure_code or None,
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    def response_for_session(session, response_status):
+        return Response(
+            {
+                "upload_id": str(session.pk),
+                "state": session.state,
+                "part_size": PART_SIZE,
+                "expires_at": session.expires_at,
+            },
+            status=response_status,
+        )
+
+    def payload_matches(session):
+        return (
+            session.expected_size_bytes == size
+            and session.client_name == name
+            and session.expected_sha256 == sha256
+            and session.target_folder_id == getattr(folder, "pk", None)
+            and session.workspace_id == workspace.pk
+        )
+
+    def existing_session_response(session):
+        if not payload_matches(session):
+            return conflict_for_existing(
+                session,
+                "Idempotency key was already used for another upload.",
+            )
+        if session.state == UploadSession.State.FAILED:
+            return conflict_for_existing(
+                session,
+                "The previous upload failed. Start a new upload with a new Idempotency-Key.",
+            )
+        if session.state in (
+            UploadSession.State.CANCELED,
+            UploadSession.State.EXPIRED,
+        ) or session.expires_at <= timezone.now():
+            return conflict_for_existing(
+                session,
+                "Upload session is no longer active. Start a new upload with a new Idempotency-Key.",
+            )
+
+        try:
+            _initialize_upload_session(session, request.user, adapter)
+        except QuotaExceeded:
+            logger.warning("Upload quota exceeded for session_id=%s", session.pk)
+            return Response(
+                {"detail": "Available storage quota is insufficient."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        except StorageError:
+            logger.exception(
+                "Storage error while initializing existing session_id=%s",
+                session.pk,
+            )
+            return Response(
+                {"detail": "Upload initialization is temporarily unavailable."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected error while initializing existing session_id=%s",
+                session.pk,
+            )
+            return Response(
+                {"detail": "Unable to initialize upload session."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        session.refresh_from_db()
+        if session.state == UploadSession.State.FAILED:
+            return conflict_for_existing(
+                session,
+                "The previous upload failed. Start a new upload with a new Idempotency-Key.",
+            )
+        if session.state == UploadSession.State.INITIATED:
+            return Response(
+                {"detail": "Upload session is not ready.", "upload_id": str(session.pk)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return response_for_session(session, status.HTTP_200_OK)
+
+    # Reuse an existing idempotent session when the client supplied a key.
+    if idempotency_key:
+        existing = UploadSession.objects.filter(
+            tenant=tenant,
+            initiated_by=request.user,
+            idempotency_key=idempotency_key,
+        ).first()
+        if existing is not None:
             try:
-                _initialize_upload_session(existing, request.user, get_storage_adapter())
-            except QuotaExceeded:
-                return Response({"detail": "Available storage quota is insufficient."}, status=413)
-            except StorageError:
-                return Response({"detail": "Upload initialization is temporarily unavailable."}, status=503)
-            return Response({"upload_id": str(existing.pk), "state": existing.state, "part_size": PART_SIZE, "expires_at": existing.expires_at}, status=200)
+                adapter = get_storage_adapter()
+            except Exception:
+                logger.exception("Storage adapter unavailable for user_id=%s", request.user.pk)
+                return Response(
+                    {"detail": "Object storage is not available."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            return existing_session_response(existing)
 
+    # Create the object key through the configured adapter; do not invent a key format.
     try:
         adapter = get_storage_adapter()
-        object_key = adapter.create_object_key("quarantine")
+        object_key = adapter.create_object_key("staging")
     except StorageError:
-        return Response({"detail": "Object storage is not available."}, status=503)
+        logger.exception("Object storage unavailable for user_id=%s", request.user.pk)
+        return Response(
+            {"detail": "Object storage is not available."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        logger.exception("Unable to prepare storage for user_id=%s", request.user.pk)
+        return Response(
+            {"detail": "Object storage is not available."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
     try:
         session = UploadSession.objects.create(
-            tenant=tenant, initiated_by=request.user, target_folder=folder,
-            client_name=name, expected_size_bytes=size, expected_sha256=sha256,
-            expires_at=timezone.now() + timedelta(hours=1), idempotency_key=idem,
+            tenant=tenant,
+            workspace=workspace,
+            initiated_by=request.user,
+            target_folder=folder,
+            client_name=name,
+            expected_size_bytes=size,
+            expected_sha256=sha256,
+            expires_at=timezone.now() + timedelta(hours=1),
+            idempotency_key=idempotency_key,
             object_key=object_key,
         )
     except IntegrityError:
-        if not idem:
-            raise
-        existing = get_object_or_404(UploadSession, tenant=tenant, initiated_by=request.user, idempotency_key=idem)
-        if existing.expected_size_bytes != size or existing.client_name != name or existing.expected_sha256 != sha256 or existing.target_folder_id != getattr(folder, "pk", None):
-            return Response({"detail": "Idempotency key was already used for another upload."}, status=409)
-        if existing.expires_at <= timezone.now():
-            return Response({"detail": "Upload session expired; start a new upload."}, status=409)
-        try:
-            _initialize_upload_session(existing, request.user, adapter)
-        except QuotaExceeded:
-            return Response({"detail": "Available storage quota is insufficient."}, status=413)
-        except StorageError:
-            return Response({"detail": "Upload initialization is temporarily unavailable."}, status=503)
-        return Response({"upload_id": str(existing.pk), "state": existing.state, "part_size": PART_SIZE, "expires_at": existing.expires_at}, status=200)
+        # A concurrent request may have won the idempotency-key race.
+        if not idempotency_key:
+            logger.exception("UploadSession insert failed without an idempotency key")
+            return Response(
+                {"detail": "Unable to create upload session."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        existing = UploadSession.objects.filter(
+            tenant=tenant,
+            initiated_by=request.user,
+            idempotency_key=idempotency_key,
+        ).first()
+        if existing is None:
+            logger.exception(
+                "UploadSession uniqueness conflict but no matching row was found; user_id=%s",
+                request.user.pk,
+            )
+            return Response(
+                {"detail": "Unable to create upload session."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return existing_session_response(existing)
+
     try:
         _initialize_upload_session(session, request.user, adapter)
     except QuotaExceeded:
+        logger.warning("Upload quota exceeded for session_id=%s", session.pk)
         session.state = UploadSession.State.FAILED
         session.failure_code = "quota_exceeded"
         session.save(update_fields=["state", "failure_code", "updated_at"])
-        return Response({"detail": "Available storage quota is insufficient."}, status=413)
+        # reserve_upload_quota() is atomic and raised before creating a
+        # reservation. Do not finalize quota here: there is nothing to release.
+        return Response(
+            {"detail": "Available storage quota is insufficient.", "failure_code": "quota_exceeded"},
+            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
     except Exception:
+        logger.exception(
+            "Upload initialization failed for session_id=%s, user_id=%s",
+            session.pk,
+            request.user.pk,
+        )
         try:
             if session.provider_upload_id:
                 adapter.abort_multipart(session.object_key, session.provider_upload_id)
             adapter.delete_object(session.object_key)
         except Exception:
-            pass
-        session.state = UploadSession.State.FAILED
-        session.failure_code = "storage_setup_failed"
-        session.save(update_fields=["state", "failure_code", "updated_at"])
+            logger.exception("Storage cleanup failed for session_id=%s", session.pk)
+
         try:
-            finalize_upload_quota(session.pk, completed=False)
-        except QuotaStateError:
-            pass
-        return Response({"detail": "Upload could not be initialized."}, status=503)
-    return Response({"upload_id": str(session.pk), "state": session.state, "part_size": PART_SIZE, "expires_at": session.expires_at}, status=201)
+            session.refresh_from_db()
+            session.state = UploadSession.State.FAILED
+            session.failure_code = "storage_setup_failed"
+            session.save(update_fields=["state", "failure_code", "updated_at"])
+        except Exception:
+            logger.exception("Could not mark session failed, session_id=%s", session.pk)
+
+        try:
+            _release_reserved_quota_after_setup_failure(session.pk, request.user)
+        except Exception:
+            logger.exception("Unable to release quota after setup failure, session_id=%s", session.pk)
+
+        return Response(
+            {
+                "detail": "Upload could not be initialized.",
+                "upload_id": str(session.pk),
+                "failure_code": "storage_setup_failed",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    session.refresh_from_db()
+    if session.state != UploadSession.State.UPLOADING:
+        logger.error(
+            "Session initialization returned unexpected state: session_id=%s state=%s",
+            session.pk,
+            session.state,
+        )
+        return Response(
+            {"detail": "Upload session is not ready.", "upload_id": str(session.pk), "state": session.state},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    return response_for_session(session, status.HTTP_201_CREATED)
 
 
 @api_view(["POST"])

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ArrowDown,
@@ -20,7 +20,10 @@ import {
   Move,
   Pencil,
   Share2,
+  Star,
   Trash2,
+  RotateCcw,
+  Search,
   X,
 } from "lucide-react";
 import Breadcrumb from "@/components/ui/Breadcrumb";
@@ -47,6 +50,7 @@ import {
   accountCsrfHeaders,
   requestAccountApi,
 } from "@/lib/account-service";
+import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 
 type ViewMode = "list" | "grid";
 type SortDirection = "asc" | "desc";
@@ -55,6 +59,7 @@ type DriveItemType = "folder" | "document" | "image";
 type PendingDestructiveAction = {
   action: "trash" | "delete";
   count: number;
+  targets: DriveItem[];
 };
 
 type SelectionBox = {
@@ -89,6 +94,8 @@ export type DriveItem = {
   modified: string;
   size: string;
   type: DriveItemType;
+  starred?: boolean;
+  canManage?: boolean;
 };
 
 type DriveFileBrowserProps = {
@@ -106,6 +113,7 @@ function listViewForTitle(title: string): DriveListView | null {
   if (title === "Recent") return "recent";
   if (title === "Trash") return "trash";
   if (title === "Shared with me") return "shared";
+  if (title === "Starred") return "starred";
   return null;
 }
 
@@ -197,6 +205,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   }, [pathname, title]);
   const [driveItems, setDriveItems] = useState(items);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchQueryRef = useRef("");
   const [loading, setLoading] = useState(listView !== null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [folderDetails, setFolderDetails] = useState<DriveFolderDetails | null>(null);
@@ -214,6 +224,11 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     progress: DownloadProgress | null;
   } | null>(null);
   const [pendingDestructive, setPendingDestructive] = useState<PendingDestructiveAction | null>(null);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [shareTargets, setShareTargets] = useState<DriveItem[]>([]);
+  const [shareEmail, setShareEmail] = useState("");
+  const [sharePermission, setSharePermission] = useState<"viewer" | "editor">("viewer");
+  const [sharing, setSharing] = useState(false);
   // Only OS/browser file drags activate the upload overlay. Internal Drive drags
   // must never wash out the whole interface.
   const [fileDropActive, setFileDropActive] = useState(false);
@@ -257,22 +272,30 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [breadcrumbDropTargetIndex, setBreadcrumbDropTargetIndex] = useState<number | null>(null);
   const { enqueue, openManager } = useUploadManager();
 
-  const loadItems = useCallback(async (folderId: number | null, view: DriveListView) => {
+  const loadItems = useCallback(async (
+    folderId: number | null,
+    view: DriveListView,
+    queryOverride?: string,
+  ) => {
     const requestId = ++loadRequestIdRef.current;
+    const query = view === "drive"
+      ? (queryOverride ?? searchQueryRef.current).trim().slice(0, 255)
+      : "";
+    const effectiveFolderId = query ? null : folderId;
     setLoading(true);
     setLoadError(null);
     try {
-      if (view === "drive" && folderId !== null) {
+      if (view === "drive" && effectiveFolderId !== null) {
         setFolderDetails(null);
         const [details, nextItems] = await Promise.all([
-          getDriveFolderDetails(folderId),
-          getDriveItems(folderId, view),
+          getDriveFolderDetails(effectiveFolderId),
+          getDriveItems(effectiveFolderId, view, query),
         ]);
         if (requestId !== loadRequestIdRef.current) return;
         setFolderDetails(details);
         setDriveItems(nextItems);
       } else {
-        const nextItems = await getDriveItems(folderId, view);
+        const nextItems = await getDriveItems(effectiveFolderId, view, query);
         if (requestId !== loadRequestIdRef.current) return;
         setFolderDetails(null);
         setDriveItems(nextItems);
@@ -421,17 +444,77 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
   useEffect(() => {
     if (!listView) return;
+    const initialQuery = listView === "drive"
+      ? new URLSearchParams(window.location.search).get("q")?.trim().slice(0, 255) ?? ""
+      : "";
+    searchQueryRef.current = initialQuery;
     const timer = window.setTimeout(() => {
-      void loadItems(listView === "drive" ? currentFolderId : null, listView);
+      setSearchQuery(initialQuery);
+      void loadItems(listView === "drive" && !initialQuery ? currentFolderId : null, listView, initialQuery);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [listView, currentFolderId, loadItems]);
+
+  useEffect(() => {
+    const handleSearchChanged = (event: Event) => {
+      const customEvent = event as CustomEvent<{ query?: string }>;
+      const query = (customEvent.detail?.query ?? "").trim().slice(0, 255);
+      searchQueryRef.current = query;
+      setSearchQuery(query);
+      setSelectedIds(new Set());
+      setSelectionAnchorId(null);
+      setFolderDetails(null);
+      if (query) {
+        void loadItems(null, "drive", query);
+      } else if (listView === "drive") {
+        void loadItems(currentFolderId, "drive", "");
+      }
+    };
+    const handleHistoryNavigation = () => {
+      const query = (new URLSearchParams(window.location.search).get("q") ?? "").trim().slice(0, 255);
+      if (query === searchQueryRef.current) return;
+      searchQueryRef.current = query;
+      setSearchQuery(query);
+      setSelectedIds(new Set());
+      setSelectionAnchorId(null);
+      if (listView === "drive") void loadItems(query ? null : currentFolderId, "drive", query);
+    };
+    window.addEventListener(DRIVE_SEARCH_CHANGED_EVENT, handleSearchChanged);
+    window.addEventListener("popstate", handleHistoryNavigation);
+    return () => {
+      window.removeEventListener(DRIVE_SEARCH_CHANGED_EVENT, handleSearchChanged);
+      window.removeEventListener("popstate", handleHistoryNavigation);
+    };
+  }, [currentFolderId, listView, loadItems]);
+
+  useEffect(() => {
+    function handleWorkspaceChanged() {
+      searchQueryRef.current = "";
+      setSearchQuery("");
+      setSelectedIds(new Set());
+      setSelectionAnchorId(null);
+      setFolderDetails(null);
+      if (currentFolderId !== null) {
+        // A folder ID is not portable between workspaces. Return to the selected
+        // workspace root rather than leaving a stale folder route on screen.
+        router.replace("/drive");
+        return;
+      }
+      if (listView) void loadItems(null, listView, "");
+    }
+
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
+  }, [currentFolderId, listView, loadItems, router]);
 
   useEffect(() => {
     function handleUploadCompleted(event: Event) {
       const detail = (event as CustomEvent<{ destinationId: string | null }>).detail;
       if (!detail || !listView) return;
 
+      // Quota and the sidebar folder tree are cached summaries. Invalidate them
+      // after every completed upload, even when the upload target is elsewhere.
+      window.dispatchEvent(new Event(FOLDER_TREE_REFRESH_EVENT));
       if (listView === "drive") {
         const currentDestinationId = currentFolderId === null ? null : String(currentFolderId);
         if (detail.destinationId !== currentDestinationId) return;
@@ -453,6 +536,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     () => driveItems.filter((item) => selectedIds.has(item.id)),
     [driveItems, selectedIds],
   );
+  const selectedCanManage = selectedItems.length > 0 && selectedItems.every((item) => item.canManage !== false);
   const sortedItems = useMemo(
     () =>
       [...driveItems].sort((first, second) => {
@@ -484,7 +568,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     [sortedItems],
   );
 
-  const addUploadFiles = useCallback((files: readonly { file: File; relativePath: string }[]) => {
+  const addUploadFiles = useCallback(async (files: readonly { file: File; relativePath: string }[]) => {
     if (files.length === 0) {
       setToast("No files were provided by the browser. Folder access may have been denied.");
       return;
@@ -494,17 +578,93 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       return;
     }
 
-    enqueue(files.map(({ file, relativePath }) => {
-      const normalizedPath = relativePath.replace(/\\/g, "/");
-      const validationError = validateUploadPath(normalizedPath, file);
+    const baseDestinationId = currentFolderId !== null ? String(currentFolderId) : null;
+    const normalizedFiles = files.map(({ file, relativePath }) => {
+      const normalizedPath = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
       return {
         file,
         relativePath: normalizedPath,
-        validationError,
+        validationError: validateUploadPath(normalizedPath, file),
       };
-    }), currentFolderId !== null ? String(currentFolderId) : null);
-    openManager();
-  }, [currentFolderId, enqueue, openManager]);
+    });
+
+    // Folder paths shown in the queue must correspond to real Folder rows. Resolve each
+    // parent path first, then attach that folder's ID to the individual upload task.
+    const folderIdsByPath = new Map<string, string>();
+    const createdOrReusedFolderIds = new Set<string>();
+    const ensureFolder = async (name: string, parentId: string | null): Promise<string> => {
+      const cacheKey = `${parentId ?? "root"}::${name.toLocaleLowerCase()}`;
+      const cached = folderIdsByPath.get(cacheKey);
+      if (cached) return cached;
+
+      // Reuse a same-named folder if it already exists under this parent.
+      const siblings = await getDriveItems(parentId === null ? null : Number(parentId), "drive");
+      const existing = siblings.find((item) =>
+        item.type === "folder" && item.name.localeCompare(name, undefined, { sensitivity: "accent" }) === 0,
+      );
+      if (existing) {
+        const id = String(existing.folderId ?? existing.id);
+        folderIdsByPath.set(cacheKey, id);
+        return id;
+      }
+
+      const created = await requestAccountApi<{
+        id: number;
+        name: string;
+        parent_id: number | null;
+        type: "folder";
+      }>("/drive/api/folders/", {
+        method: "POST",
+        headers: await accountCsrfHeaders(),
+        body: JSON.stringify({ name, parent_id: parentId === null ? null : Number(parentId) }),
+      });
+      const id = String(created.id);
+      folderIdsByPath.set(cacheKey, id);
+      createdOrReusedFolderIds.add(id);
+      return id;
+    };
+
+    try {
+      const queuedFiles: Array<typeof normalizedFiles[number] & { destinationId: string | null }> = [];
+      // Resolve paths sequentially so two files sharing a new parent folder cannot race
+      // and create duplicate folder rows before the in-memory cache is populated.
+      for (const entry of normalizedFiles) {
+        // Invalid entries remain visible as failed/invalid queue items but must not cause
+        // folder creation with unsafe path segments.
+        if (entry.validationError) {
+          queuedFiles.push({ ...entry, destinationId: baseDestinationId });
+          continue;
+        }
+
+        const segments = entry.relativePath.split("/");
+        let destinationId = baseDestinationId;
+        const directorySegments = segments.slice(0, -1);
+        for (const segment of directorySegments) {
+          if (!segment || segment === "." || segment === "..") {
+            throw new Error(`Invalid folder path in "${entry.relativePath}". No upload tasks were added.`);
+          }
+          destinationId = await ensureFolder(segment, destinationId);
+        }
+        queuedFiles.push({ ...entry, destinationId });
+      }
+
+      enqueue(queuedFiles.map(({ file, relativePath, validationError, destinationId }) => ({
+        file,
+        relativePath,
+        validationError,
+        destinationId,
+      })), baseDestinationId);
+      if (createdOrReusedFolderIds.size > 0) {
+        notifyFolderTreeChanged();
+        if (listView === "drive") await loadItems(currentFolderId, "drive");
+      }
+      openManager();
+    } catch (error) {
+      setToast(error instanceof Error
+        ? `Could not prepare the folder structure. No files were queued. ${error.message}`
+        : "Could not prepare the folder structure. No files were queued.");
+    }
+  }, [currentFolderId, enqueue, listView, loadItems, openManager]);
 
   function handleSelectedFiles(fileList: FileList | null) {
     if (!fileList) return;
@@ -512,7 +672,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       file,
       relativePath: file.webkitRelativePath || file.name,
     }));
-    addUploadFiles(selected);
+    void addUploadFiles(selected);
   }
 
   function openFolderPicker() {
@@ -559,6 +719,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
       setIsCreateFolderOpen(false);
       setNewFolderName("Untitled folder");
+      notifyFolderTreeChanged();
 
       // Refresh the list first; hide the progress toast after the folder is shown.
       await loadItems(
@@ -833,13 +994,13 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     setToast(`${action} isn't connected yet. No files were changed.`);
   }
 
+  function notifyFolderTreeChanged() {
+    window.dispatchEvent(new Event(FOLDER_TREE_REFRESH_EVENT));
+  }
+
   function openItem(item: DriveItem) {
     if (item.type !== "folder") {
       showNotConnected("Opening files");
-      return;
-    }
-    if (listView !== "drive") {
-      showNotConnected("Opening folders from this view");
       return;
     }
     if (!Number.isSafeInteger(item.folderId) || !item.folderId || item.folderId <= 0) {
@@ -922,6 +1083,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       setIsMoveDialogOpen(false);
       setMoveTargets([]);
       setSelectedIds(new Set());
+      notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       // Successful moves refresh the list silently; keep error notifications below.
     } catch (error) {
@@ -942,6 +1104,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         destination_folder_id: destinationFolderId,
       });
       setSelectedIds(new Set());
+      notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       // Successful drag-and-drop moves refresh the list silently.
     } catch (error) {
@@ -1016,12 +1179,94 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     try {
       const result = await postItemAction("/drive/api/items/duplicate/", targets);
       setSelectedIds(new Set());
+      notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       setToast(result.detail || "Duplicate created successfully.");
     } catch (error) {
       setToast(error instanceof Error ? error.message : "Could not duplicate selected items.");
     } finally {
       setIsDuplicatingItems(false);
+    }
+  }
+
+  async function restoreItems(targets: DriveItem[]) {
+    if (!targets.length) return;
+    try {
+      const result = await postItemAction("/drive/api/items/restore/", targets);
+      setSelectedIds(new Set());
+      notifyFolderTreeChanged();
+      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
+      setToast(result.detail || "Items restored successfully.");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not restore selected items.");
+    }
+  }
+
+  async function applyDestructiveAction(pending: PendingDestructiveAction) {
+    const path = pending.action === "trash"
+      ? "/drive/api/items/trash/"
+      : "/drive/api/items/delete/";
+    try {
+      const result = await postItemAction(path, pending.targets);
+      setSelectedIds(new Set());
+      setSelectionAnchorId(null);
+      notifyFolderTreeChanged();
+      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
+      setToast(result.detail || (pending.action === "trash" ? "Moved to Trash." : "Permanently deleted."));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "The file operation failed. No success was reported.");
+    }
+  }
+
+  async function toggleStar(targets: DriveItem[], desired?: boolean) {
+    if (!targets.length) return;
+    const shouldStar = desired ?? !targets.every((item) => item.starred);
+    try {
+      const result = await postItemAction("/drive/api/items/star/", targets, { starred: shouldStar });
+      setDriveItems((current) => current.map((item) => {
+        const target = targets.some((selected) => selected.id === item.id && selected.type === item.type);
+        return target ? { ...item, starred: shouldStar } : item;
+      }));
+      setSelectedIds(new Set());
+      if (listView && listView !== "drive") {
+        await loadItems(null, listView);
+      }
+      setToast(result.detail || (shouldStar ? "Added to Starred." : "Removed from Starred."));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not update Starred.");
+    }
+  }
+
+  function openShareDialog(targets: DriveItem[]) {
+    if (!targets.length) {
+      setToast("Select at least one item to share.");
+      return;
+    }
+    if (!canManageItemsInDrive("Share")) return;
+    setShareTargets(targets);
+    setShareEmail("");
+    setSharePermission("viewer");
+    setShareDialogOpen(true);
+  }
+
+  async function submitShare(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!shareTargets.length || sharing) return;
+    setSharing(true);
+    try {
+      const result = await postItemAction("/drive/api/items/share/", shareTargets, {
+        email: shareEmail.trim(),
+        permission: sharePermission,
+      });
+      setShareDialogOpen(false);
+      setShareTargets([]);
+      setShareEmail("");
+      setToast(result.detail || "Sharing permission updated.");
+      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not share selected items.");
+    } finally {
+      setSharing(false);
     }
   }
 
@@ -1035,10 +1280,19 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       openMoveDialog(targets);
     } else if (action === "Duplicate") {
       void duplicateItems(targets);
-    } else if (action === "Move to trash" || action === "Delete permanently") {
+    } else if (action === "Restore") {
+      void restoreItems(targets);
+    } else if (action === "Add to Starred") {
+      void toggleStar(targets, true);
+    } else if (action === "Remove from Starred") {
+      void toggleStar(targets, false);
+    } else if (action === "Share") {
+      openShareDialog(targets);
+    } else if (action === "Move to trash" || action === "Move folder to trash" || action === "Delete permanently") {
       setPendingDestructive({
-        action: action === "Move to trash" ? "trash" : "delete",
+        action: action === "Delete permanently" ? "delete" : "trash",
         count: targets.length,
+        targets,
       });
     } else {
       showNotConnected(action);
@@ -1083,6 +1337,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   function createActions(item?: DriveItem): ContextMenuAction[] {
     const actionTarget = item ? [item] : selectedItems;
     const onlySelectedFolder = actionTarget.length === 1 && actionTarget[0].type === "folder";
+    const canManageTargets = actionTarget.length > 0 && actionTarget.every((target) => target.canManage !== false);
     const actions: ContextMenuAction[] = [];
 
     if (actionTarget.length === 1) {
@@ -1091,26 +1346,36 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         onSelect: () => runAction("Open", actionTarget[0]),
       });
     }
-    actions.push(
-      { label: "Download", onSelect: () => runAction("Download", item) },
-      { label: "Rename", onSelect: () => runAction("Rename", item), disabled: actionTarget.length !== 1 },
-    );
-    if (title !== "Shared with me" && title !== "Trash") {
+    actions.push({ label: "Download", onSelect: () => runAction("Download", item) });
+    if (canManageTargets && title !== "Trash") {
+      actions.push({ label: "Rename", onSelect: () => runAction("Rename", item), disabled: actionTarget.length !== 1 });
+    }
+    if (canManageTargets && title !== "Shared with me" && title !== "Trash") {
       actions.push(
         { label: "Move", onSelect: () => runAction("Move", item) },
         { label: "Duplicate", onSelect: () => runAction("Duplicate", item) },
       );
     }
-    if (title !== "Shared with me" && title !== "Trash") {
+    if (title !== "Trash") {
+      const allStarred = actionTarget.length > 0 && actionTarget.every((target) => target.starred);
+      actions.push({
+        label: allStarred ? "Remove from Starred" : "Add to Starred",
+        onSelect: () => runAction(allStarred ? "Remove from Starred" : "Add to Starred", item),
+      });
+    }
+    if (canManageTargets && title !== "Shared with me" && title !== "Trash") {
       actions.push({ label: "Share", onSelect: () => runAction("Share", item) });
     }
     if (title === "Trash") {
-      actions.push({
-        label: "Delete permanently",
-        onSelect: () => runAction("Delete permanently", item),
-        destructive: true,
-      });
-    } else {
+      actions.push(
+        { label: "Restore", onSelect: () => runAction("Restore", item) },
+        {
+          label: "Delete permanently",
+          onSelect: () => runAction("Delete permanently", item),
+          destructive: true,
+        },
+      );
+    } else if (canManageTargets && title !== "Shared with me") {
       actions.push({
         label: onlySelectedFolder ? "Move folder to trash" : "Move to trash",
         onSelect: () => runAction("Move to trash", item),
@@ -1284,7 +1549,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         setToast("The browser didn't grant access to the dropped folder. Try Upload folder or select files instead.");
         return;
       }
-      addUploadFiles(droppedFiles);
+      await addUploadFiles(droppedFiles);
     } catch (error) {
       setToast(error instanceof Error
         ? `${error.message} No files were added.`
@@ -1323,7 +1588,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
   // Event/effect callbacks below capture refs safely; the React Hooks refs rule
   // can falsely attribute those callback reads to the JSX map render.
-  /* eslint-disable react-hooks/refs */
   return (
     <>
       <style jsx global>{`
@@ -1409,6 +1673,20 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           </div>
         </div>
       </div>
+      {searchQuery && listView === "drive" && (
+        <div className="mt-2 flex min-w-0 items-center gap-2 px-2 text-xs text-muted">
+          <Search size={13} className="shrink-0" />
+          <span className="truncate">Search results for <strong className="font-semibold text-foreground">“{searchQuery}”</strong></span>
+          <button
+            type="button"
+            onClick={() => {
+              router.push("/drive");
+              window.dispatchEvent(new CustomEvent(DRIVE_SEARCH_CHANGED_EVENT, { detail: { query: "" } }));
+            }}
+            className="ml-auto shrink-0 rounded-md px-2 py-1 font-semibold text-brand-contrast hover:bg-brand-soft"
+          >Clear search</button>
+        </div>
+      )}
 
       {/* Keep both toolbars in the same fixed-height slot so switching between
           sorting controls and selection actions never moves the file list. */}
@@ -1441,6 +1719,17 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           >
             {selectedItems.length} selected
           </span>
+          {title === "Trash" && (
+            <button
+              type="button"
+              aria-label="Restore selected items"
+              title="Restore"
+              onClick={() => void restoreItems(selectedItems)}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
+            >
+              <RotateCcw size={16} />
+            </button>
+          )}
           <button
             type="button"
             aria-label="Open"
@@ -1465,7 +1754,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
             aria-label="Rename"
             title="Rename"
             onClick={() => runAction("Rename")}
-            disabled={selectedItems.length !== 1}
+            disabled={selectedItems.length !== 1 || !selectedCanManage}
             className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
           >
             <Pencil size={16} />
@@ -1477,7 +1766,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
                 aria-label={isMovingItems ? "Moving items" : "Move"}
                 title={isMovingItems ? "Moving items…" : "Move"}
                 onClick={() => runAction("Move")}
-                disabled={isMovingItems || isDuplicatingItems}
+                disabled={isMovingItems || isDuplicatingItems || !selectedCanManage}
                 className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
               >
                 <Move size={16} />
@@ -1487,14 +1776,25 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
                 aria-label={isDuplicatingItems ? "Duplicating items" : "Duplicate"}
                 title={isDuplicatingItems ? "Duplicating items…" : "Duplicate"}
                 onClick={() => runAction("Duplicate")}
-                disabled={isDuplicatingItems || isMovingItems}
+                disabled={isDuplicatingItems || isMovingItems || !selectedCanManage}
                 className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
               >
                 <Copy size={16} />
               </button>
             </>
           )}
-          {title !== "Shared with me" && title !== "Trash" && (
+          {title !== "Trash" && (
+            <button
+              type="button"
+              aria-label={selectedItems.every((item) => item.starred) ? "Remove from Starred" : "Add to Starred"}
+              title={selectedItems.every((item) => item.starred) ? "Remove from Starred" : "Add to Starred"}
+              onClick={() => void toggleStar(selectedItems)}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
+            >
+              <Star size={16} fill={selectedItems.every((item) => item.starred) ? "currentColor" : "none"} />
+            </button>
+          )}
+          {title !== "Shared with me" && title !== "Trash" && selectedCanManage && (
             <button
               type="button"
               aria-label="Share"
@@ -1505,18 +1805,21 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
               <Share2 size={16} />
             </button>
           )}
-          <button
-            type="button"
-            aria-label={title === "Trash" ? "Delete permanently" : "Move to trash"}
-            title={title === "Trash" ? "Delete permanently" : "Move to trash"}
-            onClick={() => setPendingDestructive({
-              action: title === "Trash" ? "delete" : "trash",
-              count: selectedItems.length,
-            })}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-danger transition-colors hover:bg-danger/10 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-danger"
-          >
-            <Trash2 size={16} />
-          </button>
+          {(title === "Trash" || (title !== "Shared with me" && selectedCanManage)) && (
+            <button
+              type="button"
+              aria-label={title === "Trash" ? "Delete permanently" : "Move to trash"}
+              title={title === "Trash" ? "Delete permanently" : "Move to trash"}
+              onClick={() => setPendingDestructive({
+                action: title === "Trash" ? "delete" : "trash",
+                count: selectedItems.length,
+                targets: selectedItems,
+              })}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-danger transition-colors hover:bg-danger/10 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-danger"
+            >
+              <Trash2 size={16} />
+            </button>
+          )}
         </div>
 
         <div
@@ -1554,7 +1857,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
             {sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
           </button>
           <span className="ml-auto shrink-0 whitespace-nowrap text-xs font-medium text-muted" aria-live="polite">
-            {listView ? `${driveItems.length} items` : title === "Starred" ? "Starred items are not available" : "Demo UI · file actions not connected"}
+            {listView ? `${driveItems.length} items` : title === "Starred" ? "No starred items yet" : "Demo UI · file actions not connected"}
           </span>
         </div>
       </div>
@@ -1591,15 +1894,17 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           } />
         ) : sortedItems.length === 0 ? (
           <EmptyState
-            title={title === "Starred" ? "Starred items are not available" : title === "Trash" ? "Trash is empty" : title === "Recent" ? "No recent files" : "No files here"}
+            title={searchQuery && listView === "drive" ? "No matching files or folders" : title === "Starred" ? "No starred items yet" : title === "Trash" ? "Trash is empty" : title === "Recent" ? "No recent items" : "No files here"}
             description={
-              title === "Starred"
-                ? "SecureDrive does not yet support starring files."
-                : listView
-                  ? title === "Recent"
-                    ? "Files you open will appear here."
-                    : "Files and folders in this location will appear here."
-                  : "Items will appear here when real Drive data is connected."
+              searchQuery && listView === "drive"
+                ? "Try a different name or clear the search to browse this workspace."
+                : title === "Starred"
+                  ? "Files and folders you star will appear here."
+                  : listView
+                    ? title === "Recent"
+                      ? "Files and folders you open or change will appear here."
+                      : "Files and folders in this location will appear here."
+                    : "Items will appear here when real Drive data is connected."
             }
             action={currentFolderId !== null ? (
               <Button variant="secondary" size="sm" onClick={() => router.push("/drive")}>
@@ -1627,6 +1932,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
                     selected={selectedIds.has(item.id)}
                     onToggle={(event) => handleItemClick(event, item.id)}
                     onOpen={() => openItem(item)}
+                    onToggleStar={() => void toggleStar([item])}
+                    showStar={title !== "Trash"}
                     actions={createActions(item)}
                     onDragStart={(event) => handleDragStart(event, item)}
                     onDragEnd={() => { setFileDropActive(false); setDropTargetFolderId(null); }}
@@ -1686,6 +1993,18 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
                         <span className="min-w-0 flex-1 truncate text-left text-sm font-medium text-foreground" title={item.name}>
                           {item.name}
                         </span>
+                        {title !== "Trash" && (
+                          <button
+                            type="button"
+                            aria-label={item.starred ? `Remove ${item.name} from Starred` : `Add ${item.name} to Starred`}
+                            title={item.starred ? "Remove from Starred" : "Add to Starred"}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => { event.stopPropagation(); void toggleStar([item]); }}
+                            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
+                          >
+                            <Star size={15} fill={item.starred ? "currentColor" : "none"} />
+                          </button>
+                        )}
                         <span
                           onPointerDown={(event) => event.stopPropagation()}
                           onClick={(event) => event.stopPropagation()}
@@ -1748,6 +2067,18 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
                           <span className="min-w-0 flex-1 truncate text-left text-sm font-medium text-foreground" title={item.name}>
                             {item.name}
                           </span>
+                          {title !== "Trash" && (
+                            <button
+                              type="button"
+                              aria-label={item.starred ? `Remove ${item.name} from Starred` : `Add ${item.name} to Starred`}
+                              title={item.starred ? "Remove from Starred" : "Add to Starred"}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              onClick={(event) => { event.stopPropagation(); void toggleStar([item]); }}
+                              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
+                            >
+                              <Star size={15} fill={item.starred ? "currentColor" : "none"} />
+                            </button>
+                          )}
                           <span
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => event.stopPropagation()}
@@ -1983,27 +2314,64 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         />
       )}
 
+      {shareDialogOpen && (
+        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sharing) setShareDialogOpen(false); }}>
+          <form onSubmit={(event) => void submitShare(event)} aria-labelledby="share-items-title" className="w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
+            <header className="border-b border-border px-5 py-4">
+              <h2 id="share-items-title" className="text-lg font-semibold text-foreground">Share {shareTargets.length} item{shareTargets.length === 1 ? "" : "s"}</h2>
+              <p className="mt-1 text-sm text-muted">Grant access to an existing SecureDrive account by email.</p>
+            </header>
+            <div className="space-y-4 px-5 py-5">
+              <label className="block text-sm font-medium text-foreground">
+                Email address
+                <input
+                  type="email"
+                  required
+                  autoFocus
+                  value={shareEmail}
+                  onChange={(event) => setShareEmail(event.target.value)}
+                  placeholder="name@example.com"
+                  autoComplete="email"
+                  className="mt-1.5 h-10 w-full rounded-lg border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand-contrast focus:ring-2 focus:ring-brand-soft"
+                />
+              </label>
+              <label className="block text-sm font-medium text-foreground">
+                Access level
+                <select value={sharePermission} onChange={(event) => setSharePermission(event.target.value as "viewer" | "editor")} className="mt-1.5 h-10 w-full rounded-lg border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand-contrast focus:ring-2 focus:ring-brand-soft">
+                  <option value="viewer">Viewer — can view and download</option>
+                  <option value="editor">Editor — can modify shared items</option>
+                </select>
+              </label>
+              <p className="text-xs leading-5 text-muted">The recipient must already have an active SecureDrive account registered with this email. SecureDrive will attempt to send a notification if outgoing email is configured; access permissions are applied independently.</p>
+            </div>
+            <footer className="flex justify-end gap-2 border-t border-border bg-background px-5 py-4">
+              <Button variant="ghost" onClick={() => setShareDialogOpen(false)} disabled={sharing}>Cancel</Button>
+              <Button type="submit" disabled={sharing || !shareEmail.trim()}>{sharing ? "Sharing…" : "Share"}</Button>
+            </footer>
+          </form>
+        </div>
+      )}
+
       <ConfirmDialog
         open={pendingDestructive !== null}
         title={pendingDestructive?.action === "delete" ? "Delete permanently?" : "Move to trash?"}
         description={
           pendingDestructive?.action === "delete"
-            ? `This would permanently delete ${pendingDestructive.count} item(s). This action is not connected, so no files will be deleted.`
-            : `This would move ${pendingDestructive?.count ?? 1} item(s) to Trash. This action is not connected, so no files will be moved.`
+            ? `Permanently delete ${pendingDestructive.count} item(s)? Their stored objects will be removed from storage. This cannot be undone.`
+            : `Move ${pendingDestructive?.count ?? 1} item(s) to Trash? You can restore them later.`
         }
         confirmLabel={pendingDestructive?.action === "delete" ? "Delete permanently" : "Move to trash"}
         destructive
         onClose={() => setPendingDestructive(null)}
         onConfirm={() => {
-          const action = pendingDestructive?.action;
+          const pending = pendingDestructive;
           setPendingDestructive(null);
-          showNotConnected(action === "delete" ? "Permanent deletion" : "Moving to trash");
+          if (pending) void applyDestructiveAction(pending);
         }}
       />
       </section>
     </>
   );
-  /* eslint-enable react-hooks/refs */
 }
 
 function SortableHeading({
@@ -2039,6 +2407,8 @@ function FileRow({
   selected,
   onToggle,
   onOpen,
+  onToggleStar,
+  showStar,
   actions,
   onDragStart,
   onDragEnd,
@@ -2050,6 +2420,8 @@ function FileRow({
   selected: boolean;
   onToggle: (event: React.MouseEvent<HTMLTableRowElement>) => void;
   onOpen: () => void;
+  onToggleStar: () => void;
+  showStar: boolean;
   actions: ContextMenuAction[];
   onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void;
   onDragEnd: () => void;
@@ -2089,6 +2461,19 @@ function FileRow({
           <span className="min-w-0 truncate rounded text-left text-sm text-foreground" title={item.name}>
             {item.name}
           </span>
+          {showStar && (
+            <button
+              type="button"
+              aria-label={item.starred ? `Remove ${item.name} from Starred` : `Add ${item.name} to Starred`}
+              title={item.starred ? "Remove from Starred" : "Add to Starred"}
+              data-no-marquee-selection="true"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); onToggleStar(); }}
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
+            >
+              <Star size={15} fill={item.starred ? "currentColor" : "none"} />
+            </button>
+          )}
         </div>
       </th>
       <td className="border-b border-border px-4 py-2">

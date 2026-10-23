@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AccountServiceError, djangoAccountService, type AccountService, type AccountSnapshot, type ProfileUpdate } from "@/lib/account-service";
+import { syncWorkspaceIdentity } from "@/lib/workspace-context";
 
 type AccountLoadState =
   | { status: "loading"; account: null; error: null }
@@ -43,6 +44,7 @@ export default function AccountProvider({
     try {
       const account = await service.getCurrentAccount();
       if (sequence === requestSequence.current) {
+        syncWorkspaceIdentity(account);
         setState({ status: "loaded", account, error: null });
       }
     } catch (error) {
@@ -67,6 +69,7 @@ export default function AccountProvider({
 
   const acceptAuthenticatedAccount = useCallback((account: AccountSnapshot) => {
     requestSequence.current += 1;
+    syncWorkspaceIdentity(account);
     setState({ status: "loaded", account, error: null });
   }, []);
 
@@ -79,6 +82,7 @@ export default function AccountProvider({
     try {
       const account = await service.updateProfile(input);
       if (sequence === requestSequence.current) {
+        syncWorkspaceIdentity(account);
         setState({ status: "loaded", account, error: null });
       }
       return account;

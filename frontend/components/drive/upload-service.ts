@@ -1,5 +1,6 @@
 import type { UploadStatus, UploadTask } from "./upload-manager-model";
 import { AccountServiceError, accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
+import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 
 export type UploadProgressReport = {
   uploadedBytes: number;
@@ -139,7 +140,8 @@ export const djangoMultipartUploadService: UploadService = {
   supportsPauseResume: false,
   async upload(task, file, observer, signal) {
     observer.onStatus("preparing", task.uploadSessionId ?? undefined);
-    const resumeKey = `securedrive-upload:${encodeURIComponent(file.name)}:${file.size}:${file.lastModified}`;
+    const workspaceScope = getActiveWorkspaceIdForRequest() ?? "default";
+    const resumeKey = `securedrive-upload:${workspaceScope}:${encodeURIComponent(file.name)}:${file.size}:${file.lastModified}`;
     const fileSha256 = await sha256Hex(file);
     if (signal.aborted) return;
     let uploadId = task.uploadSessionId ?? readSessionValue(resumeKey);

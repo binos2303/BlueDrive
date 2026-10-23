@@ -5,7 +5,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import QuotaAccount
-from files.models import UploadSession
+from files.models import QuotaReservation, UploadSession
 
 
 class UploadApiTests(TestCase):
@@ -47,16 +47,50 @@ class UploadApiTests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, 403)
 
-    def test_quota_exhaustion_rejects_session_before_provider_multipart(self):
+    def test_quota_exhaustion_rejects_session_without_finalizing_missing_reservation(self):
         self.account.limit_bytes = 0
         self.account.save(update_fields=["limit_bytes", "updated_at"])
-        with patch("files.upload_api.get_storage_adapter") as adapter_factory:
+        with (
+            patch("files.upload_api.get_storage_adapter") as adapter_factory,
+            patch("files.upload_api.finalize_upload_quota") as finalize_quota,
+        ):
             adapter_factory.return_value.create_object_key.return_value = "quarantine/" + "b" * 32
             response = self.client.post("/files/api/uploads/", {
                 "name": "document.txt", "size_bytes": 9, "sha256": "a" * 64,
             }, format="json")
+
         self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.data["failure_code"], "quota_exceeded")
         adapter_factory.return_value.initiate_multipart.assert_not_called()
+        finalize_quota.assert_not_called()
+        upload = UploadSession.objects.get()
+        self.assertEqual(upload.state, UploadSession.State.FAILED)
+        self.assertEqual(upload.failure_code, "quota_exceeded")
+        self.assertFalse(QuotaReservation.objects.filter(upload_session=upload).exists())
+
+    def test_setup_failure_before_reservation_does_not_finalize_missing_reservation(self):
+        with (
+            patch("files.upload_api.get_storage_adapter") as adapter_factory,
+            patch(
+                "files.upload_api.reserve_upload_quota",
+                side_effect=RuntimeError("Quota service unavailable"),
+            ),
+            patch("files.upload_api.finalize_upload_quota") as finalize_quota,
+        ):
+            adapter_factory.return_value.create_object_key.return_value = "quarantine/" + "e" * 32
+            with self.assertLogs("files.upload_api", level="ERROR") as log_output:
+                response = self.client.post("/files/api/uploads/", {
+                    "name": "document.txt", "size_bytes": 9, "sha256": "a" * 64,
+                }, format="json")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(any("Upload initialization failed" in line for line in log_output.output))
+        self.assertFalse(any("Unable to release quota after setup failure" in line for line in log_output.output))
+        finalize_quota.assert_not_called()
+        upload = UploadSession.objects.get()
+        self.assertEqual(upload.state, UploadSession.State.FAILED)
+        self.assertEqual(upload.failure_code, "storage_setup_failed")
+        self.assertFalse(QuotaReservation.objects.filter(upload_session=upload).exists())
 
     @patch("files.upload_api.get_storage_adapter")
     def test_batch_authorization_returns_one_url_for_each_part(self, adapter_factory):

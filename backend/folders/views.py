@@ -1,4 +1,4 @@
-﻿import io
+import io
 import zipfile
 from datetime import timedelta
 from cryptography.exceptions import InvalidTag
@@ -13,7 +13,9 @@ from django.views.decorators.http import require_POST
 from accounts.access import (
     active_tenant_ids,
     active_tenant_required as login_required,
+    can_edit_workspace_content,
     get_default_tenant,
+    resolve_request_workspace,
 )
 from securedrive.frontend_redirects import redirect_to_frontend
 
@@ -62,6 +64,7 @@ def _subtree(folder, *, include_deleted=None):
         queryset = Folder.objects.filter(
             owner=folder.owner,
             tenant=folder.tenant,
+            workspace=folder.workspace,
             parent=current,
         )
         if include_deleted is True:
@@ -83,18 +86,32 @@ def _folder_contains(source, candidate):
     return False
 
 
-def _unique_folder_name(owner, tenant, parent, original_name):
+def _unique_folder_name(owner, tenant, parent, original_name, *, workspace=None):
+    if workspace is None and parent is not None:
+        workspace = parent.workspace
     candidate = f"{original_name} (copy)"
     number = 2
-    while Folder.objects.filter(
+    queryset = Folder.objects.filter(
         owner=owner,
         tenant=tenant,
         parent=parent,
         folder_name__iexact=candidate,
         deleted_at__isnull=True,
-    ).exists():
+    )
+    if workspace is not None:
+        queryset = queryset.filter(workspace=workspace)
+    while queryset.exists():
         candidate = f"{original_name} (copy {number})"
         number += 1
+        queryset = Folder.objects.filter(
+            owner=owner,
+            tenant=tenant,
+            parent=parent,
+            folder_name__iexact=candidate,
+            deleted_at__isnull=True,
+        )
+        if workspace is not None:
+            queryset = queryset.filter(workspace=workspace)
     return candidate
 
 
@@ -121,6 +138,7 @@ def folder_rename(request, folder_id):
     duplicate = Folder.objects.filter(
         owner=folder.owner,
         tenant=folder.tenant,
+        workspace=folder.workspace,
         parent=folder.parent,
         folder_name__iexact=folder_name,
         deleted_at__isnull=True,
@@ -147,15 +165,22 @@ def folder_delete(request, folder_id):
         tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
+    if not can_edit_workspace_content(request.user, folder.workspace):
+        messages.error(request, "Editor access to this workspace is required.")
+        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
     deleted_time = timezone.now()
     subtree = _subtree(folder, include_deleted=False)
     folder_ids = [item.id for item in subtree]
 
     with transaction.atomic():
-        Folder.objects.filter(id__in=folder_ids, owner=request.user, tenant=folder.tenant).update(deleted_at=deleted_time)
+        Folder.objects.filter(
+            id__in=folder_ids, owner=request.user, tenant=folder.tenant,
+            workspace=folder.workspace,
+        ).update(deleted_at=deleted_time)
         File.objects.filter(
             owner=request.user,
             tenant=folder.tenant,
+            workspace=folder.workspace,
             folder_id__in=folder_ids,
             deleted_at__isnull=True,
         ).update(deleted_at=deleted_time)
@@ -176,6 +201,10 @@ def folder_restore(request, folder_id):
         deleted_at__isnull=False,
     )
 
+    if not can_edit_workspace_content(request.user, folder.workspace):
+        messages.error(request, "Editor access to this workspace is required.")
+        return redirect("trash")
+
     if folder.parent_id and folder.parent.deleted_at is not None:
         messages.warning(request, "Restore the parent folder first.")
         return redirect("trash")
@@ -189,6 +218,7 @@ def folder_restore(request, folder_id):
         if Folder.objects.filter(
             owner=request.user,
             tenant=folder.tenant,
+            workspace=folder.workspace,
             parent=restored_folder.parent,
             folder_name__iexact=restored_folder.folder_name,
             deleted_at__isnull=True,
@@ -199,12 +229,14 @@ def folder_restore(request, folder_id):
     for restored_file in File.objects.filter(
         owner=request.user,
         tenant=folder.tenant,
+        workspace=folder.workspace,
         folder_id__in=restored_folder_ids,
         deleted_at__isnull=False,
     ):
         if File.objects.filter(
             owner=request.user,
             tenant=folder.tenant,
+            workspace=folder.workspace,
             folder=restored_file.folder,
             file_name__iexact=restored_file.file_name,
             deleted_at__isnull=True,
@@ -213,10 +245,14 @@ def folder_restore(request, folder_id):
             return redirect("trash")
 
     with transaction.atomic():
-        Folder.objects.filter(id__in=folder_ids, owner=request.user, tenant=folder.tenant).update(deleted_at=None)
+        Folder.objects.filter(
+            id__in=folder_ids, owner=request.user, tenant=folder.tenant,
+            workspace=folder.workspace,
+        ).update(deleted_at=None)
         File.objects.filter(
             owner=request.user,
             tenant=folder.tenant,
+            workspace=folder.workspace,
             folder_id__in=folder_ids,
             deleted_at__isnull=False,
         ).update(deleted_at=None)
@@ -236,21 +272,49 @@ def folder_delete_permanently(request, folder_id):
         tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=False,
     )
-    subtree = _subtree(folder, include_deleted=True)
+    if not can_edit_workspace_content(request.user, folder.workspace):
+        messages.error(request, "Editor access to this workspace is required.")
+        return redirect("trash")
+
+    subtree = [folder]
+    index = 0
+    while index < len(subtree):
+        subtree.extend(Folder.objects.filter(
+            owner=request.user,
+            tenant=folder.tenant,
+            workspace=folder.workspace,
+            parent=subtree[index],
+        ))
+        index += 1
     folder_ids = [item.id for item in subtree]
-    files = File.objects.filter(owner=request.user, tenant=folder.tenant, folder_id__in=folder_ids)
-
-    for file in files:
-        try:
-            if file.file_path:
-                file.file_path.delete(save=False)
-        except Exception:
-            pass
-
-    files.delete()
+    nested_files = list(File.objects.filter(
+        owner=request.user,
+        tenant=folder.tenant,
+        workspace=folder.workspace,
+        folder_id__in=folder_ids,
+    ).select_related("folder"))
     folder_name = folder.folder_name
-    Folder.objects.filter(id__in=folder_ids, owner=request.user, tenant=folder.tenant).delete()
-    log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted folder: {folder_name}", obj=folder)
+
+    try:
+        from files.permanent_delete import permanently_delete_files
+        permanently_delete_files(nested_files)
+        # Upload sessions retain their audit rows, but the protected folder FK
+        # must be detached before permanently removing the folder tree.
+        UploadSession.objects.filter(
+            target_folder_id__in=folder_ids,
+            workspace=folder.workspace,
+        ).update(target_folder=None)
+        Folder.objects.filter(
+            id__in=folder_ids,
+            owner=request.user,
+            tenant=folder.tenant,
+            workspace=folder.workspace,
+        ).delete()
+    except Exception:
+        messages.error(request, "Could not permanently delete the folder from storage. Metadata was retained where cleanup failed; retry after checking storage.")
+        return redirect("trash")
+
+    log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted folder: {folder_name}")
     messages.success(request, f'"{folder_name}" permanently deleted.')
     return redirect("trash")
 
@@ -268,6 +332,21 @@ def folder_upload(request):
         if not can_edit_folder(parent, request.user):
             messages.error(request, "You do not have permission to upload a folder here.")
             return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+    if parent is not None:
+        tenant = parent.tenant
+        workspace = parent.workspace
+        requested_workspace_id = request.POST.get("workspace_id")
+        if requested_workspace_id and str(requested_workspace_id) != str(workspace.pk):
+            messages.error(request, "The destination folder belongs to a different workspace.")
+            return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+    else:
+        tenant = get_default_tenant(request.user)
+        workspace = resolve_request_workspace(request, tenant)
+        if workspace is None or not can_edit_workspace_content(request.user, workspace):
+            messages.error(request, "Editor access to an active workspace is required.")
+            return redirect("dashboard")
+        tenant = workspace.tenant
+
     if not uploaded_files or len(uploaded_files) != len(relative_paths):
         messages.error(request, "The selected folder could not be read correctly.")
         return redirect("folder_open", folder_id=parent.id) if parent else redirect("dashboard")
@@ -277,16 +356,19 @@ def folder_upload(request):
     root_name = parts[0][0] if parts and parts[0] else "Uploaded folder"
     root_name = root_name.strip() or "Uploaded folder"
     resource_owner = parent.owner if parent is not None else request.user
-    tenant = parent.tenant if parent is not None else get_default_tenant(request.user)
     candidate = root_name
     number = 2
-    while Folder.objects.filter(owner=resource_owner, tenant=tenant, parent=parent, folder_name__iexact=candidate, deleted_at__isnull=True).exists():
+    while Folder.objects.filter(
+        owner=resource_owner, tenant=tenant, workspace=workspace, parent=parent,
+        folder_name__iexact=candidate, deleted_at__isnull=True,
+    ).exists():
         candidate = f"{root_name} (copy {number})"
         number += 1
 
     folder_cache = {
         "": Folder.objects.create(
             tenant=tenant,
+            workspace=workspace,
             owner=resource_owner,
             parent=parent,
             folder_name=candidate,
@@ -311,6 +393,7 @@ def folder_upload(request):
                 if current_key not in folder_cache:
                     folder_cache[current_key] = Folder.objects.create(
                         tenant=tenant,
+                        workspace=workspace,
                         owner=resource_owner,
                         parent=current_folder,
                         folder_name=component,
@@ -326,7 +409,11 @@ def folder_upload(request):
                 failed_count += 1
                 continue
             uploaded = form.cleaned_data["file_path"]
-            if File.objects.filter(owner=resource_owner, tenant=tenant, folder=current_folder, file_name__iexact=uploaded.name, deleted_at__isnull=True).exists():
+            if File.objects.filter(
+                owner=resource_owner, tenant=tenant, workspace=workspace,
+                folder=current_folder, file_name__iexact=uploaded.name,
+                deleted_at__isnull=True,
+            ).exists():
                 failed_count += 1
                 continue
 
@@ -337,6 +424,7 @@ def folder_upload(request):
             try:
                 upload_session = UploadSession.objects.create(
                     tenant=tenant,
+                    workspace=workspace,
                     initiated_by=request.user,
                     target_folder=current_folder,
                     client_name=uploaded.name[:255],
@@ -349,6 +437,7 @@ def folder_upload(request):
                 plaintext = uploaded.read()
                 drive_file = File(
                     tenant=tenant,
+                    workspace=workspace,
                     owner=resource_owner,
                     folder=current_folder,
                     file_name=uploaded.name,
@@ -458,6 +547,17 @@ def folder_create(request):
         resource_owner = parent.owner if parent is not None else request.user
         folder.owner = resource_owner
         folder.tenant = parent.tenant if parent is not None else get_default_tenant(request.user)
+        if parent is not None:
+            folder.workspace = parent.workspace
+            requested_workspace_id = request.POST.get("workspace_id")
+            if requested_workspace_id and str(requested_workspace_id) != str(parent.workspace_id):
+                messages.error(request, "The destination folder belongs to a different workspace.")
+                return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+        else:
+            folder.workspace = resolve_request_workspace(request, folder.tenant)
+            if folder.workspace is None or not can_edit_workspace_content(request.user, folder.workspace):
+                messages.error(request, "Editor access to an active workspace is required.")
+                return redirect(request.META.get("HTTP_REFERER", "dashboard"))
         folder.parent = parent
         if folder.parent is not None and folder.parent.deleted_at is not None:
             messages.error(request, "Invalid parent folder.")
@@ -465,6 +565,7 @@ def folder_create(request):
         if Folder.objects.filter(
             owner=resource_owner,
             tenant=folder.tenant,
+            workspace=folder.workspace,
             parent=folder.parent,
             folder_name__iexact=folder.folder_name.strip(),
             deleted_at__isnull=True,
@@ -498,6 +599,9 @@ def folder_create_api(request):
     except (json.JSONDecodeError, UnicodeDecodeError):
         return JsonResponse({"error": "Invalid JSON body."}, status=400)
 
+    if not isinstance(data, dict):
+        return JsonResponse({"error": "Request body must be an object."}, status=400)
+
     name = data.get("name")
     parent_id = data.get("parent_id")
 
@@ -526,13 +630,26 @@ def folder_create_api(request):
                 {"error": "You do not have permission to create a folder here."},
                 status=403,
             )
+        requested_workspace_id = data.get("workspace_id")
+        if requested_workspace_id not in (None, "") and str(requested_workspace_id) != str(parent.workspace_id):
+            return JsonResponse({"error": "Destination folder belongs to a different workspace."}, status=404)
 
     resource_owner = parent.owner if parent else request.user
     tenant = parent.tenant if parent else get_default_tenant(request.user)
+    if parent is not None:
+        workspace = parent.workspace
+    else:
+        workspace = resolve_request_workspace(request, tenant, data)
+        if workspace is None:
+            return JsonResponse({"error": "Workspace is unavailable or not accessible."}, status=404)
+        if not can_edit_workspace_content(request.user, workspace):
+            return JsonResponse({"error": "Editor access to this workspace is required."}, status=403)
+        tenant = workspace.tenant
 
     if Folder.objects.filter(
         owner=resource_owner,
         tenant=tenant,
+        workspace=workspace,
         parent=parent,
         folder_name__iexact=name,
         deleted_at__isnull=True,
@@ -547,6 +664,7 @@ def folder_create_api(request):
             folder = Folder.objects.create(
                 owner=resource_owner,
                 tenant=tenant,
+                workspace=workspace,
                 parent=parent,
                 folder_name=name,
             )
@@ -569,6 +687,7 @@ def folder_create_api(request):
             "id": folder.id,
             "name": folder.folder_name,
             "parent_id": folder.parent_id,
+            "workspace_id": str(folder.workspace_id),
             "type": "folder",
         },
         status=201,
@@ -592,6 +711,7 @@ def folder_download(request, folder_id):
     files = File.objects.filter(
         owner=folder.owner,
         tenant=folder.tenant,
+        workspace=folder.workspace,
         folder_id__in=folder_ids,
     ).order_by("folder_id", "file_name")
 
@@ -663,6 +783,9 @@ def folder_details(request, folder_id):
     share = None
     if not can_view_folder(folder, request.user):
         raise Http404
+    # Recent uses this timestamp to represent opening a folder. Update it without
+    # touching updated_at, which is reserved for content/metadata modifications.
+    Folder.objects.filter(pk=folder.pk).update(last_accessed_at=timezone.now())
     if not is_owner:
         # A shared resource follows the same lifecycle rule as the drive view:
         # once the owner moves it to Trash, recipients must lose all access,
@@ -680,6 +803,7 @@ def folder_details(request, folder_id):
     file_count = File.objects.filter(
         owner=folder.owner,
         tenant=folder.tenant,
+        workspace=folder.workspace,
         folder_id__in=descendant_ids,
         deleted_at__isnull=True,
     ).count()
@@ -804,6 +928,7 @@ def folder_paste(request):
             Folder,
             id=folder_id,
             tenant=source.tenant,
+            workspace=source.workspace,
             deleted_at__isnull=True,
         )
 
@@ -828,6 +953,7 @@ def folder_paste(request):
         if Folder.objects.filter(
             owner=source.owner,
             tenant=source.tenant,
+            workspace=source.workspace,
             parent=destination,
             folder_name__iexact=source.folder_name,
             deleted_at__isnull=True,
@@ -849,12 +975,13 @@ def folder_paste(request):
         return redirect(request.META.get("HTTP_REFERER", "shared_with_me"))
 
     tenant = destination.tenant if destination is not None else source.tenant
-    root_name = _unique_folder_name(source.owner, tenant, destination, source.folder_name)
+    root_name = _unique_folder_name(source.owner, tenant, destination, source.folder_name, workspace=source.workspace)
     created_files = []
     try:
         with transaction.atomic():
             folder_map = {source.id: Folder.objects.create(
                 tenant=tenant,
+                workspace=source.workspace,
                 owner=source.owner,
                 folder_name=root_name,
                 parent=destination,
@@ -864,6 +991,7 @@ def folder_paste(request):
                 parent_copy = folder_map[original.parent_id]
                 folder_map[original.id] = Folder.objects.create(
                     tenant=tenant,
+                    workspace=source.workspace,
                     owner=source.owner,
                     folder_name=original.folder_name,
                     parent=parent_copy,
@@ -873,6 +1001,7 @@ def folder_paste(request):
                 for source_file in File.objects.filter(
                     owner=source.owner,
                     tenant=source.tenant,
+                    workspace=source.workspace,
                     folder=original,
                     deleted_at__isnull=True,
                 ):
@@ -880,12 +1009,14 @@ def folder_paste(request):
                     if File.objects.filter(
                         owner=source.owner,
                         tenant=tenant,
+                        workspace=source.workspace,
                         folder=target_folder,
                         file_name__iexact=file_name,
                         deleted_at__isnull=True,
                     ).exists():
                         file_name = unique_copy_name(
-                            File, "file_name", file_name, folder=target_folder, owner=source.owner
+                            File, "file_name", file_name, folder=target_folder,
+                            owner=source.owner, workspace=source.workspace,
                         )
                     created_files.append(
                         clone_encrypted_file_with_quota(

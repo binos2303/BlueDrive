@@ -8,6 +8,7 @@ class FolderMetadataSerializer(serializers.ModelSerializer):
         model = Folder
         fields = (
             "id",
+            "workspace",
             "folder_name",
             "parent",
             "created_at",

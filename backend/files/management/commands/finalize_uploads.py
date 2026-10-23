@@ -11,7 +11,13 @@ from files.finalization import finalize_verified_upload
 from files.models import UploadFinalizationJob, UploadSession
 from files.quota import finalize_upload_quota
 from files.storage_adapters import get_storage_adapter
-from files.storage_adapters.base import MultipartPart, StorageIntegrityError, StorageRetryableError
+from files.storage_adapters.base import (
+    MultipartPart,
+    StorageError,
+    StorageIntegrityError,
+    StorageNotFoundError,
+    StorageRetryableError,
+)
 from files.validators import MAX_UPLOAD_SIZE
 import logging
 
@@ -21,8 +27,82 @@ logger = logging.getLogger(__name__)
 PART_SIZE = 8 * 1024 * 1024
 
 
+def _quarantine_failed_upload(upload_id):
+    """Move a completed but permanently failed staging object to quarantine.
+
+    Uses a deterministic key so the operation can be retried after a process crash.
+    It does not delete a staging object until the adapter has verified its copy.
+    If multipart completion never produced an object, it aborts the multipart upload.
+    """
+    session = UploadSession.objects.filter(pk=upload_id).first()
+    if session is None or session.state != UploadSession.State.FAILED or not session.object_key:
+        return False
+
+    # Already quarantined (including legacy sessions created by older code).
+    if session.object_key.startswith("quarantine/"):
+        return True
+
+    storage = get_storage_adapter()
+    quarantine_key = f"quarantine/{session.pk.hex}"
+
+    # If finalization wrote PRIMARY but the database transaction did not commit,
+    # that object is an orphan. Remove it best-effort; the staging source remains
+    # the canonical input for quarantine.
+    if session.final_object_key:
+        try:
+            storage.delete_object(session.final_object_key)
+        except StorageNotFoundError:
+            pass
+        except StorageError:
+            logger.warning(
+                "Could not remove orphaned publication object for failed upload %s",
+                session.pk,
+                exc_info=True,
+            )
+
+    try:
+        stat = storage.stat_object(session.object_key)
+    except StorageNotFoundError:
+        # Recovery case: a previous invocation may have copied to quarantine but
+        # failed before updating PostgreSQL.
+        try:
+            storage.stat_object(quarantine_key)
+        except StorageNotFoundError:
+            if session.provider_upload_id:
+                try:
+                    storage.abort_multipart(session.object_key, session.provider_upload_id)
+                except StorageError:
+                    logger.warning(
+                        "Could not abort incomplete multipart upload %s",
+                        session.pk,
+                        exc_info=True,
+                    )
+            return False
+        else:
+            UploadSession.objects.filter(
+                pk=session.pk, state=UploadSession.State.FAILED
+            ).update(object_key=quarantine_key)
+            return True
+
+    storage.quarantine_object(
+        session.object_key,
+        quarantine_key=quarantine_key,
+        expected_size=stat.size_bytes,
+    )
+    updated = UploadSession.objects.filter(
+        pk=session.pk, state=UploadSession.State.FAILED
+    ).update(object_key=quarantine_key)
+    if not updated:
+        logger.warning(
+            "Quarantined upload object but could not update its session reference: %s",
+            session.pk,
+        )
+        return False
+    return True
+
+
 class Command(BaseCommand):
-    help = "Verify, optionally scan, encrypt and publish completed multipart uploads."
+    help = "Verify and optionally scan staged uploads, publish valid files to PRIMARY, and quarantine permanent failures."
 
     def handle(self, *args, **options):
         # Recover the DB/storage split if multipart completion succeeded but the
@@ -113,6 +193,20 @@ class Command(BaseCommand):
                         finalize_upload_quota(upload.pk, completed=False)
                     except Exception:
                         pass
+                    try:
+                        quarantined = _quarantine_failed_upload(upload.pk)
+                        if not quarantined:
+                            logger.warning(
+                                "Failed upload was marked failed but its object could not be quarantined: upload_id=%s",
+                                upload.pk,
+                            )
+                    except Exception:
+                        # Do not hide the original finalization error. Keep the source
+                        # object and metadata so cleanup/reconciliation can retry safely.
+                        logger.exception(
+                            "Could not quarantine failed upload object: upload_id=%s",
+                            upload.pk,
+                        )
                     UploadFinalizationJob.objects.filter(pk=job.pk).update(state=UploadFinalizationJob.State.FAILED)
                     failed += 1
         self.stdout.write(f"Finalized: {done}; retrying: {retrying}; failed: {failed}")

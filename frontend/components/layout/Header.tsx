@@ -7,7 +7,9 @@ import {
     Search,
     Sparkles,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { DRIVE_SEARCH_CHANGED_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
+import { useEffect, useState, type FormEvent } from "react";
 import ContextMenu, { type ContextMenuAction } from "@/components/ui/ContextMenu";
 import Toast from "@/components/ui/Toast";
 import { useAccount } from "@/components/account/AccountProvider";
@@ -22,6 +24,35 @@ export default function Header({
     menuButtonRef: Ref<HTMLButtonElement>;
 }) {
     const router = useRouter();
+    const pathname = usePathname();
+    const [searchText, setSearchText] = useState("");
+
+    useEffect(() => {
+        const syncSearchFromUrl = () => {
+            const params = new URLSearchParams(window.location.search);
+            setSearchText(params.get("q") ?? "");
+        };
+        syncSearchFromUrl();
+        const clearSearchOnWorkspaceSwitch = () => setSearchText("");
+        window.addEventListener("popstate", syncSearchFromUrl);
+        window.addEventListener(WORKSPACE_CHANGED_EVENT, clearSearchOnWorkspaceSwitch);
+        return () => {
+            window.removeEventListener("popstate", syncSearchFromUrl);
+            window.removeEventListener(WORKSPACE_CHANGED_EVENT, clearSearchOnWorkspaceSwitch);
+        };
+    }, [pathname]);
+
+    function submitSearch(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        const query = searchText.trim().slice(0, 255);
+        setSearchText(query);
+        router.push(query ? `/drive?q=${encodeURIComponent(query)}` : "/drive");
+        // If we are already on Drive, keep the mounted file browser in sync.
+        // Other routes remount Drive and read the submitted query from the URL.
+        if (pathname === "/drive") {
+            window.dispatchEvent(new CustomEvent(DRIVE_SEARCH_CHANGED_EVENT, { detail: { query } }));
+        }
+    }
     const {
         state: accountState,
         signOut,
@@ -40,17 +71,7 @@ export default function Header({
             label: "Settings",
             onSelect: () => router.push("/account/settings"),
         },
-        {
-            label: "Support",
-            onSelect: () => router.push("/account/support"),
-        },
     ];
-    if (account?.account.type === "individual" && account.account.upgradeEligible === true) {
-        accountActions.push({
-            label: "Upgrade plan",
-            onSelect: () => router.push("/account/upgrade"),
-        });
-    }
     accountActions.push({
         label: "Sign out",
         onSelect: () => {
@@ -72,22 +93,23 @@ export default function Header({
                 <Menu size={20} />
             </button>
 
-            <div className="relative min-w-0 w-full max-w-[420px] flex-1">
+            <form onSubmit={submitSearch} role="search" className="relative min-w-0 w-full max-w-[420px] flex-1">
                 <Search
                     size={16}
                     strokeWidth={1.8}
                     className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted"
                 />
-
                 <input
                     type="search"
-                    disabled
-                    aria-label="Search files and folders — not connected yet"
-                    placeholder="Search files and folders · not connected"
-                    title="Search is not connected yet"
-                    className="h-10 w-full rounded-xl border border-border bg-background pl-10 pr-3 text-[13px] text-foreground outline-none transition placeholder:text-muted focus:border-brand focus:ring-2 focus:ring-brand/10 disabled:cursor-not-allowed disabled:opacity-70"
+                    value={searchText}
+                    maxLength={255}
+                    onChange={(event) => setSearchText(event.currentTarget.value)}
+                    aria-label="Search files and folders"
+                    placeholder="Search files and folders"
+                    title="Search in the current Drive or workspace"
+                    className="h-10 w-full rounded-xl border border-border bg-background pl-10 pr-3 text-[13px] text-foreground outline-none transition placeholder:text-muted focus:border-brand focus:ring-2 focus:ring-brand/10"
                 />
-            </div>
+            </form>
 
             <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3">
                 {account?.account.type === "individual" && account.account.upgradeEligible === true && (

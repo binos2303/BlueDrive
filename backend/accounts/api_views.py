@@ -71,6 +71,7 @@ def _account_snapshot(user):
             membership
             for membership in memberships
             if membership.tenant.kind == Tenant.Kind.PERSONAL
+            and membership.tenant.personal_owner_id == user.pk
         ),
         None,
     )

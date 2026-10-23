@@ -9,6 +9,7 @@ class FileMetadataSerializer(serializers.ModelSerializer):
         model = File
         fields = (
             "id",
+            "workspace",
             "file_name",
             "file_size",
             "mime_type",
@@ -42,6 +43,7 @@ class UploadSessionStatusSerializer(serializers.ModelSerializer):
         model = UploadSession
         fields = (
             "id",
+            "workspace",
             "client_name",
             "expected_size_bytes",
             "received_bytes",

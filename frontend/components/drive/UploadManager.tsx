@@ -30,11 +30,14 @@ import {
   type UploadService,
 } from "./upload-service";
 
-export const DRIVE_UPLOAD_COMPLETED_EVENT = "securedrive:upload-completed";
+import { DRIVE_UPLOAD_COMPLETED_EVENT } from "@/lib/workspace-context";
+export { DRIVE_UPLOAD_COMPLETED_EVENT };
 
 export type UploadFileInput = {
   file: File;
   relativePath: string;
+  /** Optional per-file destination used when uploading a directory tree. */
+  destinationId?: string | null;
   validationError?: string | null;
 };
 
@@ -111,7 +114,7 @@ export default function UploadManager({
   const [open, setOpen] = useState(false);
   const [visible, setVisible] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
-  const dismissedTaskIdsRef = useRef(new Set<string>());
+  const [dismissedTaskIds, setDismissedTaskIds] = useState<Set<string>>(() => new Set<string>());
   const tasksRef = useRef(tasks);
   const filesRef = useRef(new Map<string, File>());
   const controllersRef = useRef(new Map<string, AbortController>());
@@ -128,7 +131,7 @@ export default function UploadManager({
   }, [commit]);
 
   const enqueue = useCallback((inputs: readonly UploadFileInput[], destinationId: string | null) => {
-    const incoming = inputs.map(({ file, relativePath, validationError }) => {
+    const incoming = inputs.map(({ file, relativePath, destinationId: fileDestinationId, validationError }) => {
       const id = `upload-${Date.now()}-${++nextId.current}`;
       if (!validationError) filesRef.current.set(id, file);
       return createUploadTask({
@@ -137,11 +140,15 @@ export default function UploadManager({
         relativePath,
         mimeType: file.type || "Unknown file type",
         size: file.size,
-        destinationId,
+        destinationId: fileDestinationId !== undefined ? fileDestinationId : destinationId,
         validationError,
       });
     });
-    incoming.forEach((task) => dismissedTaskIdsRef.current.delete(task.id));
+    setDismissedTaskIds((current) => {
+      const next = new Set(current);
+      incoming.forEach((task) => next.delete(task.id));
+      return next;
+    });
     commit((current) => markDuplicateTasks([...current, ...incoming]));
     setVisible(true);
     setOpen(true);
@@ -291,15 +298,8 @@ export default function UploadManager({
     controllersRef.current.delete(id);
   }, [updateTask]);
 
-  const cancelAll = useCallback(() => {
-    const cancellable = tasksRef.current.filter((task) =>
-      ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
-    );
-    cancellable.forEach((task) => cancel(task.id));
-  }, [cancel]);
-
   const closeManager = useCallback(() => {
-    tasksRef.current.forEach((task) => dismissedTaskIdsRef.current.add(task.id));
+    setDismissedTaskIds(new Set(tasksRef.current.map((task) => task.id)));
     setVisible(false);
   }, []);
 
@@ -384,7 +384,7 @@ export default function UploadManager({
   }), [enqueue, service.connected, service.supportsPauseResume, tasks]);
 
 
-  const visibleTasks = tasks.filter((task) => !dismissedTaskIdsRef.current.has(task.id));
+  const visibleTasks = tasks.filter((task) => !dismissedTaskIds.has(task.id));
   const queuedCount = visibleTasks.filter((task) => task.status === "queued").length;
   const activeCount = visibleTasks.filter((task) =>
     ["preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
@@ -424,7 +424,7 @@ export default function UploadManager({
         visible ? (
           <section
             aria-label="Upload status"
-            className="fixed bottom-0 right-0 z-[80] flex max-h-[min(65vh,30rem)] w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-border bg-background font-sans shadow-[var(--shadow-popover)]"
+            className="fixed bottom-0 right-0 z-80 flex max-h-[min(65vh,30rem)] w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-border bg-background font-sans shadow-(--shadow-popover)"
           >
             <div className="flex min-h-12 items-center gap-2 border-b border-border bg-surface px-3 py-2">
               <div className="min-w-0 flex-1">
@@ -509,7 +509,7 @@ export default function UploadManager({
             type="button"
             onClick={() => { setVisible(true); setOpen(true); }}
             aria-label={`Show upload status: ${queuedCount} queued, ${activeCount} in progress, ${completedCount} completed, ${failedCount} failed`}
-            className="fixed bottom-0 right-0 z-[80] inline-flex min-h-11 items-center gap-2 rounded-xl border border-border bg-background px-4 text-sm font-semibold text-foreground shadow-[var(--shadow-popover)] transition-colors hover:bg-surface"
+            className="fixed bottom-0 right-0 z-80 inline-flex min-h-11 items-center gap-2 rounded-xl border border-border bg-background px-4 text-sm font-semibold text-foreground shadow-(--shadow-popover) transition-colors hover:bg-surface"
           >
             {visibleCount > 0 ? <Upload size={17} aria-hidden="true" /> : <CheckCircle2 size={17} className="text-success" aria-hidden="true" />}
             {visibleCount > 0

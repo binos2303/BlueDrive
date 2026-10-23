@@ -1,10 +1,40 @@
 from .models import Share
-from accounts.access import active_membership, has_active_membership
-from accounts.models import Membership, Tenant
+from accounts.access import (
+    active_membership,
+    can_access_workspace,
+    can_edit_workspace_content,
+    has_active_membership,
+)
+from accounts.models import Membership, Tenant, Workspace
 
 
 def _resource_tenant_is_active(resource):
     return resource.tenant.status == Tenant.Status.ACTIVE
+
+
+def _resource_workspace_is_active(resource):
+    workspace = getattr(resource, "workspace", None)
+    return bool(
+        workspace is not None
+        and workspace.status == Workspace.Status.ACTIVE
+        and workspace.tenant_id == resource.tenant_id
+    )
+
+
+def _owner_can_view_workspace_resource(resource, user):
+    return (
+        _resource_tenant_is_active(resource)
+        and _resource_workspace_is_active(resource)
+        and active_membership(user, resource.tenant_id) is not None
+        and can_access_workspace(user, resource.workspace)
+    )
+
+
+def _owner_can_edit_workspace_resource(resource, user):
+    return (
+        _owner_can_view_workspace_resource(resource, user)
+        and can_edit_workspace_content(user, resource.workspace)
+    )
 
 
 def _receiver_membership_allows(resource, user):
@@ -35,6 +65,12 @@ def _folder_has_deleted_ancestor(folder):
     while current is not None:
         if current.deleted_at is not None:
             return True
+        # A malformed cross-workspace parent chain must never inherit a share.
+        if (
+            current.tenant_id != folder.tenant_id
+            or current.workspace_id != folder.workspace_id
+        ):
+            return True
         current = current.parent
 
     return False
@@ -51,6 +87,7 @@ def get_receiver_share_for_folder(folder, user):
         return None
     if (
         not _resource_tenant_is_active(folder)
+        or not _resource_workspace_is_active(folder)
         or not has_active_membership(user)
         or not _receiver_membership_allows(folder, user)
     ):
@@ -100,6 +137,7 @@ def get_receiver_share_for_file(drive_file, user):
         return None
     if (
         not _resource_tenant_is_active(drive_file)
+        or not _resource_workspace_is_active(drive_file)
         or not has_active_membership(user)
         or not _receiver_membership_allows(drive_file, user)
     ):
@@ -123,7 +161,11 @@ def get_receiver_share_for_file(drive_file, user):
         )
         return direct_share
 
-    if _folder_has_deleted_ancestor(drive_file.folder):
+    if (
+        drive_file.folder.workspace_id != drive_file.workspace_id
+        or drive_file.folder.tenant_id != drive_file.tenant_id
+        or _folder_has_deleted_ancestor(drive_file.folder)
+    ):
         return None
 
     direct_share = (
@@ -152,18 +194,15 @@ def get_receiver_share_for_file(drive_file, user):
 
 
 def can_view_file(drive_file, user):
-    """Return True when the user can view the file."""
-    if drive_file.owner_id == user.id:
-        return (
-            drive_file.deleted_at is None
-            and _resource_tenant_is_active(drive_file)
-            and active_membership(user, drive_file.tenant_id) is not None
-        )
-
-    return get_receiver_share_for_file(
-        drive_file,
-        user,
-    ) is not None
+    """Return True for an authorized workspace member or direct share recipient."""
+    if drive_file.deleted_at is not None:
+        return False
+    # Workspace members can collaborate on workspace files without requiring
+    # a separate Share row for every item. My Drive remains private because its
+    # default workspace is only assigned to its owner.
+    if _owner_can_view_workspace_resource(drive_file, user):
+        return True
+    return get_receiver_share_for_file(drive_file, user) is not None
 
 
 def can_edit_file(drive_file, user):
@@ -179,12 +218,10 @@ def can_edit_file(drive_file, user):
     Viewer:
         Read/download only.
     """
-    if drive_file.owner_id == user.id:
-        return (
-            drive_file.deleted_at is None
-            and _resource_tenant_is_active(drive_file)
-            and active_membership(user, drive_file.tenant_id) is not None
-        )
+    if drive_file.deleted_at is not None:
+        return False
+    if _owner_can_edit_workspace_resource(drive_file, user):
+        return True
 
     share = get_receiver_share_for_file(
         drive_file,
@@ -198,18 +235,12 @@ def can_edit_file(drive_file, user):
 
 
 def can_view_folder(folder, user):
-    """Return True when the user can open/view the folder."""
-    if folder.owner_id == user.id:
-        return (
-            folder.deleted_at is None
-            and _resource_tenant_is_active(folder)
-            and active_membership(user, folder.tenant_id) is not None
-        )
-
-    return get_receiver_share_for_folder(
-        folder,
-        user,
-    ) is not None
+    """Return True for an authorized workspace member or direct share recipient."""
+    if folder.deleted_at is not None:
+        return False
+    if _owner_can_view_workspace_resource(folder, user):
+        return True
+    return get_receiver_share_for_folder(folder, user) is not None
 
 
 def can_edit_folder(folder, user):
@@ -225,12 +256,10 @@ def can_edit_folder(folder, user):
     Viewer:
         Read-only.
     """
-    if folder.owner_id == user.id:
-        return (
-            folder.deleted_at is None
-            and _resource_tenant_is_active(folder)
-            and active_membership(user, folder.tenant_id) is not None
-        )
+    if folder.deleted_at is not None:
+        return False
+    if _owner_can_edit_workspace_resource(folder, user):
+        return True
 
     share = get_receiver_share_for_folder(
         folder,
@@ -283,8 +312,7 @@ def can_edit_folder_tree(folder, user):
     if folder.owner_id == user.id:
         return (
             not _folder_has_deleted_ancestor(folder)
-            and _resource_tenant_is_active(folder)
-            and active_membership(user, folder.tenant_id) is not None
+            and _owner_can_edit_workspace_resource(folder, user)
         )
 
     if _folder_has_deleted_ancestor(folder):
@@ -312,6 +340,8 @@ def can_edit_folder_tree(folder, user):
             current.__class__.objects
             .filter(
                 owner=folder.owner,
+                tenant=folder.tenant,
+                workspace=folder.workspace,
                 parent=current,
                 deleted_at__isnull=True,
             )
@@ -363,10 +393,7 @@ def can_edit_destination_folder(
         return False
 
     if folder.owner_id == user.id:
-        if (
-            not _resource_tenant_is_active(folder)
-            or active_membership(user, folder.tenant_id) is None
-        ):
+        if not _owner_can_edit_workspace_resource(folder, user):
             return False
         if shared_root is not None:
             return is_descendant_or_same(folder, shared_root)

@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from accounts.models import Membership
-from files.models import File, FileVersion
+from files.models import File, FileVersion, StorageConfig, StorageLocation
 from files.views import _safe_download_filename
 
 
@@ -31,6 +31,22 @@ class DownloadSecurityTests(TestCase):
             size_bytes=12,
             mime_type="application/pdf",
             is_current=True,
+        )
+        # A current AVAILABLE version is downloadable only after its object is
+        # published to an active PRIMARY storage location. Model that valid
+        # state in download-success tests rather than bypassing the guard.
+        self.storage_config = StorageConfig.objects.create(
+            tenant=self.file.tenant,
+            provider=StorageConfig.Provider.MINIO,
+            status=StorageConfig.Status.ACTIVE,
+        )
+        self.storage_location = StorageLocation.objects.create(
+            tenant=self.file.tenant,
+            file_version=self.version,
+            storage_config=self.storage_config,
+            object_ref=f"primary/tests/{self.version.pk}",
+            state=StorageLocation.State.AVAILABLE,
+            size_bytes=12,
         )
         self.client.force_login(self.user)
 
@@ -93,6 +109,18 @@ class DownloadSecurityTests(TestCase):
         self.assertEqual(response["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response["Cache-Control"], "private, no-store")
         self.assertEqual(response["Referrer-Policy"], "no-referrer")
+
+    def test_download_without_available_primary_location_is_blocked(self):
+        from django.urls import reverse
+
+        self.storage_location.state = StorageLocation.State.ERROR
+        self.storage_location.save(update_fields=["state", "updated_at"])
+        response = self.client.get(
+            reverse("file_download", args=[self.file.pk]),
+            HTTP_ACCEPT="application/octet-stream, application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("primary storage", response.json()["detail"].lower())
 
     def test_download_filename_cannot_inject_headers_or_paths(self):
         self.assertEqual(

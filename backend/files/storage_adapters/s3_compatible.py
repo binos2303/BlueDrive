@@ -61,8 +61,11 @@ _ACCESS_CODES = {
     "InvalidRegion",
 }
 _SHA256_HEX = re.compile(r"^[0-9a-fA-F]{64}$")
-_SERVER_OBJECT_KEY = re.compile(r"^(quarantine|final|preview)/[0-9a-f]{32}$")
-_ALLOWED_KEY_PURPOSES = {"quarantine", "final", "preview"}
+# Keep legacy prefixes accepted so existing database references remain readable.
+# New uploads use staging/, validated objects are published under primary/, and
+# rejected/failed completed uploads are retained under quarantine/.
+_SERVER_OBJECT_KEY = re.compile(r"^(staging|primary|quarantine|final|preview)/[0-9a-f]{32}$")
+_ALLOWED_KEY_PURPOSES = {"staging", "primary", "quarantine", "final", "preview"}
 
 
 @dataclass(frozen=True)

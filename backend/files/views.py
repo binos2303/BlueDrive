@@ -1,4 +1,4 @@
-﻿import io
+import io
 import uuid
 import re
 import unicodedata
@@ -18,7 +18,9 @@ from django.views.decorators.http import require_POST
 from accounts.access import (
     active_tenant_ids,
     active_tenant_required as login_required,
+    can_edit_workspace_content,
     get_default_tenant,
+    resolve_request_workspace,
 )
 from folders.models import Folder
 from sharing.services import (
@@ -40,7 +42,7 @@ from security.aes_service import (
 )
 
 from .forms import FileRenameForm, FileUploadForm
-from .models import File, UploadSession
+from .models import File, FileVersion, StorageLocation, UploadSession
 from .services import (
     clone_encrypted_file_with_quota,
     unique_copy_name,
@@ -111,12 +113,35 @@ def file_upload(request):
             continue
 
         resource_owner = target_folder.owner if target_folder is not None else request.user
+        if target_folder is not None:
+            tenant = target_folder.tenant
+            workspace = target_folder.workspace
+            requested_workspace_id = request.POST.get("workspace_id")
+            if requested_workspace_id and str(requested_workspace_id) != str(workspace.pk):
+                failed_count += 1
+                messages.error(request, f"{uploaded.name}: destination belongs to a different workspace.")
+                continue
+        else:
+            try:
+                tenant = get_default_tenant(request.user)
+                workspace = resolve_request_workspace(request, tenant)
+                if workspace is not None:
+                    tenant = workspace.tenant
+            except Exception:
+                tenant = None
+                workspace = None
+            if tenant is None or workspace is None or not can_edit_workspace_content(request.user, workspace):
+                failed_count += 1
+                messages.error(request, f"{uploaded.name}: editor access to an active workspace is required.")
+                continue
+
         upload_name = unique_upload_name(
             File,
             "file_name",
             uploaded.name,
             folder=target_folder,
             owner=resource_owner,
+            workspace=workspace,
         )
 
         drive_file = None
@@ -124,13 +149,9 @@ def file_upload(request):
         upload_session = None
         quota_reserved = False
         try:
-            tenant = (
-                target_folder.tenant
-                if target_folder is not None
-                else get_default_tenant(request.user)
-            )
             upload_session = UploadSession.objects.create(
                 tenant=tenant,
+                workspace=workspace,
                 initiated_by=request.user,
                 target_folder=target_folder,
                 client_name=uploaded.name[:255],
@@ -144,6 +165,7 @@ def file_upload(request):
             plaintext = uploaded.read()
             drive_file = File(
                 tenant=tenant,
+                workspace=workspace,
                 owner=resource_owner,
                 folder=target_folder,
                 file_name=upload_name,
@@ -265,10 +287,33 @@ def _get_accessible_file(file_id, user):
     return drive_file, is_owner, share
 
 
+def _current_primary_storage_location(drive_file, version=None):
+    """Return the current version's active PRIMARY location, if one exists."""
+    from .models import StorageLocation
+
+    if version is None:
+        version = drive_file.versions.filter(is_current=True).first()
+    if version is None:
+        return None
+
+    return (
+        StorageLocation.objects.filter(
+            tenant_id=drive_file.tenant_id,
+            file_version=version,
+            state=StorageLocation.State.AVAILABLE,
+            object_ref__startswith="primary/",
+        )
+        .select_related("storage_config")
+        .order_by("-created_at")
+        .first()
+    )
+
+
 def _download_block_reason(drive_file):
-    """Return a user-safe reason when the current file version is not releasable."""
+    """Return a user-safe reason unless the current version is published to PRIMARY."""
     versions = drive_file.versions.all()
     if not versions.exists():
+        # Compatibility for legacy local-media files that predate StorageLocation.
         return None if drive_file.file_path else "File storage is unavailable. Contact support."
 
     version = versions.filter(is_current=True).first()
@@ -282,22 +327,13 @@ def _download_block_reason(drive_file):
         return "This file could not be prepared for download. Contact support."
     if version.state != "available":
         return "This file is still being prepared. Try again later."
-    if not drive_file.file_path:
-        from .models import StorageLocation
-        location = (
-            StorageLocation.objects.filter(
-                tenant_id=drive_file.tenant_id,
-                file_version=version,
-                state=StorageLocation.State.AVAILABLE,
-            )
-            .select_related("storage_config")
-            .order_by("-created_at")
-            .first()
-        )
-        if location is None:
-            return "The stored file is unavailable. Contact support."
-        if location.storage_config.status == "disabled":
-            return "This file's storage is temporarily unavailable. Retry later."
+
+    location = _current_primary_storage_location(drive_file, version)
+    if location is None:
+        # Do not make a STAGING, QUARANTINE, or legacy FINAL object downloadable.
+        return "This file has not been published to primary storage yet. Contact support if the problem persists."
+    if location.storage_config is None or location.storage_config.status != "active":
+        return "This file's storage is temporarily unavailable. Retry later."
     return None
 
 
@@ -340,61 +376,72 @@ def _safe_download_filename(filename):
 
 
 def _decrypt_file(drive_file):
-    if (
-        not drive_file.is_encrypted
-        or not drive_file.encryption_nonce
-        or not drive_file.wrapped_dek
-        or not drive_file.dek_nonce
-    ):
-        raise Http404
+    """Read a live file, decrypting legacy encrypted objects only when required.
 
+    New uploads are intentionally stored as plaintext for the current MVP phase.
+    Existing encrypted files remain readable using their persisted DEK metadata.
+    The name is retained for compatibility with preview/share/copy callers.
+    """
+    current_version = drive_file.versions.filter(is_current=True).first()
+    # If either metadata layer says encrypted, never downgrade to plaintext mode.
+    version_is_encrypted = bool(
+        drive_file.is_encrypted
+        or (current_version is not None and current_version.is_encrypted)
+    )
     try:
-        master_key = get_master_key()
-        dek = unwrap_dek(
-            bytes(drive_file.wrapped_dek),
-            bytes(drive_file.dek_nonce),
-            master_key,
-        )
-        aad = build_file_aad(
-            owner_id=drive_file.owner_id,
-            file_id=drive_file.id,
-            version=drive_file.encryption_version,
-        )
-        if drive_file.file_path:
-            with drive_file.file_path.open("rb") as stored_file:
-                ciphertext = stored_file.read()
-        else:
-            from .models import StorageLocation
-            from .storage_adapters import get_storage_adapter
-            location = StorageLocation.objects.filter(
-                tenant_id=drive_file.tenant_id,
-                file_version__file_id=drive_file.pk,
-                state=StorageLocation.State.AVAILABLE,
-                file_version__state="available",
-                file_version__is_current=True,
-            ).order_by("-created_at").first()
-            if location is None:
+        if current_version is None:
+            # Legacy files may still be stored in Django MEDIA_ROOT.
+            if not drive_file.file_path:
                 raise Http404
+            with drive_file.file_path.open("rb") as stored_file:
+                stored_bytes = stored_file.read()
+            expected_sha256 = drive_file.hash_sha256
+            encryption_nonce = drive_file.encryption_nonce
+            wrapped_dek = drive_file.wrapped_dek
+            dek_nonce = drive_file.dek_nonce
+            encryption_version = drive_file.encryption_version
+        else:
+            if current_version.state != FileVersion.State.AVAILABLE:
+                raise Http404
+            location = _current_primary_storage_location(drive_file, current_version)
+            if (
+                location is None
+                or location.storage_config is None
+                or location.storage_config.status != "active"
+            ):
+                raise Http404
+            from .storage_adapters import get_storage_adapter
+
             with get_storage_adapter().open_object(location.object_ref) as stored_file:
-                ciphertext = stored_file.read()
+                stored_bytes = stored_file.read()
+            expected_sha256 = current_version.sha256 or drive_file.hash_sha256
+            encryption_nonce = current_version.encryption_nonce or drive_file.encryption_nonce
+            wrapped_dek = current_version.wrapped_dek or drive_file.wrapped_dek
+            dek_nonce = current_version.dek_nonce or drive_file.dek_nonce
+            encryption_version = current_version.encryption_version or drive_file.encryption_version
 
-        plaintext = decrypt_bytes(
-            ciphertext,
-            bytes(drive_file.encryption_nonce),
-            dek,
-            aad,
-        )
+        if version_is_encrypted:
+            if not encryption_nonce or not wrapped_dek or not dek_nonce:
+                raise Http404
+            master_key = get_master_key()
+            dek = unwrap_dek(bytes(wrapped_dek), bytes(dek_nonce), master_key)
+            aad = build_file_aad(
+                owner_id=drive_file.owner_id,
+                file_id=drive_file.id,
+                version=encryption_version,
+            )
+            plaintext = decrypt_bytes(stored_bytes, bytes(encryption_nonce), dek, aad)
+        else:
+            plaintext = stored_bytes
 
-        if drive_file.hash_sha256 and not verify_sha256(
-            plaintext,
-            drive_file.hash_sha256,
-        ):
+        if expected_sha256 and not verify_sha256(plaintext, expected_sha256):
             raise InvalidTag
-
         return plaintext
-    except InvalidTag:
+    except (InvalidTag, Http404):
         raise
     except Exception as exc:
+        # Keep the original storage/configuration exception available for server
+        # logging and let the download/preview view turn it into a safe response.
         raise exc
 
 
@@ -537,6 +584,11 @@ def file_download(request, file_id):
             request, block_reason, is_owner=is_owner
         )
 
+    current_version = drive_file.versions.filter(is_current=True).first()
+    was_encrypted = bool(
+        drive_file.is_encrypted
+        or (current_version is not None and current_version.is_encrypted)
+    )
     try:
         plaintext = _decrypt_file(drive_file)
     except InvalidTag:
@@ -576,12 +628,13 @@ def file_download(request, file_id):
         f"Downloaded {drive_file.file_name}",
         obj=drive_file,
     )
-    log_action(
-        request.user,
-        ActivityLog.Action.DECRYPT,
-        f"Decrypted {drive_file.file_name} for download",
-        obj=drive_file,
-    )
+    if was_encrypted:
+        log_action(
+            request.user,
+            ActivityLog.Action.DECRYPT,
+            f"Decrypted {drive_file.file_name} for download",
+            obj=drive_file,
+        )
     response["Content-Length"] = str(len(plaintext))
     response["X-Content-Type-Options"] = "nosniff"
     response["Cache-Control"] = "private, no-store"
@@ -599,6 +652,9 @@ def file_move_to_trash(request, file_id):
         tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
+    if not can_edit_workspace_content(request.user, drive_file.workspace):
+        messages.error(request, "Editor access to this workspace is required.")
+        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
     drive_file.deleted_at = timezone.now()
     drive_file.save(update_fields=["deleted_at", "updated_at"])
     log_action(request.user, ActivityLog.Action.DELETE, f"Moved file to Trash: {drive_file.file_name}", obj=drive_file)
@@ -625,6 +681,10 @@ def file_restore(request, file_id):
         deleted_at__isnull=False,
     )
 
+    if not can_edit_workspace_content(request.user, drive_file.workspace):
+        messages.error(request, "Editor access to this workspace is required.")
+        return redirect("trash")
+
     if drive_file.folder_id and drive_file.folder.deleted_at is not None:
         messages.warning(
             request,
@@ -635,6 +695,7 @@ def file_restore(request, file_id):
     conflict = File.objects.filter(
         owner=request.user,
         tenant=drive_file.tenant,
+        workspace=drive_file.workspace,
         folder=drive_file.folder,
         file_name__iexact=drive_file.file_name,
         deleted_at__isnull=True,
@@ -663,15 +724,24 @@ def file_delete_permanently(request, file_id):
         tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=False,
     )
-    try:
-        if drive_file.file_path:
-            drive_file.file_path.delete(save=False)
-        file_name = drive_file.file_name
-        drive_file.delete()
-        log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted file: {file_name}", obj=drive_file)
-    except Exception:
-        messages.error(request, "Could not permanently delete the file.")
+    if not can_edit_workspace_content(request.user, drive_file.workspace):
+        messages.error(request, "Editor access to this workspace is required.")
         return redirect("trash")
+    file_name = drive_file.file_name
+    try:
+        from .permanent_delete import permanently_delete_files
+        permanently_delete_files([drive_file])
+    except Exception:
+        messages.error(
+            request,
+            "Could not permanently delete the file from storage. The file metadata was retained so you can retry.",
+        )
+        return redirect("trash")
+    log_action(
+        request.user,
+        ActivityLog.Action.PERMANENT_DELETE,
+        f"Permanently deleted file: {file_name}",
+    )
     messages.success(request, "File permanently deleted.")
     return redirect("trash")
 
@@ -701,12 +771,19 @@ def trash_bulk_action(request):
     if not files and not folders:
         messages.warning(request, "No items selected.")
         return redirect("trash")
+    if any(not can_edit_workspace_content(request.user, item.workspace) for item in [*files, *folders]):
+        messages.error(request, "Editor access to every selected workspace is required.")
+        return redirect("trash")
 
     def subtree(root):
         result = [root]
         index = 0
         while index < len(result):
-            result.extend(Folder.objects.filter(owner=request.user, tenant=result[index].tenant, parent=result[index], deleted_at__isnull=False))
+            result.extend(Folder.objects.filter(
+                owner=request.user, tenant=result[index].tenant,
+                workspace=result[index].workspace, parent=result[index],
+                deleted_at__isnull=False,
+            ))
             index += 1
         return result
 
@@ -718,50 +795,96 @@ def trash_bulk_action(request):
             tree = subtree(folder)
             ids = {item.id for item in tree}
             for item in tree:
-                if Folder.objects.filter(owner=request.user, tenant=item.tenant, parent=item.parent, folder_name__iexact=item.folder_name, deleted_at__isnull=True).exclude(id__in=ids).exists():
+                if Folder.objects.filter(
+                    owner=request.user, tenant=item.tenant, workspace=item.workspace,
+                    parent=item.parent, folder_name__iexact=item.folder_name,
+                    deleted_at__isnull=True,
+                ).exclude(id__in=ids).exists():
                     messages.error(request, f'A folder named "{item.folder_name}" already exists at the destination.')
                     return redirect("trash")
-            for item in File.objects.filter(owner=request.user, tenant=folder.tenant, folder_id__in=ids, deleted_at__isnull=False):
-                if File.objects.filter(owner=request.user, tenant=item.tenant, folder=item.folder, file_name__iexact=item.file_name, deleted_at__isnull=True).exists():
+            for item in File.objects.filter(
+                owner=request.user, tenant=folder.tenant, workspace=folder.workspace,
+                folder_id__in=ids, deleted_at__isnull=False,
+            ):
+                if File.objects.filter(
+                    owner=request.user, tenant=item.tenant, workspace=item.workspace,
+                    folder=item.folder, file_name__iexact=item.file_name,
+                    deleted_at__isnull=True,
+                ).exists():
                     messages.error(request, f'A file named "{item.file_name}" already exists in the destination folder.')
                     return redirect("trash")
         for item in files:
             if item.folder_id and item.folder.deleted_at is not None:
                 messages.error(request, f'Restore the parent folder before restoring "{item.file_name}".')
                 return redirect("trash")
-            if File.objects.filter(owner=request.user, tenant=item.tenant, folder=item.folder, file_name__iexact=item.file_name, deleted_at__isnull=True).exists():
+            if File.objects.filter(
+                owner=request.user, tenant=item.tenant, workspace=item.workspace,
+                folder=item.folder, file_name__iexact=item.file_name,
+                deleted_at__isnull=True,
+            ).exists():
                 messages.error(request, f'A file named "{item.file_name}" already exists in the destination folder.')
                 return redirect("trash")
         with transaction.atomic():
             for folder in folders:
                 ids = [item.id for item in subtree(folder)]
-                Folder.objects.filter(owner=request.user, tenant=folder.tenant, id__in=ids).update(deleted_at=None)
-                File.objects.filter(owner=request.user, tenant=folder.tenant, folder_id__in=ids, deleted_at__isnull=False).update(deleted_at=None)
-            File.objects.filter(owner=request.user, tenant__in=tenant_ids, id__in=file_ids).update(deleted_at=None)
+                Folder.objects.filter(
+                    owner=request.user, tenant=folder.tenant,
+                    workspace=folder.workspace, id__in=ids,
+                ).update(deleted_at=None)
+                File.objects.filter(
+                    owner=request.user, tenant=folder.tenant,
+                    workspace=folder.workspace, folder_id__in=ids,
+                    deleted_at__isnull=False,
+                ).update(deleted_at=None)
+            File.objects.filter(
+                owner=request.user, tenant__in=tenant_ids, id__in=file_ids,
+            ).update(deleted_at=None)
         log_action(request.user, ActivityLog.Action.RESTORE, f"Restored {len(files)} file(s) and {len(folders)} folder(s) from Trash")
         messages.success(request, "Selected items restored successfully.")
         return redirect("trash")
 
     if action == "permanent_delete":
-        with transaction.atomic():
-            for folder in folders:
-                ids = [item.id for item in subtree(folder)]
-                subtree_files = File.objects.filter(owner=request.user, tenant=folder.tenant, folder_id__in=ids)
-                for item in subtree_files:
-                    if item.file_path:
-                        try:
-                            item.file_path.delete(save=False)
-                        except Exception:
-                            pass
-                subtree_files.delete()
-                Folder.objects.filter(owner=request.user, tenant=folder.tenant, id__in=ids).delete()
-            for item in files:
-                if item.file_path:
-                    try:
-                        item.file_path.delete(save=False)
-                    except Exception:
-                        pass
-            File.objects.filter(owner=request.user, tenant__in=tenant_ids, id__in=file_ids).delete()
+        try:
+            from .permanent_delete import permanently_delete_files
+            trees = []
+            for root_folder in _top_level_folders(folders):
+                tree_items = [root_folder]
+                index = 0
+                while index < len(tree_items):
+                    tree_items.extend(Folder.objects.filter(
+                        owner=request.user,
+                        tenant=root_folder.tenant,
+                        workspace=root_folder.workspace,
+                        parent=tree_items[index],
+                    ))
+                    index += 1
+                trees.append(tree_items)
+            tree_by_id = {item.pk: item for tree_items in trees for item in tree_items}
+            tree_ids = list(tree_by_id)
+            nested_files = File.objects.filter(
+                owner=request.user,
+                tenant__in=tenant_ids,
+                folder_id__in=tree_ids,
+            ).select_related("folder")
+            files_by_id = {
+                item.pk: item
+                for item in [*files, *list(nested_files)]
+            }
+            permanently_delete_files(files_by_id.values())
+            if tree_ids:
+                workspace_ids = {item.workspace_id for item in tree_by_id.values()}
+                UploadSession.objects.filter(
+                    target_folder_id__in=tree_ids,
+                    workspace_id__in=workspace_ids,
+                ).update(target_folder=None)
+                Folder.objects.filter(
+                    owner=request.user,
+                    tenant__in=tenant_ids,
+                    id__in=tree_ids,
+                ).delete()
+        except Exception:
+            messages.error(request, "Could not permanently delete all selected storage objects. Metadata was retained where cleanup failed; retry after checking storage.")
+            return redirect("trash")
         log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted {len(files)} file(s) and {len(folders)} folder(s) from Trash")
         messages.success(request, "Selected items permanently deleted.")
         return redirect("trash")
@@ -788,6 +911,7 @@ def file_rename(request, file_id):
         duplicate = File.objects.filter(
             owner=drive_file.owner,
             tenant=drive_file.tenant,
+            workspace=drive_file.workspace,
             folder=drive_file.folder,
             file_name__iexact=new_name,
             deleted_at__isnull=True,
@@ -836,6 +960,10 @@ def file_move(request, file_id):
             deleted_at__isnull=True,
         )
 
+    if destination is not None and destination.workspace_id != drive_file.workspace_id:
+        messages.error(request, "Files cannot be moved across workspaces.")
+        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+
     if drive_file.owner_id != request.user.id:
         if not can_edit_destination_folder(destination, request.user, shared_root=shared_root):
             messages.error(request, "Editors can only move shared files inside the shared folder.")
@@ -848,6 +976,7 @@ def file_move(request, file_id):
     duplicate = File.objects.filter(
         owner=drive_file.owner,
         tenant=drive_file.tenant,
+        workspace=drive_file.workspace,
         folder=destination,
         file_name__iexact=drive_file.file_name,
         deleted_at__isnull=True,
@@ -947,7 +1076,7 @@ def file_paste(request):
         if destination is not None and destination.owner_id != source_file.owner_id:
             messages.error(request, "The destination is not part of the shared resource.")
             return redirect(request.META.get("HTTP_REFERER", "shared_with_me"))
-        if destination is not None and destination.tenant_id != source_file.tenant_id:
+        if destination is not None and destination.workspace_id != source_file.workspace_id:
             messages.error(request, "Files cannot be copied or moved across workspaces.")
             return redirect(request.META.get("HTTP_REFERER", "dashboard"))
 
@@ -961,6 +1090,8 @@ def file_paste(request):
         if clipboard_type == "file":
             duplicate = File.objects.filter(
                 owner=source_file.owner,
+                tenant=source_file.tenant,
+                workspace=source_file.workspace,
                 folder=destination,
                 file_name__iexact=copy_name,
                 deleted_at__isnull=True,
@@ -972,6 +1103,7 @@ def file_paste(request):
                     source_file.file_name,
                     folder=destination,
                     owner=source_file.owner,
+                    workspace=source_file.workspace,
                 )
 
         if clipboard_type == "file_cut":

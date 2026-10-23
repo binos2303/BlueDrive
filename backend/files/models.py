@@ -15,6 +15,12 @@ class File(models.Model):
         related_name="files",
     )
 
+    workspace = models.ForeignKey(
+        "accounts.Workspace",
+        on_delete=models.PROTECT,
+        related_name="files",
+    )
+
     owner = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -122,7 +128,7 @@ class File(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                models.F("tenant"),
+                models.F("workspace"),
                 Coalesce(
                     "folder",
                     models.Value(-1, output_field=models.BigIntegerField()),
@@ -135,6 +141,10 @@ class File(models.Model):
                 fields=["tenant", "id"],
                 name="file_tenant_id_uniq",
             ),
+            models.UniqueConstraint(
+                fields=["workspace", "id"],
+                name="file_workspace_id_uniq",
+            ),
         ]
         indexes = [
             models.Index(
@@ -142,8 +152,16 @@ class File(models.Model):
                 name="file_tenant_folder_del_idx",
             ),
             models.Index(
+                fields=["workspace", "folder", "deleted_at"],
+                name="file_ws_folder_del_idx",
+            ),
+            models.Index(
                 fields=["tenant", "owner", "deleted_at"],
                 name="file_tenant_owner_del_idx",
+            ),
+            models.Index(
+                fields=["workspace", "owner", "deleted_at"],
+                name="file_ws_owner_del_idx",
             ),
             models.Index(
                 fields=["tenant", "purge_after"],
@@ -151,6 +169,21 @@ class File(models.Model):
                 name="file_purge_after_idx",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        # Existing callers may not provide a workspace. Infer it from the
+        # destination folder, or fall back to the tenant's default workspace.
+        if self.workspace_id is None and self.tenant_id:
+            if self.folder_id:
+                self.workspace_id = Folder.objects.filter(
+                    pk=self.folder_id
+                ).values_list("workspace_id", flat=True).first()
+            if self.workspace_id is None:
+                from accounts.models import Tenant
+                from accounts.access import get_default_workspace
+                tenant = Tenant.objects.get(pk=self.tenant_id)
+                self.workspace_id = get_default_workspace(tenant).pk
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.file_name
@@ -384,6 +417,11 @@ class UploadSession(models.Model):
         on_delete=models.PROTECT,
         related_name="upload_sessions",
     )
+    workspace = models.ForeignKey(
+        "accounts.Workspace",
+        on_delete=models.PROTECT,
+        related_name="upload_sessions",
+    )
     initiated_by = models.ForeignKey(
         User,
         on_delete=models.PROTECT,
@@ -452,6 +490,10 @@ class UploadSession(models.Model):
                 name="upload_tenant_id_uniq",
             ),
             models.UniqueConstraint(
+                fields=["workspace", "id"],
+                name="upload_workspace_id_uniq",
+            ),
+            models.UniqueConstraint(
                 fields=["tenant", "initiated_by", "idempotency_key"],
                 condition=~Q(idempotency_key=""),
                 name="upload_idempotency_key_uniq",
@@ -463,10 +505,27 @@ class UploadSession(models.Model):
                 name="upload_tenant_state_exp_idx",
             ),
             models.Index(
+                fields=["workspace", "state", "expires_at"],
+                name="upload_ws_state_exp_idx",
+            ),
+            models.Index(
                 fields=["initiated_by", "state", "created_at"],
                 name="upload_user_state_created_idx",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.workspace_id is None and self.tenant_id:
+            if self.target_folder_id:
+                self.workspace_id = Folder.objects.filter(
+                    pk=self.target_folder_id
+                ).values_list("workspace_id", flat=True).first()
+            if self.workspace_id is None:
+                from accounts.models import Tenant
+                from accounts.access import get_default_workspace
+                tenant = Tenant.objects.get(pk=self.tenant_id)
+                self.workspace_id = get_default_workspace(tenant).pk
+        super().save(*args, **kwargs)
 
 
 class UploadFinalizationJob(models.Model):

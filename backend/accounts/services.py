@@ -1,6 +1,7 @@
 from django.db import transaction
 
-from accounts.models import Membership, QuotaAccount, Tenant
+from accounts.models import Membership, QuotaAccount, Tenant, WorkspaceMembership
+from accounts.access import get_default_workspace
 
 
 @transaction.atomic
@@ -25,6 +26,16 @@ def get_personal_tenant(user):
         },
     )
     
+    workspace = get_default_workspace(tenant)
+    WorkspaceMembership.objects.get_or_create(
+        workspace=workspace,
+        membership=Membership.objects.get(tenant=tenant, user=user),
+        defaults={
+            "role": WorkspaceMembership.Role.ADMIN,
+            "status": WorkspaceMembership.Status.ACTIVE,
+        },
+    )
+
     QuotaAccount.objects.get_or_create(
         tenant=tenant,
         scope=QuotaAccount.Scope.TENANT,

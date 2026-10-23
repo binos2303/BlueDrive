@@ -4,6 +4,12 @@ from . import views
 from .drive_api import (
     drive_items_move_api,
     drive_items_duplicate_api,
+    drive_items_trash_api,
+    drive_items_restore_api,
+    drive_items_delete_api,
+    drive_items_star_api,
+    drive_folder_tree_api,
+    drive_items_share_api,
 )
 
 urlpatterns = [
@@ -17,6 +23,36 @@ urlpatterns = [
         "drive/api/items/duplicate/",
         drive_items_duplicate_api,
         name="drive_items_duplicate_api",
+    ),
+    path(
+        "drive/api/items/trash/",
+        drive_items_trash_api,
+        name="drive_items_trash_api",
+    ),
+    path(
+        "drive/api/items/restore/",
+        drive_items_restore_api,
+        name="drive_items_restore_api",
+    ),
+    path(
+        "drive/api/items/delete/",
+        drive_items_delete_api,
+        name="drive_items_delete_api",
+    ),
+    path(
+        "drive/api/items/star/",
+        drive_items_star_api,
+        name="drive_items_star_api",
+    ),
+    path(
+        "drive/api/folder-tree/",
+        drive_folder_tree_api,
+        name="drive_folder_tree_api",
+    ),
+    path(
+        "drive/api/items/share/",
+        drive_items_share_api,
+        name="drive_items_share_api",
     ),
     path("", views.dashboard, name="dashboard"),
     path("recent/", views.recent, name="recent"),

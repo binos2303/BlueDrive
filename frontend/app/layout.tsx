@@ -5,6 +5,7 @@ import { Poppins } from "next/font/google";
 import "./globals.css";
 import UploadManager from "@/components/drive/UploadManager";
 import AccountProvider from "@/components/account/AccountProvider";
+import ThemeProvider from "@/components/theme/ThemeProvider";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -33,9 +34,11 @@ export default function RootLayout({
       <body
         className={`${poppins.className} min-h-screen bg-background text-foreground antialiased`}
       >
-        <AccountProvider>
-          <UploadManager>{children}</UploadManager>
-        </AccountProvider>
+        <ThemeProvider>
+          <AccountProvider>
+            <UploadManager>{children}</UploadManager>
+          </AccountProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

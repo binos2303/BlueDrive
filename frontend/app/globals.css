@@ -26,6 +26,34 @@
   --motion-normal: 180ms;
 }
 
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --brand-primary: #91a2ff;
+  --brand-primary-hover: #a7b4ff;
+  --brand-primary-soft: #252e4c;
+  --brand-primary-contrast: #a8b6ff;
+
+  --brand-dark: #e7ebff;
+  --brand-deep: #f5f6ff;
+
+  --background: #0c1020;
+  --surface: #141a2a;
+  --border: #283149;
+  --border-strong: #3b4764;
+
+  --foreground: #edf0fb;
+  --muted: #a3aec7;
+  --success: #4ade80;
+  --warning: #facc15;
+  --danger: #fb7185;
+  --focus-ring: #a8b6ff;
+  --shadow-popover: 0 12px 32px rgb(0 0 0 / 40%);
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -104,8 +132,8 @@ a {
 }
 
 :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
-  outline: 3px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 :where(button, input, select, textarea):disabled {
@@ -129,7 +157,33 @@ a {
 }
 
 @media (forced-colors: active) {
-  :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+  :where(
+    button,
+    a,
+    input,
+    select,
+    textarea,
+    summary,
+    [tabindex]
+  ):focus-visible {
     outline: 2px solid Highlight;
   }
+}
+
+/* Subtle focus for text fields without a thick outer halo. */
+:where(input, textarea, select):focus-visible {
+  outline: none;
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
+/* Native scroll remains functional but its OS-rendered arrows are hidden. */
+.custom-scroll-viewport {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.custom-scroll-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }

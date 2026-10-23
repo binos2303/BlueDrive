@@ -1,3 +1,5 @@
+import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
+
 export type AccountType = "individual" | "business" | "unclassified";
 
 export type AccountSnapshot = {
@@ -54,14 +56,26 @@ export async function requestAccountApi<T>(
 ): Promise<T> {
   let response: Response;
   try {
+    const headers = new Headers(init.headers);
+    if (!headers.has("Accept")) headers.set("Accept", "application/json");
+    if (init.body && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    const requestPath = path.split("?", 1)[0] ?? path;
+    const isWorkspaceScopedRequest = /^\/(drive|files|folders|sharing)\//.test(requestPath);
+    if (isWorkspaceScopedRequest) {
+      // The server remains the authorization boundary; this header only selects
+      // the active workspace context for the existing Drive APIs.
+      headers.delete("X-Workspace-ID");
+      const workspaceId = getActiveWorkspaceIdForRequest();
+      if (workspaceId) headers.set("X-Workspace-ID", workspaceId);
+    }
+
     response = await fetch(`${apiBase()}${path}`, {
       ...init,
       credentials: "include",
-      headers: {
-        Accept: "application/json",
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
-        ...init.headers,
-      },
+      headers,
     });
   } catch (error) {
     if (error instanceof AccountServiceError) throw error;
