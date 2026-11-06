@@ -1,35 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  ArrowDown,
-  ArrowUp,
-  ChevronDown,
-  Copy,
-  Download,
-  FileText,
-  Folder,
-  FolderOpen,
   Grid2x2,
-  GripVertical,
-  Image as ImageIcon,
   List,
-  ListFilter,
-  MoreHorizontal,
-  Move,
-  Pencil,
-  Share2,
-  Star,
-  Trash2,
-  RotateCcw,
   Search,
   X,
 } from "lucide-react";
 import Breadcrumb from "@/components/ui/Breadcrumb";
 import Button from "@/components/ui/Button";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
-import ContextMenu, { type ContextMenuAction } from "@/components/ui/ContextMenu";
+import type { ContextMenuAction } from "@/components/ui/ContextMenu";
 import EmptyState from "@/components/shared/EmptyState";
 import Toast from "@/components/ui/Toast";
 import RenameDialog from "@/components/drive/RenameDialog";
@@ -58,12 +40,22 @@ import {
   requestAccountApi,
 } from "@/lib/account-service";
 import { isDownloadSelectionSupported } from "@/lib/drive-download-policy";
+import type { DriveItem, DriveItemType, SortDirection, SortKey } from "./browser/types";
+import { listViewForTitle, parseSize } from "./browser/drive-display-utils";
+import {
+  MAX_UPLOAD_FILES_PER_BATCH, getDroppedEntry, readDroppedEntry,
+  validateUploadPath, type DroppedEntry,
+} from "./browser/drive-upload-utils";
+import DriveGrid from "./browser/DriveGrid";
+import DriveListTable from "./browser/DriveListTable";
+import DriveActionToolbar from "./browser/DriveActionToolbar";
+import DriveCreateFolderDialog from "./browser/DriveCreateFolderDialog";
+import DriveMoveDialog from "./browser/DriveMoveDialog";
+import DriveShareDialog from "./browser/DriveShareDialog";
 import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 
 type ViewMode = "list" | "grid";
-type SortDirection = "asc" | "desc";
-type SortKey = "name" | "modified" | "size" | "type";
-type DriveItemType = "folder" | "document" | "image";
+export type { DriveItem } from "./browser/types";
 type PendingDestructiveAction = {
   action: "trash" | "delete";
   count: number;
@@ -93,107 +85,10 @@ type ScrollbarDrag = {
 
 const ITEM_DRAG_TYPE = "application/x-securedrive-item";
 
-export type DriveItem = {
-  id: number;
-  folderId?: number;
-  name: string;
-  owner: string;
-  ownerInitials: string;
-  modified: string;
-  size: string;
-  type: DriveItemType;
-  starred?: boolean;
-  canManage?: boolean;
-};
-
 type DriveFileBrowserProps = {
   title: string;
   items: DriveItem[];
 };
-
-const MAX_UPLOAD_FILES_PER_BATCH = 500;
-const MAX_UPLOAD_FILE_SIZE = 100 * 1024 * 1024;
-const MAX_UPLOAD_PATH_LENGTH = 1024;
-const MAX_FILE_NAME_LENGTH = 255;
-
-function listViewForTitle(title: string): DriveListView | null {
-  if (title === "My Drive") return "drive";
-  if (title === "Recent") return "recent";
-  if (title === "Trash") return "trash";
-  if (title === "Shared with me") return "shared";
-  if (title === "Starred") return "starred";
-  return null;
-}
-
-function renderItemIcon(type: DriveItemType, size: number): ReactNode {
-  if (type === "folder") return <Folder size={size} />;
-  if (type === "image") return <ImageIcon size={size} />;
-  return <FileText size={size} />;
-}
-
-type DroppedEntry = {
-  name: string;
-  fullPath: string;
-  isFile: boolean;
-  isDirectory: boolean;
-  file?: (success: (file: File) => void, failure: (error: DOMException) => void) => void;
-  createReader?: () => {
-    readEntries: (
-      success: (entries: DroppedEntry[]) => void,
-      failure: (error: DOMException) => void,
-    ) => void;
-  };
-};
-
-function getDroppedEntry(item: DataTransferItem): DroppedEntry | null {
-  const itemWithEntry = item as DataTransferItem & {
-    webkitGetAsEntry?: () => DroppedEntry | null;
-  };
-  return itemWithEntry.webkitGetAsEntry?.() ?? null;
-}
-
-async function readDroppedEntry(entry: DroppedEntry): Promise<{ file: File; relativePath: string }[]> {
-  if (entry.isFile && entry.file) {
-    const file = await new Promise<File>((resolve, reject) => {
-      entry.file?.(resolve, reject);
-    });
-    return [{ file, relativePath: entry.fullPath.replace(/^\/+/, "") || file.name }];
-  }
-
-  if (entry.isDirectory && entry.createReader) {
-    const reader = entry.createReader();
-    const children: DroppedEntry[] = [];
-    while (true) {
-      const batch = await new Promise<DroppedEntry[]>((resolve, reject) => {
-        reader.readEntries(resolve, reject);
-      });
-      if (batch.length === 0) break;
-      children.push(...batch);
-    }
-    const nested = await Promise.all(children.map(readDroppedEntry));
-    return nested.flat();
-  }
-
-  throw new Error(`The browser couldn't read "${entry.name}". Check folder access or choose files instead.`);
-}
-
-function validateUploadPath(path: string, file: File): string | null {
-  const segments = path.split(/[\\/]/);
-  if (!path.trim() || path.length > MAX_UPLOAD_PATH_LENGTH) return "File path is empty or exceeds 1,024 characters.";
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) return "File path contains an invalid path segment.";
-  if (file.name.length > MAX_FILE_NAME_LENGTH) return "File name exceeds 255 characters.";
-  if (/[<>:"|?*\u0000-\u001f]/.test(file.name)) return "File name contains characters that are not allowed.";
-  if (file.size > MAX_UPLOAD_FILE_SIZE) return "File exceeds the current 100 MB upload limit.";
-  return null;
-}
-
-function parseSize(value: string) {
-  const match = value.match(/^([\d.]+)\s*(B|KB|MB|GB|TB)$/i);
-  if (!match) return 0;
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const unitIndex = units.indexOf(match[2].toUpperCase());
-  return Number(match[1]) * 1024 ** unitIndex;
-}
 
 export default function DriveFileBrowser({ title, items }: DriveFileBrowserProps) {
   const pathname = usePathname();
@@ -1724,179 +1619,25 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         </div>
       )}
 
-      {/* Keep both toolbars in the same fixed-height slot so switching between
-          sorting controls and selection actions never moves the file list. */}
-      <div className="relative mt-3 mb-2 h-10">
-        <div
-          role="toolbar"
-          aria-label="Selected file actions"
-          aria-hidden={selectedItems.length === 0}
-          inert={selectedItems.length === 0}
-          className={`absolute inset-0 flex h-full min-w-0 flex-nowrap items-center gap-1 overflow-x-auto rounded-xl border border-brand/15 bg-brand-soft/80 px-1.5 shadow-sm backdrop-blur-sm sm:gap-1.5 sm:px-2 transition-[opacity,transform,visibility] duration-200 ease-out motion-reduce:transition-none ${selectedItems.length > 0
-            ? "visible translate-y-0 scale-100 opacity-100"
-            : "invisible pointer-events-none -translate-y-1 scale-[0.985] opacity-0"
-          }`}
-        >
-          <button
-            type="button"
-            aria-label="Clear selection"
-            title="Clear selection"
-            onClick={() => {
-              setSelectedIds(new Set());
-              setSelectionAnchorId(null);
-            }}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-          >
-            <X size={16} />
-          </button>
-          <span
-            className="mr-1 inline-flex h-7 shrink-0 items-center border-r border-brand/15 px-2 pr-3 text-xs font-semibold tabular-nums text-brand-contrast"
-            aria-live="polite"
-          >
-            {selectedItems.length} selected
-          </span>
-          {title === "Trash" && (
-            <button
-              type="button"
-              aria-label="Restore selected items"
-              title="Restore"
-              onClick={() => void restoreItems(selectedItems)}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-            >
-              <RotateCcw size={16} />
-            </button>
-          )}
-          <button
-            type="button"
-            aria-label="Open"
-            title="Open"
-            onClick={() => runAction("Open", selectedItems[0])}
-            disabled={selectedItems.length !== 1}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-          >
-            <FolderOpen size={16} />
-          </button>
-          <button
-            type="button"
-            aria-label="Download"
-            title="Download"
-            onClick={() => runAction("Download")}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-          >
-            <Download size={16} />
-          </button>
-          <button
-            type="button"
-            aria-label="Rename"
-            title="Rename"
-            onClick={() => runAction("Rename")}
-            disabled={selectedItems.length !== 1 || !selectedCanManage}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-          >
-            <Pencil size={16} />
-          </button>
-          {title !== "Shared with me" && title !== "Trash" && (
-            <>
-              <button
-                type="button"
-                aria-label={isMovingItems ? "Moving items" : "Move"}
-                title={isMovingItems ? "Moving items…" : "Move"}
-                onClick={() => runAction("Move")}
-                disabled={isMovingItems || isDuplicatingItems || !selectedCanManage}
-                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-              >
-                <Move size={16} />
-              </button>
-              <button
-                type="button"
-                aria-label={isDuplicatingItems ? "Duplicating items" : "Duplicate"}
-                title={isDuplicatingItems ? "Duplicating items…" : "Duplicate"}
-                onClick={() => runAction("Duplicate")}
-                disabled={isDuplicatingItems || isMovingItems || !selectedCanManage}
-                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-              >
-                <Copy size={16} />
-              </button>
-            </>
-          )}
-          {title !== "Trash" && (
-            <button
-              type="button"
-              aria-label={selectedItems.every((item) => item.starred) ? "Remove from Starred" : "Add to Starred"}
-              title={selectedItems.every((item) => item.starred) ? "Remove from Starred" : "Add to Starred"}
-              onClick={() => void toggleStar(selectedItems)}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-            >
-              <Star size={16} fill={selectedItems.every((item) => item.starred) ? "currentColor" : "none"} />
-            </button>
-          )}
-          {title !== "Shared with me" && title !== "Trash" && selectedCanShare && (
-            <button
-              type="button"
-              aria-label="Share"
-              title="Share"
-              onClick={() => runAction("Share")}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-            >
-              <Share2 size={16} />
-            </button>
-          )}
-          {(title === "Trash" || (title !== "Shared with me" && selectedCanManage)) && (
-            <button
-              type="button"
-              aria-label={title === "Trash" ? "Delete permanently" : "Move to trash"}
-              title={title === "Trash" ? "Delete permanently" : "Move to trash"}
-              onClick={() => setPendingDestructive({
-                action: title === "Trash" ? "delete" : "trash",
-                count: selectedItems.length,
-                targets: selectedItems,
-              })}
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-danger transition-colors hover:bg-danger/10 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-danger"
-            >
-              <Trash2 size={16} />
-            </button>
-          )}
-        </div>
-
-        <div
-          aria-label="Sort and filter files"
-          aria-hidden={selectedItems.length > 0}
-          inert={selectedItems.length > 0}
-          className={`absolute inset-0 flex h-full min-w-0 flex-nowrap items-center gap-2 overflow-x-auto px-2 transition-[opacity,transform,visibility] duration-200 ease-out motion-reduce:transition-none ${selectedItems.length === 0
-            ? "visible translate-y-0 opacity-100"
-            : "invisible pointer-events-none translate-y-1 opacity-0"
-          }`}
-        >
-          <label className="sr-only" htmlFor="drive-sort">Sort files by</label>
-          <div className="relative shrink-0">
-            <select
-              id="drive-sort"
-              value={sortKey}
-              onChange={(event) => setSortKey(event.target.value as SortKey)}
-              className="h-8 appearance-none rounded-lg border border-border bg-surface py-1.5 pl-3 pr-8 text-xs text-foreground transition-colors hover:bg-background focus-visible:border-brand-contrast"
-            >
-              <option value="name">Name</option>
-              <option value="modified">Last modified</option>
-              <option value="size">File size</option>
-              <option value="type">Type</option>
-            </select>
-            <ChevronDown size={15} aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted" />
-          </div>
-          <button
-            type="button"
-            onClick={() => setSortDirection((current) => (current === "asc" ? "desc" : "asc"))}
-            className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 text-xs text-foreground transition-colors duration-(--motion-fast) hover:bg-background"
-            aria-label={`Sort ${sortKey} ${sortDirection === "asc" ? "descending" : "ascending"}`}
-          >
-            <ListFilter size={15} className="text-muted" />
-            <span>{sortDirection === "asc" ? "Ascending" : "Descending"}</span>
-            {sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-          </button>
-          <span className="ml-auto shrink-0 whitespace-nowrap text-xs font-medium text-muted" aria-live="polite">
-            {listView ? `${driveItems.length} items` : title === "Starred" ? "No starred items yet" : "Demo UI · file actions not connected"}
-          </span>
-        </div>
-      </div>
+      <DriveActionToolbar
+        title={title}
+        selectedItems={selectedItems}
+        selectedCanManage={selectedCanManage}
+        selectedCanShare={selectedCanShare}
+        isMovingItems={isMovingItems}
+        isDuplicatingItems={isDuplicatingItems}
+        sortKey={sortKey}
+        sortDirection={sortDirection}
+        itemCount={driveItems.length}
+        hasListView={Boolean(listView)}
+        onClearSelection={() => { setSelectedIds(new Set()); setSelectionAnchorId(null); }}
+        onRestoreSelected={() => { void restoreItems(selectedItems); }}
+        onRunAction={runAction}
+        onToggleStarSelected={() => { void toggleStar(selectedItems); }}
+        onPendingDelete={(action) => setPendingDestructive({ action, count: selectedItems.length, targets: selectedItems })}
+        onSortKeyChange={setSortKey}
+        onToggleSortDirection={() => setSortDirection((current) => (current === "asc" ? "desc" : "asc"))}
+      />
       </div>
 
       {downloadStatus && (
@@ -1949,196 +1690,43 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
             ) : undefined}
           />
         ) : view === "list" ? (
-          <div className="min-w-0">
-            <table className="w-full min-w-3xl border-separate border-spacing-0 text-left">
-              <thead>
-                <tr className="bg-background text-[13px] font-semibold text-muted">
-                  <SortableHeading label="Name" field="name" current={sortKey} direction={sortDirection} onSort={(field) => { setSortKey(field); setSortDirection(sortKey === field && sortDirection === "asc" ? "desc" : "asc"); }} />
-                  <th scope="col" className="sticky top-0 z-20 border-b border-border bg-background px-4 py-3">Owner</th>
-                  <SortableHeading label="Date modified" field="modified" current={sortKey} direction={sortDirection} onSort={(field) => { setSortKey(field); setSortDirection(sortKey === field && sortDirection === "asc" ? "desc" : "asc"); }} />
-                  <SortableHeading label="File size" field="size" current={sortKey} direction={sortDirection} onSort={(field) => { setSortKey(field); setSortDirection(sortKey === field && sortDirection === "asc" ? "desc" : "asc"); }} />
-                  <th scope="col" className="sticky top-0 z-20 w-20 border-b border-border bg-background px-3 py-2 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedItems.map((item) => (
-                  <FileRow
-                    key={item.id}
-                    item={item}
-                    selected={selectedIds.has(item.id)}
-                    onToggle={(event) => handleItemClick(event, item.id)}
-                    onOpen={() => openItem(item)}
-                    onToggleStar={() => void toggleStar([item])}
-                    showStar={title !== "Trash"}
-                    actions={createActions(item)}
-                    onDragStart={(event) => handleDragStart(event, item)}
-                    onDragEnd={() => { setFileDropActive(false); setDropTargetFolderId(null); }}
-                    onDragOverItem={(event) => handleFolderDragOver(event, item)}
-                    onDropOnItem={(event) => void handleDropOnFolder(event, item)}
-                    dropTarget={item.type === "folder" && item.folderId === dropTargetFolderId}
-                  />
-                ))}
-              </tbody>
-            </table>
-            <div aria-hidden="true" className="h-12 select-none" />
-          </div>
+          <DriveListTable
+            items={sortedItems}
+            selectedIds={selectedIds}
+            sortKey={sortKey}
+            sortDirection={sortDirection}
+            onSort={(field) => {
+              setSortKey(field);
+              setSortDirection(sortKey === field && sortDirection === "asc" ? "desc" : "asc");
+            }}
+            onItemClick={handleItemClick}
+            onOpen={openItem}
+            onToggleStar={toggleStar}
+            showStar={title !== "Trash"}
+            createActions={createActions}
+            onDragStart={handleDragStart}
+            onDragEnd={() => { setFileDropActive(false); setDropTargetFolderId(null); }}
+            onFolderDragOver={handleFolderDragOver}
+            onDropOnFolder={handleDropOnFolder}
+            dropTargetFolderId={dropTargetFolderId}
+          />
         ) : (
-          <div className="space-y-5 p-3 sm:p-4">
-            {folderItems.length > 0 && (
-              <section aria-labelledby="drive-folders-heading" data-marquee-section="folders">
-                <div data-no-marquee-selection="true" className="mb-2 flex items-center justify-between px-1">
-                  <h3 id="drive-folders-heading" className="text-sm font-semibold text-foreground">Folders</h3>
-                  <span className="text-xs text-muted">{folderItems.length}</span>
-                </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-                  {folderItems.map((item) => {
-                    const selected = selectedIds.has(item.id);
-                    return (
-                      <article
-                        key={item.id}
-                        data-drive-item-id={item.id}
-                        onClick={(event) => handleItemClick(event, item.id)}
-                        onDoubleClick={() => openItem(item)}
-                        onDragOver={(event) => handleFolderDragOver(event, item)}
-                        onDrop={(event) => void handleDropOnFolder(event, item)}
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") openItem(item);
-                          if (event.key === " ") { event.preventDefault(); toggleItem(item.id); }
-                        }}
-                        className={`flex h-14 min-w-0 items-center gap-2 rounded-xl border px-3 transition-colors duration-(--motion-fast) ${selected ? "border-brand-contrast bg-brand-soft ring-1 ring-brand-contrast/20" : "border-border bg-background hover:border-border-strong hover:bg-brand-soft/40"} ${dropTargetFolderId === item.folderId ? "ring-2 ring-brand-contrast bg-brand-soft" : ""}`}
-                      >
-                        <button
-                          type="button"
-                          draggable
-                          data-no-marquee-selection="true"
-                          onClick={(event) => event.stopPropagation()}
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onDragStart={(event) => handleDragStart(event, item)}
-                          onDragEnd={() => { setFileDropActive(false); setDropTargetFolderId(null); }}
-                          aria-label={`Drag ${item.name}`}
-                          title="Drag to move"
-                          className="flex h-6 w-4 shrink-0 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
-                        >
-                          <GripVertical size={14} />
-                        </button>
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-contrast">
-                          {renderItemIcon("folder", 18)}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate text-left text-sm font-medium text-foreground" title={item.name}>
-                          {item.name}
-                        </span>
-                        {title !== "Trash" && (
-                          <button
-                            type="button"
-                            aria-label={item.starred ? `Remove ${item.name} from Starred` : `Add ${item.name} to Starred`}
-                            title={item.starred ? "Remove from Starred" : "Add to Starred"}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => { event.stopPropagation(); void toggleStar([item]); }}
-                            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
-                          >
-                            <Star size={15} fill={item.starred ? "currentColor" : "none"} />
-                          </button>
-                        )}
-                        <span
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onClick={(event) => event.stopPropagation()}
-                          onDoubleClick={(event) => event.stopPropagation()}
-                        >
-                          <ContextMenu
-                            label={`Actions for ${item.name}`}
-                            trigger={<MoreHorizontal size={16} />}
-                            actions={createActions(item)}
-                          />
-                        </span>
-                      </article>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
-
-            {fileItems.length > 0 && (
-              <section aria-labelledby="drive-files-heading" data-marquee-section="files" className={folderItems.length > 0 ? "pt-1" : ""}>
-                <div data-no-marquee-selection="true" className="mb-2 flex items-center justify-between px-1">
-                  <h3 id="drive-files-heading" className="text-sm font-semibold text-foreground">Files</h3>
-                  <span className="text-xs text-muted">{fileItems.length}</span>
-                </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-                  {fileItems.map((item) => {
-                    const selected = selectedIds.has(item.id);
-                    return (
-                      <article
-                        key={item.id}
-                        data-drive-item-id={item.id}
-                        onClick={(event) => handleItemClick(event, item.id)}
-                        onDoubleClick={() => openItem(item)}
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") openItem(item);
-                          if (event.key === " ") { event.preventDefault(); toggleItem(item.id); }
-                        }}
-                        className={`min-w-0 cursor-pointer rounded-xl border p-3 transition-colors duration-(--motion-fast) ${selected ? "border-brand-contrast bg-brand-soft/60 ring-1 ring-brand-contrast/20" : "border-border bg-surface hover:border-brand/30 hover:bg-brand-soft/25"}`}
-                      >
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <button
-                            type="button"
-                            draggable
-                            data-no-marquee-selection="true"
-                            onClick={(event) => event.stopPropagation()}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onDragStart={(event) => handleDragStart(event, item)}
-                            onDragEnd={() => { setFileDropActive(false); setDropTargetFolderId(null); }}
-                            aria-label={`Drag ${item.name}`}
-                            title="Drag to move"
-                            className="flex h-6 w-5 shrink-0 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
-                          >
-                            <GripVertical size={14} />
-                          </button>
-                          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-contrast">
-                            {renderItemIcon(item.type, 16)}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate text-left text-sm font-medium text-foreground" title={item.name}>
-                            {item.name}
-                          </span>
-                          {title !== "Trash" && (
-                            <button
-                              type="button"
-                              aria-label={item.starred ? `Remove ${item.name} from Starred` : `Add ${item.name} to Starred`}
-                              title={item.starred ? "Remove from Starred" : "Add to Starred"}
-                              onPointerDown={(event) => event.stopPropagation()}
-                              onClick={(event) => { event.stopPropagation(); void toggleStar([item]); }}
-                              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
-                            >
-                              <Star size={15} fill={item.starred ? "currentColor" : "none"} />
-                            </button>
-                          )}
-                          <span
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => event.stopPropagation()}
-                            onDoubleClick={(event) => event.stopPropagation()}
-                          >
-                            <ContextMenu
-                              label={`Actions for ${item.name}`}
-                              trigger={<MoreHorizontal size={16} />}
-                              actions={createActions(item)}
-                            />
-                          </span>
-                        </div>
-                        <div className="mt-3 flex items-center justify-between gap-2 pl-13 text-xs text-muted">
-                          <span className="min-w-0 truncate" title="Date modified">{item.modified}</span>
-                          <span className="shrink-0">{item.size}</span>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
-
-          </div>
+          <DriveGrid
+            folderItems={folderItems}
+            fileItems={fileItems}
+            selectedIds={selectedIds}
+            title={title}
+            dropTargetFolderId={dropTargetFolderId}
+            onItemClick={handleItemClick}
+            onOpen={openItem}
+            onToggleItem={toggleItem}
+            onToggleStar={toggleStar}
+            createActions={createActions}
+            onDragStart={handleDragStart}
+            onDragEnd={() => { setFileDropActive(false); setDropTargetFolderId(null); }}
+            onFolderDragOver={handleFolderDragOver}
+            onDropOnFolder={handleDropOnFolder}
+          />
         )}
         </div>
         {view === "list" && scrollMetrics.trackTop > 0 && (
@@ -2181,145 +1769,29 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         )}
       </div>
 
-      {isCreateFolderOpen && (
-        <div
-          className="fixed inset-0 z-100 flex items-center justify-center bg-black/30 p-4"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !isCreatingFolder) {
-              setIsCreateFolderOpen(false);
-            }
-          }}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="create-folder-title"
-            className="w-full max-w-126.5 rounded-4xl bg-background px-7.5 pb-7 pt-7.5 shadow-xl"
-          >
-            <h2
-              id="create-folder-title"
-              className="mb-6 text-[28px] font-normal tracking-tight text-foreground"
-            >
-              New folder
-            </h2>
+      <DriveCreateFolderDialog
+        open={isCreateFolderOpen}
+        creating={isCreatingFolder}
+        name={newFolderName}
+        error={folderNameError}
+        onNameChange={(name) => { setNewFolderName(name); setFolderNameError(""); }}
+        onClose={() => setIsCreateFolderOpen(false)}
+        onCreate={() => { void handleCreateFolder(); }}
+      />
 
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void handleCreateFolder();
-              }}
-            >
-              <input
-                autoFocus
-                autoComplete="off"
-                maxLength={255}
-                value={newFolderName}
-                onFocus={(event) => event.currentTarget.select()}
-                onChange={(event) => {
-                  setNewFolderName(event.target.value);
-                  setFolderNameError("");
-                }}
-                placeholder="Untitled folder"
-                aria-label="Folder name"
-                aria-invalid={Boolean(folderNameError)}
-                disabled={isCreatingFolder}
-                className="h-17.5 w-full rounded-[5px] border-2 border-brand bg-transparent px-4.5 text-[20px] text-foreground outline-none focus:ring-0"
-              />
-
-              {folderNameError && (
-                <p className="mt-2 text-sm text-red-600" role="alert">
-                  {folderNameError}
-                </p>
-              )}
-
-              <div className="mt-7 flex justify-end gap-2">
-                <button
-                  type="button"
-                  disabled={isCreatingFolder}
-                  onClick={() => setIsCreateFolderOpen(false)}
-                  className="min-w-20.5 rounded-lg px-4 py-2.5 text-base font-medium text-brand-contrast hover:bg-brand-soft disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={isCreatingFolder || !newFolderName.trim()}
-                  className="min-w-20.5 rounded-lg px-4 py-2.5 text-base font-medium text-brand-contrast hover:bg-brand-soft disabled:opacity-50"
-                >
-                  {isCreatingFolder ? "Creating..." : "Create"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {isMoveDialogOpen && (
-        <div
-          className="fixed inset-0 z-100 flex items-center justify-center bg-black/35 p-4"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !isMovingItems) setIsMoveDialogOpen(false);
-          }}
-        >
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="move-items-title"
-            className="flex max-h-[min(80vh,680px)] w-full max-w-155 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl"
-          >
-            <header className="border-b border-border px-5 py-4">
-              <h2 id="move-items-title" className="text-lg font-semibold text-foreground">Move {moveTargets.length} item{moveTargets.length === 1 ? "" : "s"}</h2>
-              <p className="mt-1 text-sm text-muted">Choose a destination folder. You can also drag items onto a folder in Drive.</p>
-            </header>
-            <div className="flex flex-wrap items-center gap-1 border-b border-border px-5 py-3 text-sm">
-              <button type="button" onClick={() => void loadMoveDestination(null)} className="rounded-md px-2 py-1 font-medium text-brand-contrast hover:bg-brand-soft">My Drive</button>
-              {(moveDestinationDetails?.ancestors ?? []).map((ancestor) => (
-                <span key={ancestor.id} className="inline-flex items-center gap-1">
-                  <span className="text-muted">/</span>
-                  <button type="button" onClick={() => void loadMoveDestination(ancestor.id)} className="rounded-md px-2 py-1 text-brand-contrast hover:bg-brand-soft">{ancestor.name}</button>
-                </span>
-              ))}
-              {moveDestinationDetails && <span className="inline-flex items-center gap-1"><span className="text-muted">/</span><span className="rounded-md bg-brand-soft px-2 py-1 font-semibold text-brand-contrast">{moveDestinationDetails.name}</span></span>}
-            </div>
-            <div className="min-h-55 flex-1 overflow-y-auto p-3">
-              {moveDestinationLoading ? (
-                <div className="flex min-h-40 items-center justify-center text-sm text-muted">Loading folders…</div>
-              ) : moveDestinationError ? (
-                <div className="rounded-lg border border-danger/30 bg-background p-4 text-sm text-danger" role="alert">
-                  <p>{moveDestinationError}</p>
-                  <button type="button" onClick={() => void loadMoveDestination(moveDestinationId)} className="mt-2 font-semibold underline">Try again</button>
-                </div>
-              ) : moveDestinationItems.length === 0 ? (
-                <div className="flex min-h-40 flex-col items-center justify-center text-center">
-                  <FolderOpen size={28} className="mb-2 text-muted" />
-                  <p className="text-sm font-medium text-foreground">No subfolders here</p>
-                  <p className="mt-1 text-xs text-muted">Move here will place the selected items in this location.</p>
-                </div>
-              ) : (
-                <ul className="space-y-1">
-                  {moveDestinationItems.map((folder) => (
-                    <li key={folder.id} className="flex items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 hover:border-border hover:bg-background">
-                      <Folder size={17} className="shrink-0 text-brand-contrast" />
-                      <button type="button" onClick={() => folder.folderId && void loadMoveDestination(folder.folderId)} className="min-w-0 flex-1 truncate py-1 text-left text-sm text-foreground" title={`Open ${folder.name}`}>{folder.name}</button>
-                      <button type="button" disabled={!folder.folderId || moveDestinationLoading} onClick={() => folder.folderId && void loadMoveDestination(folder.folderId)} className="rounded-md px-2 py-1 text-xs font-medium text-brand-contrast hover:bg-brand-soft disabled:opacity-50">Open</button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <footer className="flex items-center justify-between gap-3 border-t border-border bg-background px-5 py-4">
-              <p className="min-w-0 truncate text-xs text-muted">Destination: {moveDestinationDetails ? moveDestinationDetails.location || moveDestinationDetails.name : "My Drive (root)"}</p>
-              <div className="flex shrink-0 items-center gap-2">
-                <Button variant="ghost" onClick={() => setIsMoveDialogOpen(false)} disabled={isMovingItems}>Cancel</Button>
-                <Button onClick={() => void confirmMoveItems()} disabled={isMovingItems || moveDestinationLoading || Boolean(moveDestinationError)}>
-                  {isMovingItems ? "Moving…" : "Move here"}
-                </Button>
-              </div>
-            </footer>
-          </section>
-        </div>
-      )}
+      <DriveMoveDialog
+        open={isMoveDialogOpen}
+        moving={isMovingItems}
+        targetCount={moveTargets.length}
+        details={moveDestinationDetails}
+        items={moveDestinationItems}
+        loading={moveDestinationLoading}
+        error={moveDestinationError}
+        destinationId={moveDestinationId}
+        onClose={() => setIsMoveDialogOpen(false)}
+        onLoadDestination={(id) => { void loadMoveDestination(id); }}
+        onConfirm={() => { void confirmMoveItems(); }}
+      />
 
       {toast && (
         <div className="fixed bottom-4 right-4 z-80 w-[min(24rem,calc(100vw-2rem))]">
@@ -2375,43 +1847,17 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       <ShareManagementDialog target={manageShareTarget} onClose={() => setManageShareTarget(null)}
         onChanged={() => { if (listView) void loadItems(listView === "drive" ? currentFolderId : null, listView); }} />
 
-      {shareDialogOpen && (
-        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sharing) setShareDialogOpen(false); }}>
-          <form onSubmit={(event) => void submitShare(event)} aria-labelledby="share-items-title" className="w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
-            <header className="border-b border-border px-5 py-4">
-              <h2 id="share-items-title" className="text-lg font-semibold text-foreground">Share {shareTargets.length} item{shareTargets.length === 1 ? "" : "s"}</h2>
-              <p className="mt-1 text-sm text-muted">Grant access to an existing SecureDrive account by email.</p>
-            </header>
-            <div className="space-y-4 px-5 py-5">
-              <label className="block text-sm font-medium text-foreground">
-                Email address
-                <input
-                  type="email"
-                  required
-                  autoFocus
-                  value={shareEmail}
-                  onChange={(event) => setShareEmail(event.target.value)}
-                  placeholder="name@example.com"
-                  autoComplete="email"
-                  className="mt-1.5 h-10 w-full rounded-lg border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand-contrast focus:ring-2 focus:ring-brand-soft"
-                />
-              </label>
-              <label className="block text-sm font-medium text-foreground">
-                Access level
-                <select value={sharePermission} onChange={(event) => setSharePermission(event.target.value as "viewer" | "editor")} className="mt-1.5 h-10 w-full rounded-lg border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand-contrast focus:ring-2 focus:ring-brand-soft">
-                  <option value="viewer">Viewer — can view and download</option>
-                  <option value="editor">Editor — can modify shared items</option>
-                </select>
-              </label>
-              <p className="text-xs leading-5 text-muted">The recipient must already have an active SecureDrive account registered with this email. SecureDrive will attempt to send a notification if outgoing email is configured; access permissions are applied independently.</p>
-            </div>
-            <footer className="flex justify-end gap-2 border-t border-border bg-background px-5 py-4">
-              <Button variant="ghost" onClick={() => setShareDialogOpen(false)} disabled={sharing}>Cancel</Button>
-              <Button type="submit" disabled={sharing || !shareEmail.trim()}>{sharing ? "Sharing…" : "Share"}</Button>
-            </footer>
-          </form>
-        </div>
-      )}
+      <DriveShareDialog
+        open={shareDialogOpen}
+        targetCount={shareTargets.length}
+        sharing={sharing}
+        email={shareEmail}
+        permission={sharePermission}
+        onClose={() => setShareDialogOpen(false)}
+        onEmailChange={setShareEmail}
+        onPermissionChange={setSharePermission}
+        onSubmit={(event) => { void submitShare(event); }}
+      />
 
       <ConfirmDialog
         open={pendingDestructive !== null}
@@ -2435,125 +1881,3 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   );
 }
 
-function SortableHeading({
-  label,
-  field,
-  current,
-  direction,
-  onSort,
-}: {
-  label: string;
-  field: SortKey;
-  current: SortKey;
-  direction: SortDirection;
-  onSort: (field: SortKey) => void;
-}) {
-  const active = current === field;
-  return (
-    <th scope="col" aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"} className="sticky top-0 z-20 border-b border-border bg-background px-4 py-2">
-      <button
-        type="button"
-        onClick={() => onSort(field)}
-        className="inline-flex min-h-9 items-center gap-2 rounded-lg text-left transition-colors duration-(--motion-fast) hover:text-brand-contrast"
-      >
-        {label}
-        {active && (direction === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />)}
-      </button>
-    </th>
-  );
-}
-
-function FileRow({
-  item,
-  selected,
-  onToggle,
-  onOpen,
-  onToggleStar,
-  showStar,
-  actions,
-  onDragStart,
-  onDragEnd,
-  onDragOverItem,
-  onDropOnItem,
-  dropTarget,
-}: {
-  item: DriveItem;
-  selected: boolean;
-  onToggle: (event: React.MouseEvent<HTMLTableRowElement>) => void;
-  onOpen: () => void;
-  onToggleStar: () => void;
-  showStar: boolean;
-  actions: ContextMenuAction[];
-  onDragStart: (event: React.DragEvent<HTMLButtonElement>) => void;
-  onDragEnd: () => void;
-  onDragOverItem: (event: React.DragEvent<HTMLTableRowElement>) => void;
-  onDropOnItem: (event: React.DragEvent<HTMLTableRowElement>) => void;
-  dropTarget: boolean;
-}) {
-  return (
-    <tr
-      data-drive-item-id={item.id}
-      aria-selected={selected}
-      onClick={onToggle}
-      onDoubleClick={() => onOpen()}
-      onDragOver={onDragOverItem}
-      onDrop={onDropOnItem}
-      className={`cursor-pointer transition-colors duration-(--motion-fast) ${selected ? "bg-brand-soft/60" : "hover:bg-brand-soft/25"} ${dropTarget ? "bg-brand-soft ring-2 ring-inset ring-brand-contrast" : ""}`}
-    >
-      <th scope="row" className="max-w-[24rem] border-b border-border px-3 py-2 text-left font-normal">
-        <div className="flex min-w-0 items-center gap-2">
-          <button
-            type="button"
-            draggable
-            onClick={(event) => event.stopPropagation()}
-            onDragStart={onDragStart}
-            onDragEnd={onDragEnd}
-            aria-label={`Drag ${item.name}`}
-            data-no-marquee-selection="true"
-            onPointerDown={(event) => event.stopPropagation()}
-            title="Drag to move"
-            className="flex h-9 w-7 shrink-0 cursor-grab items-center justify-center rounded-lg text-muted transition-colors hover:bg-brand-soft hover:text-brand-contrast active:cursor-grabbing focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-brand-contrast"
-          >
-            <GripVertical size={16} />
-          </button>
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-brand-soft text-brand-contrast">
-            {renderItemIcon(item.type, 19)}
-          </span>
-          <span className="min-w-0 truncate rounded text-left text-sm text-foreground" title={item.name}>
-            {item.name}
-          </span>
-          {showStar && (
-            <button
-              type="button"
-              aria-label={item.starred ? `Remove ${item.name} from Starred` : `Add ${item.name} to Starred`}
-              title={item.starred ? "Remove from Starred" : "Add to Starred"}
-              data-no-marquee-selection="true"
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={(event) => { event.stopPropagation(); onToggleStar(); }}
-              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
-            >
-              <Star size={15} fill={item.starred ? "currentColor" : "none"} />
-            </button>
-          )}
-        </div>
-      </th>
-      <td className="border-b border-border px-4 py-2">
-        <span className="inline-flex min-h-10 items-center gap-2 text-sm text-foreground">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand-soft text-[10px] font-semibold text-brand-contrast">
-            {item.ownerInitials}
-          </span>
-          <span className="truncate text-sm">{item.owner}</span>
-        </span>
-      </td>
-      <td className="whitespace-nowrap border-b border-border px-4 py-2 text-sm text-foreground">{item.modified}</td>
-      <td className="whitespace-nowrap border-b border-border px-4 py-2 text-sm text-foreground">{item.size}</td>
-      <td className="border-b border-border px-3 py-2 text-right" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
-        <ContextMenu
-          label={`Actions for ${item.name}`}
-          trigger={<MoreHorizontal size={18} />}
-          actions={actions}
-        />
-      </td>
-    </tr>
-  );
-}
