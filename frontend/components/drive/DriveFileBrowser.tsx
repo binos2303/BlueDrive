@@ -32,7 +32,6 @@ import {
   getDriveFolderDetails,
   getDriveItems,
   type DriveFolderDetails,
-  type DriveListView,
   type DownloadProgress,
 } from "@/lib/drive-service";
 import {
@@ -40,8 +39,9 @@ import {
   requestAccountApi,
 } from "@/lib/account-service";
 import { isDownloadSelectionSupported } from "@/lib/drive-download-policy";
-import type { DriveItem, DriveItemType, SortDirection, SortKey } from "./browser/types";
-import { listViewForTitle, parseSize } from "./browser/drive-display-utils";
+import type { DriveItem, DriveItemType } from "./browser/types";
+import { listViewForTitle } from "./browser/drive-display-utils";
+import useDriveItems from "./browser/useDriveItems";
 import {
   MAX_UPLOAD_FILES_PER_BATCH, getDroppedEntry, readDroppedEntry,
   validateUploadPath, type DroppedEntry,
@@ -101,15 +101,15 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     const parsed = Number(match[1]);
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   }, [pathname, title]);
-  const [driveItems, setDriveItems] = useState(items);
-  const [searchQuery, setSearchQuery] = useState("");
-  const searchQueryRef = useRef("");
-  const [loading, setLoading] = useState(listView !== null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [folderDetails, setFolderDetails] = useState<DriveFolderDetails | null>(null);
+  const {
+    driveItems, setDriveItems,
+    searchQuery, setSearchQuery, searchQueryRef,
+    loading, loadError, folderDetails, setFolderDetails,
+    sortKey, setSortKey, sortDirection, setSortDirection,
+    sortedItems, folderItems, fileItems,
+    loadItems,
+  } = useDriveItems(items, listView);
   const [view, setView] = useState<ViewMode>("list");
-  const [sortKey, setSortKey] = useState<SortKey>("name");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState("Untitled folder");
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
@@ -143,7 +143,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     scrollHeight: 0,
     trackTop: 0,
   });
-  const loadRequestIdRef = useRef(0);
   const moveDestinationRequestIdRef = useRef(0);
   const pasteHandlerRef = useRef<(files: readonly { file: File; relativePath: string }[]) => void>(() => {});
   const [isMoveDialogOpen, setIsMoveDialogOpen] = useState(false);
@@ -159,28 +158,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [breadcrumbDropTargetIndex, setBreadcrumbDropTargetIndex] = useState<number | null>(null);
   const { enqueue, openManager } = useUploadManager();
 
-  const sortedItems = useMemo(
-    () =>
-      [...driveItems].sort((first, second) => {
-        // Keep folders grouped before files, regardless of sort column/direction.
-        const firstIsFolder = first.type === "folder";
-        const secondIsFolder = second.type === "folder";
-        if (firstIsFolder !== secondIsFolder) return firstIsFolder ? -1 : 1;
-
-        let comparison: number;
-        if (sortKey === "modified") {
-          comparison = first.modified.localeCompare(second.modified, undefined, { numeric: true });
-        } else if (sortKey === "size") {
-          comparison = parseSize(first.size) - parseSize(second.size);
-        } else if (sortKey === "type") {
-          comparison = first.type.localeCompare(second.type);
-        } else {
-          comparison = first.name.localeCompare(second.name, undefined, { numeric: true });
-        }
-        return sortDirection === "asc" ? comparison : -comparison;
-      }),
-    [driveItems, sortDirection, sortKey],
-  );
   const {
     selectedIds,
     selectedItems,
@@ -192,43 +169,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     toggleItem,
     handleMarqueePointerDown,
   } = useDriveSelection({ items: driveItems, sortedItems, containerRef: driveListRef });
-
-  const loadItems = useCallback(async (
-    folderId: number | null,
-    view: DriveListView,
-    queryOverride?: string,
-  ) => {
-    const requestId = ++loadRequestIdRef.current;
-    const query = view === "drive"
-      ? (queryOverride ?? searchQueryRef.current).trim().slice(0, 255)
-      : "";
-    const effectiveFolderId = query ? null : folderId;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      if (view === "drive" && effectiveFolderId !== null) {
-        setFolderDetails(null);
-        const [details, nextItems] = await Promise.all([
-          getDriveFolderDetails(effectiveFolderId),
-          getDriveItems(effectiveFolderId, view, query),
-        ]);
-        if (requestId !== loadRequestIdRef.current) return;
-        setFolderDetails(details);
-        setDriveItems(nextItems);
-      } else {
-        const nextItems = await getDriveItems(effectiveFolderId, view, query);
-        if (requestId !== loadRequestIdRef.current) return;
-        setFolderDetails(null);
-        setDriveItems(nextItems);
-      }
-    } catch (error) {
-      if (requestId !== loadRequestIdRef.current) return;
-      setFolderDetails(null);
-      setLoadError(error instanceof Error ? error.message : "Could not load Drive items.");
-    } finally {
-      if (requestId === loadRequestIdRef.current) setLoading(false);
-    }
-  }, []);
 
   const updateScrollMetrics = useCallback(() => {
     const container = driveListRef.current;
@@ -456,14 +396,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
   const selectedCanManage = selectedItems.length > 0 && selectedItems.every((item) => item.canManage !== false);
   const selectedCanShare = selectedItems.length > 0 && canOpenShareManagement(selectedItems);
-  const folderItems = useMemo(
-    () => sortedItems.filter((item) => item.type === "folder"),
-    [sortedItems],
-  );
-  const fileItems = useMemo(
-    () => sortedItems.filter((item) => item.type !== "folder"),
-    [sortedItems],
-  );
 
   const addUploadFiles = useCallback(async (files: readonly { file: File; relativePath: string }[]) => {
     if (files.length === 0) {
