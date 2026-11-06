@@ -52,6 +52,7 @@ import DriveActionToolbar from "./browser/DriveActionToolbar";
 import DriveCreateFolderDialog from "./browser/DriveCreateFolderDialog";
 import DriveMoveDialog from "./browser/DriveMoveDialog";
 import DriveShareDialog from "./browser/DriveShareDialog";
+import useDriveSelection from "./browser/useDriveSelection";
 import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 
 type ViewMode = "list" | "grid";
@@ -60,13 +61,6 @@ type PendingDestructiveAction = {
   action: "trash" | "delete";
   count: number;
   targets: DriveItem[];
-};
-
-type SelectionBox = {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
 };
 
 type ScrollMetrics = {
@@ -116,7 +110,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [view, setView] = useState<ViewMode>("list");
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
   const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState("Untitled folder");
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
@@ -139,8 +132,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   // must never wash out the whole interface.
   const [fileDropActive, setFileDropActive] = useState(false);
   const [dragMessage, setDragMessage] = useState("Drop files to upload");
-  const [marqueeActive, setMarqueeActive] = useState(false);
-  const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const driveListRef = useRef<HTMLDivElement>(null);
@@ -152,16 +143,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     scrollHeight: 0,
     trackTop: 0,
   });
-  const [selectionAnchorId, setSelectionAnchorId] = useState<number | null>(null);
-  const selectionStartRef = useRef<{
-    x: number;
-    y: number;
-    pointerId: number;
-    additive: boolean;
-    baseIds: Set<number>;
-    dragged: boolean;
-  } | null>(null);
-  const marqueeSelectedIdsRef = useRef<Set<number>>(new Set());
   const loadRequestIdRef = useRef(0);
   const moveDestinationRequestIdRef = useRef(0);
   const pasteHandlerRef = useRef<(files: readonly { file: File; relativePath: string }[]) => void>(() => {});
@@ -177,6 +158,40 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [dropTargetFolderId, setDropTargetFolderId] = useState<number | null>(null);
   const [breadcrumbDropTargetIndex, setBreadcrumbDropTargetIndex] = useState<number | null>(null);
   const { enqueue, openManager } = useUploadManager();
+
+  const sortedItems = useMemo(
+    () =>
+      [...driveItems].sort((first, second) => {
+        // Keep folders grouped before files, regardless of sort column/direction.
+        const firstIsFolder = first.type === "folder";
+        const secondIsFolder = second.type === "folder";
+        if (firstIsFolder !== secondIsFolder) return firstIsFolder ? -1 : 1;
+
+        let comparison: number;
+        if (sortKey === "modified") {
+          comparison = first.modified.localeCompare(second.modified, undefined, { numeric: true });
+        } else if (sortKey === "size") {
+          comparison = parseSize(first.size) - parseSize(second.size);
+        } else if (sortKey === "type") {
+          comparison = first.type.localeCompare(second.type);
+        } else {
+          comparison = first.name.localeCompare(second.name, undefined, { numeric: true });
+        }
+        return sortDirection === "asc" ? comparison : -comparison;
+      }),
+    [driveItems, sortDirection, sortKey],
+  );
+  const {
+    selectedIds,
+    selectedItems,
+    marqueeActive,
+    selectionBox,
+    clearSelection,
+    clearSelectedIds,
+    handleItemClick,
+    toggleItem,
+    handleMarqueePointerDown,
+  } = useDriveSelection({ items: driveItems, sortedItems, containerRef: driveListRef });
 
   const loadItems = useCallback(async (
     folderId: number | null,
@@ -367,8 +382,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       const query = (customEvent.detail?.query ?? "").trim().slice(0, 255);
       searchQueryRef.current = query;
       setSearchQuery(query);
-      setSelectedIds(new Set());
-      setSelectionAnchorId(null);
+      clearSelection();
       setFolderDetails(null);
       if (query) {
         void loadItems(null, "drive", query);
@@ -381,8 +395,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       if (query === searchQueryRef.current) return;
       searchQueryRef.current = query;
       setSearchQuery(query);
-      setSelectedIds(new Set());
-      setSelectionAnchorId(null);
+      clearSelection();
       if (listView === "drive") void loadItems(query ? null : currentFolderId, "drive", query);
     };
     window.addEventListener(DRIVE_SEARCH_CHANGED_EVENT, handleSearchChanged);
@@ -391,7 +404,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       window.removeEventListener(DRIVE_SEARCH_CHANGED_EVENT, handleSearchChanged);
       window.removeEventListener("popstate", handleHistoryNavigation);
     };
-  }, [currentFolderId, listView, loadItems]);
+  }, [currentFolderId, listView, loadItems, clearSelection]);
 
   useEffect(() => {
     function handleWorkspaceChanged() {
@@ -401,8 +414,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       setShareDialogOpen(false);
       searchQueryRef.current = "";
       setSearchQuery("");
-      setSelectedIds(new Set());
-      setSelectionAnchorId(null);
+      clearSelection();
       setFolderDetails(null);
       if (currentFolderId !== null) {
         // A folder ID is not portable between workspaces. Return to the selected
@@ -415,7 +427,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
     window.addEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
     return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
-  }, [currentFolderId, listView, loadItems, router]);
+  }, [currentFolderId, listView, loadItems, router, clearSelection]);
 
   useEffect(() => {
     function handleUploadCompleted(event: Event) {
@@ -442,34 +454,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     return () => window.removeEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, handleUploadCompleted);
   }, [currentFolderId, listView, loadItems]);
 
-  const selectedItems = useMemo(
-    () => driveItems.filter((item) => selectedIds.has(item.id)),
-    [driveItems, selectedIds],
-  );
   const selectedCanManage = selectedItems.length > 0 && selectedItems.every((item) => item.canManage !== false);
   const selectedCanShare = selectedItems.length > 0 && canOpenShareManagement(selectedItems);
-  const sortedItems = useMemo(
-    () =>
-      [...driveItems].sort((first, second) => {
-        // Keep folders grouped before files, regardless of sort column/direction.
-        const firstIsFolder = first.type === "folder";
-        const secondIsFolder = second.type === "folder";
-        if (firstIsFolder !== secondIsFolder) return firstIsFolder ? -1 : 1;
-
-        let comparison: number;
-        if (sortKey === "modified") {
-          comparison = first.modified.localeCompare(second.modified, undefined, { numeric: true });
-        } else if (sortKey === "size") {
-          comparison = parseSize(first.size) - parseSize(second.size);
-        } else if (sortKey === "type") {
-          comparison = first.type.localeCompare(second.type);
-        } else {
-          comparison = first.name.localeCompare(second.name, undefined, { numeric: true });
-        }
-        return sortDirection === "asc" ? comparison : -comparison;
-      }),
-    [driveItems, sortDirection, sortKey],
-  );
   const folderItems = useMemo(
     () => sortedItems.filter((item) => item.type === "folder"),
     [sortedItems],
@@ -685,189 +671,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     };
   }, [title]);
 
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      if (
-        event.target instanceof Element
-        && event.target.closest('[role="menu"], dialog[open]')
-      ) return;
-      setSelectedIds(new Set());
-      setSelectionAnchorId(null);
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
-
-  function handleItemClick(event: React.MouseEvent<HTMLElement>, id: number) {
-    // Suppress the synthetic click after a marquee gesture using the clicked item DOM node.
-    // This keeps render-time callback analysis free of ref reads.
-    const clickedNode = event.currentTarget;
-    if (clickedNode.dataset.suppressSelectionClick === "true") {
-      delete clickedNode.dataset.suppressSelectionClick;
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    // Windows Explorer-style selection:
-    // click = single select, Ctrl/Cmd+click = toggle one item, Shift+click = range.
-    if (event.shiftKey) {
-      event.preventDefault();
-      const anchorId = selectionAnchorId ?? id;
-      if (selectionAnchorId === null) setSelectionAnchorId(anchorId);
-      let anchorIndex = sortedItems.findIndex((item) => item.id === anchorId);
-      const targetIndex = sortedItems.findIndex((item) => item.id === id);
-      if (anchorIndex < 0) anchorIndex = targetIndex;
-      if (targetIndex < 0) return;
-
-      const start = Math.min(anchorIndex, targetIndex);
-      const end = Math.max(anchorIndex, targetIndex);
-      const rangeIds = sortedItems.slice(start, end + 1).map((item) => item.id);
-      setSelectedIds((current) => {
-        const next = event.ctrlKey || event.metaKey ? new Set(current) : new Set<number>();
-        rangeIds.forEach((rangeId) => next.add(rangeId));
-        return next;
-      });
-      return;
-    }
-
-    if (event.ctrlKey || event.metaKey) {
-      setSelectedIds((current) => {
-        const next = new Set(current);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        return next;
-      });
-      setSelectionAnchorId(id);
-      return;
-    }
-
-    setSelectedIds(new Set([id]));
-    setSelectionAnchorId(id);
-  }
-
-  function toggleItem(id: number) {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-    setSelectionAnchorId(id);
-  }
-
-  function handleMarqueePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || event.shiftKey) return;
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    // Starting on a row/card body is allowed: a simple click still selects that item,
-    // while moving beyond the drag threshold turns the gesture into a marquee.
-    // Keep menus, action buttons, sort controls, and explicit drag handles independent.
-    if (target.closest(
-      'thead, button, a, input, select, textarea, [role="menu"], [role="toolbar"], dialog[open], [contenteditable="true"], [data-no-marquee-selection="true"]',
-    )) return;
-
-    const additive = event.ctrlKey || event.metaKey;
-    const baseIds = new Set(selectedIds);
-    selectionStartRef.current = {
-      x: event.clientX,
-      y: event.clientY,
-      pointerId: event.pointerId,
-      additive,
-      baseIds,
-      dragged: false,
-    };
-    marqueeSelectedIdsRef.current = new Set(additive ? baseIds : []);
-    setSelectionBox(null);
-    setMarqueeActive(true);
-  }
-
-  useEffect(() => {
-    function handlePointerMove(event: PointerEvent) {
-      const start = selectionStartRef.current;
-      const container = driveListRef.current;
-      if (!start || !container || event.pointerId !== start.pointerId) return;
-
-      const dx = event.clientX - start.x;
-      const dy = event.clientY - start.y;
-      if (!start.dragged && Math.hypot(dx, dy) < 4) return;
-      start.dragged = true;
-
-      const left = Math.min(start.x, event.clientX);
-      const top = Math.min(start.y, event.clientY);
-      const right = Math.max(start.x, event.clientX);
-      const bottom = Math.max(start.y, event.clientY);
-      setSelectionBox({ left, top, width: right - left, height: bottom - top });
-
-      const next = new Set(start.additive ? start.baseIds : []);
-      const itemNodes = container.querySelectorAll<HTMLElement>("[data-drive-item-id]");
-      itemNodes.forEach((node) => {
-        const rect = node.getBoundingClientRect();
-        const intersects = rect.left <= right
-          && rect.right >= left
-          && rect.top <= bottom
-          && rect.bottom >= top;
-        if (intersects) {
-          const id = Number(node.dataset.driveItemId);
-          if (Number.isSafeInteger(id)) next.add(id);
-        }
-      });
-      marqueeSelectedIdsRef.current = next;
-      setSelectedIds(next);
-    }
-
-    function finishPointer(event: PointerEvent) {
-      const start = selectionStartRef.current;
-      if (!start || (event.pointerId !== undefined && event.pointerId !== start.pointerId)) return;
-      if (start.dragged) {
-        // Mark the item under the pointer so its synthetic post-drag click is ignored.
-        // The marker is stored on the DOM item rather than a ref read by the render callback.
-        const pointerTarget = event.target instanceof Element
-          ? event.target.closest<HTMLElement>("[data-drive-item-id]")
-          : null;
-        if (pointerTarget) {
-          pointerTarget.dataset.suppressSelectionClick = "true";
-          window.setTimeout(() => {
-            if (pointerTarget.dataset.suppressSelectionClick === "true") {
-              delete pointerTarget.dataset.suppressSelectionClick;
-            }
-          }, 0);
-        }
-        const container = driveListRef.current;
-        const selectedInListOrder = container
-          ? Array.from(container.querySelectorAll<HTMLElement>("[data-drive-item-id]"))
-            .map((node) => Number(node.dataset.driveItemId))
-            .filter((id) => Number.isSafeInteger(id) && marqueeSelectedIdsRef.current.has(id))
-          : [];
-        if (selectedInListOrder.length) {
-          setSelectionAnchorId(selectedInListOrder[selectedInListOrder.length - 1]);
-        }
-      } else if (!start.additive) {
-        // Clicking blank space clears selection; a row/card click handler will then
-        // select the clicked item if the pointer was released on one.
-        const target = event.target;
-        const clickedItem = target instanceof Element && target.closest('[data-drive-item-id]');
-        if (!clickedItem) {
-          setSelectedIds(new Set());
-          setSelectionAnchorId(null);
-        }
-      }
-      selectionStartRef.current = null;
-      setSelectionBox(null);
-      setMarqueeActive(false);
-    }
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", finishPointer);
-    window.addEventListener("pointercancel", finishPointer);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", finishPointer);
-      window.removeEventListener("pointercancel", finishPointer);
-    };
-  }, []);
-
   // Keep the latest queue handler available to the global paste listener without
   // reinstalling the listener on every render.
   useEffect(() => {
@@ -918,7 +721,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       setToast("This folder has an invalid ID and cannot be opened.");
       return;
     }
-    setSelectedIds(new Set());
+    clearSelectedIds();
     router.push(`/drive/folders/${item.folderId}`);
   }
 
@@ -993,7 +796,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       });
       setIsMoveDialogOpen(false);
       setMoveTargets([]);
-      setSelectedIds(new Set());
+      clearSelectedIds();
       notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       // Successful moves refresh the list silently; keep error notifications below.
@@ -1014,7 +817,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       await postItemAction("/drive/api/items/move/", targets, {
         destination_folder_id: destinationFolderId,
       });
-      setSelectedIds(new Set());
+      clearSelectedIds();
       notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       // Successful drag-and-drop moves refresh the list silently.
@@ -1089,7 +892,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     setIsDuplicatingItems(true);
     try {
       const result = await postItemAction("/drive/api/items/duplicate/", targets);
-      setSelectedIds(new Set());
+      clearSelectedIds();
       notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       setToast(result.detail || "Duplicate created successfully.");
@@ -1104,7 +907,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     if (!targets.length) return;
     try {
       const result = await postItemAction("/drive/api/items/restore/", targets);
-      setSelectedIds(new Set());
+      clearSelectedIds();
       notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       setToast(result.detail || "Items restored successfully.");
@@ -1119,8 +922,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       : "/drive/api/items/delete/";
     try {
       const result = await postItemAction(path, pending.targets);
-      setSelectedIds(new Set());
-      setSelectionAnchorId(null);
+      clearSelection();
       notifyFolderTreeChanged();
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
       setToast(result.detail || (pending.action === "trash" ? "Moved to Trash." : "Permanently deleted."));
@@ -1138,7 +940,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         const target = targets.some((selected) => selected.id === item.id && selected.type === item.type);
         return target ? { ...item, starred: shouldStar } : item;
       }));
-      setSelectedIds(new Set());
+      clearSelectedIds();
       if (listView && listView !== "drive") {
         await loadItems(null, listView);
       }
@@ -1630,7 +1432,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         sortDirection={sortDirection}
         itemCount={driveItems.length}
         hasListView={Boolean(listView)}
-        onClearSelection={() => { setSelectedIds(new Set()); setSelectionAnchorId(null); }}
+        onClearSelection={() => { clearSelection(); }}
         onRestoreSelected={() => { void restoreItems(selectedItems); }}
         onRunAction={runAction}
         onToggleStarSelected={() => { void toggleStar(selectedItems); }}
@@ -1827,7 +1629,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         onClose={() => setRenameTarget(null)}
         onRenamed={(result: RenameResult) => {
           setRenameTarget(null);
-          setSelectedIds(new Set());
+          clearSelectedIds();
           if (result.changed) {
             setToast(result.detail);
             notifyFolderTreeChanged();
