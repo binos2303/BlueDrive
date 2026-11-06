@@ -21,7 +21,7 @@ export type AccountSnapshot = {
   }>;
 };
 
-export type ProfileUpdate = Pick<AccountSnapshot["profile"], "email">;
+export type ProfileUpdate = { email: string; current_password: string };
 
 export interface AccountService {
   getCurrentAccount(): Promise<AccountSnapshot>;

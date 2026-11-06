@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import admin_api, admin_files_api, admin_logs_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api
+from . import admin_api, admin_files_api, admin_logs_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api
 
 
 urlpatterns = [
@@ -40,6 +40,10 @@ urlpatterns = [
     path("api/register/", api_views.register_api_view, name="api-register"),
     path("api/login/", api_views.login_api_view, name="api-login"),
     path("api/me/", api_views.current_account_view, name="api-current-account"),
+    path("api/me/security/password/", account_security_api.change_password_view, name="api-me-change-password"),
+    path("api/me/security/sessions/", account_security_api.my_sessions_view, name="api-me-sessions"),
+    path("api/me/security/sessions/revoke-others/", account_security_api.revoke_other_sessions_view, name="api-me-revoke-other-sessions"),
+    path("api/me/security/sessions/<uuid:session_id>/", account_security_api.revoke_my_session_view, name="api-me-revoke-session"),
     path("api/me/quota/", settings_api.my_quota_view, name="api-my-quota"),
     path("api/me/activity/", settings_api.my_activity_view, name="api-my-activity"),
     path("api/me/search-history/", settings_api.my_search_history_view, name="api-my-search-history"),

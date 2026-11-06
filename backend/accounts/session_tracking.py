@@ -7,6 +7,7 @@ the last authenticated HTTP request observed by this middleware.
 import logging
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.sessions.models import Session
 from django.db import DatabaseError
 from django.utils import timezone
@@ -19,6 +20,8 @@ TRACKING_INTERVAL = timedelta(seconds=60)
 
 
 def record_authenticated_session(request):
+    if getattr(settings, "SESSION_ENGINE", "django.contrib.sessions.backends.db") != "django.contrib.sessions.backends.db":
+        return
     user = getattr(request, "user", None)
     session_key = getattr(getattr(request, "session", None), "session_key", None)
     if not user or not user.is_authenticated or not user.is_active or not session_key:
@@ -44,18 +47,25 @@ def record_authenticated_session(request):
         logger.warning("Account session tracking unavailable", exc_info=True)
 
 
-def revoke_all_database_sessions(user):
-    """Revoke tracked AND legacy Django database sessions for a user.
+def revoke_other_database_sessions(user, *, exclude_session_key=None):
+    """Revoke tracked and legacy DB sessions, optionally retaining one key.
 
-    Scan is needed because Django's default Session model lacks a user index.
-    For large deployments replace this with an indexed session registry and a
-    complete migration/backfill plan. Do not silently skip older sessions.
+    Session has no user index in Django. For large installations, migrate to a
+    complete indexed registry, including pre-tracking sessions.
     """
     keys = []
     for session in Session.objects.iterator(chunk_size=500):
+        if session.pk == exclude_session_key:
+            continue
         decoded = session.get_decoded()
         if str(decoded.get("_auth_user_id", "")) == str(user.pk):
             keys.append(session.pk)
-    # Avoid mutating a QuerySet while its server-side cursor is still open.
+    # Collect before deleting to avoid mutating a live server-side cursor.
     for start in range(0, len(keys), 500):
         Session.objects.filter(pk__in=keys[start:start + 500]).delete()
+    return len(keys)
+
+
+def revoke_all_database_sessions(user):
+    """Revoke tracked and legacy Django DB sessions for administrative actions."""
+    return revoke_other_database_sessions(user)

@@ -87,7 +87,7 @@ export default function AccountProvider({
       }
       return account;
     } catch (error) {
-      if (sequence === requestSequence.current && error instanceof AccountServiceError && (error.status === 401 || error.status === 403)) {
+      if (sequence === requestSequence.current && error instanceof AccountServiceError && (error.status === 401)) {
         setState({ status: "error", account: null, error: "Your session is no longer valid. Sign in again." });
       }
       throw error;

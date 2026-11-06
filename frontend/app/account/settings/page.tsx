@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { AlertTriangle, History, Search, Trash2, HardDrive, Languages, Plug, Palette } from "lucide-react";
 import DashboardShell from "@/components/layout/DashboardShell";
+import AccountSecurityPanel from "@/components/account/AccountSecurityPanel";
 import CustomScrollArea from "@/components/ui/CustomScrollArea";
 import { readThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
 import Button from "@/components/ui/Button";
@@ -17,7 +18,7 @@ import {
 } from "@/lib/user-settings-service";
 import { requestAccountApi } from "@/lib/account-service";
 
-type SettingsTab = "general" | "privacy" | "connections";
+type SettingsTab = "general" | "security" | "privacy" | "connections";
 type QuotaSummary = { configured: boolean; limitBytes: number | null; usedBytes: number | null; percentUsed: number | null; message?: string };
 function formatBytes(value: number | null | undefined): string {
   if (value == null) return "—";
@@ -196,7 +197,7 @@ export default function SettingsPage() {
     <DashboardShell settingsNavigation={{ active: activeTab, onChange: (section) => setActiveTab(section as SettingsTab) }}>
       <section className="mx-auto w-full max-w-5xl p-5 sm:p-8">
         <h1 className="mb-6 text-2xl font-semibold text-foreground">{
-          activeTab === "general" ? "General Settings" : activeTab === "privacy" ? "Privacy" : "Connected Apps"
+          activeTab === "general" ? "General Settings" : activeTab === "security" ? "Account Security" : activeTab === "privacy" ? "Privacy" : "Connected Apps"
         }</h1>
         <div className="min-w-0">
           {activeTab === "general" ? (
@@ -231,6 +232,8 @@ export default function SettingsPage() {
                 </label>
               </section>
             </div>
+          ) : activeTab === "security" ? (
+            <AccountSecurityPanel />
           ) : activeTab === "privacy" ? (
             <div className="space-y-5">
 

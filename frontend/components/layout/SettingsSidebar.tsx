@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import type { RefObject } from "react";
-import { ArrowLeft, Plug, Settings2, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Plug, Settings2, Shield, ShieldCheck } from "lucide-react";
 
 const items = [
   { id: "general", label: "General Settings", icon: Settings2 },
+  { id: "security", label: "Security", icon: Shield },
   { id: "privacy", label: "Privacy", icon: ShieldCheck },
   { id: "connections", label: "Connected Apps", icon: Plug },
 ];

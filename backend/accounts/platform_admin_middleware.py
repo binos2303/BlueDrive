@@ -23,6 +23,7 @@ class DedicatedPlatformAdminMiddleware:
             # session, or log out. CSRF remains available for sign-in flows.
             allowed = (
                 path.startswith('/accounts/api/admin/')
+                or path.startswith('/accounts/api/me/security/')
                 or path in ('/accounts/api/me/', '/accounts/api/logout/',
                             '/accounts/api/csrf/', '/accounts/api/login/')
                 or path.startswith('/admin/')

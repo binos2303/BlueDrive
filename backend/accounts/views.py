@@ -12,6 +12,8 @@ from urllib.parse import urlencode, urlsplit
 
 from logs.models import ActivityLog
 from logs.services import log_action
+from .account_email import EmailUpdateDenied, update_user_email
+from .session_tracking import revoke_other_database_sessions
 
 
 def _next_auth_redirect(request, path):
@@ -106,10 +108,16 @@ def profile_view(request):
         if action == "update_email":
             email_form = ProfileEmailForm(request.POST)
             if email_form.is_valid():
-                request.user.email = email_form.cleaned_data["email"]
-                request.user.save(update_fields=["email"])
-                messages.success(request, "Đã cập nhật email thành công.")
-                return redirect("profile")
+                try:
+                    update_user_email(
+                        request.user, email_form.cleaned_data["email"],
+                        request.POST.get("current_password", ""),
+                    )
+                except EmailUpdateDenied as error:
+                    email_form.add_error(None, error.detail)
+                else:
+                    messages.success(request, "Đã cập nhật email thành công.")
+                    return redirect("profile")
 
         elif action == "change_password":
             password_form = PasswordChangeForm(request.user, request.POST)
@@ -117,6 +125,8 @@ def profile_view(request):
             if password_form.is_valid():
                 user = password_form.save()
                 update_session_auth_hash(request, user)
+                if getattr(settings, "SESSION_ENGINE", "django.contrib.sessions.backends.db") == "django.contrib.sessions.backends.db":
+                    revoke_other_database_sessions(user, exclude_session_key=request.session.session_key)
                 messages.success(request, "Đã đổi mật khẩu thành công.")
                 return redirect("profile")
 

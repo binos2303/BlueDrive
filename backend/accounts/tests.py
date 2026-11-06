@@ -232,7 +232,7 @@ class AccountApiTests(TestCase):
 
         invalid = self.client.patch(
             reverse("api-current-account"),
-            {"email": "not-an-email"},
+            {"email": "not-an-email", "current_password": "not-a-real-production-password"},
             format="json",
         )
         self.assertEqual(invalid.status_code, 400)
@@ -241,7 +241,7 @@ class AccountApiTests(TestCase):
 
         unexpected_field = self.client.patch(
             reverse("api-current-account"),
-            {"email": "new@example.test", "username": "attacker-change"},
+            {"email": "new@example.test", "current_password": "not-a-real-production-password", "username": "attacker-change"},
             format="json",
         )
         self.assertEqual(unexpected_field.status_code, 400)
@@ -251,7 +251,7 @@ class AccountApiTests(TestCase):
 
         valid = self.client.patch(
             reverse("api-current-account"),
-            {"email": "new@example.test"},
+            {"email": "new@example.test", "current_password": "not-a-real-production-password"},
             format="json",
         )
         self.assertEqual(valid.status_code, 200)

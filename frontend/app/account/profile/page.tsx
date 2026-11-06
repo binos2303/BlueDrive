@@ -39,9 +39,10 @@ function ProfileForm({
   updateProfile,
 }: {
   account: AccountSnapshot;
-  updateProfile: (input: { email: string }) => Promise<AccountSnapshot>;
+  updateProfile: (input: { email: string; current_password: string }) => Promise<AccountSnapshot>;
 }) {
   const [email, setEmail] = useState(account.profile.email);
+  const [currentPassword, setCurrentPassword] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
@@ -56,15 +57,22 @@ function ProfileForm({
       return;
     }
 
+    if (!currentPassword) {
+      setFieldError("Enter your current password to change your email.");
+      setSaveState("error");
+      return;
+    }
     setSaveState("saving");
     try {
-      const updated = await updateProfile({ email: email.trim() });
+      const updated = await updateProfile({ email: email.trim(), current_password: currentPassword });
       setEmail(updated.profile.email);
+      setCurrentPassword("");
       setSaveState("saved");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Profile could not be saved.";
       setSaveError(message);
-      setFieldError(error instanceof AccountServiceError ? error.fieldErrors.email?.[0] ?? null : null);
+      setFieldError(error instanceof AccountServiceError
+        ? error.fieldErrors.email?.[0] ?? error.fieldErrors.current_password?.[0] ?? null : null);
       setSaveState("error");
     }
   }
@@ -112,10 +120,25 @@ function ProfileForm({
               />
               {fieldError && <span id="profile-email-error" className="mt-1 block text-sm text-danger">{fieldError}</span>}
             </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-foreground">Current password</span>
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(event) => {
+                  setCurrentPassword(event.target.value);
+                  setSaveState("idle");
+                  setFieldError(null);
+                }}
+                className="h-11 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground focus:border-brand-contrast"
+              />
+              <span className="mt-1 block text-xs text-muted">Required to change the sign-in email address. The new email must not belong to another account.</span>
+            </label>
             {saveState === "saved" && <p role="status" aria-live="polite" className="text-sm text-success">Profile saved.</p>}
             {saveState === "error" && saveError && <p role="alert" className="text-sm text-danger">{saveError}</p>}
             <div className="flex justify-end border-t border-border pt-4">
-              <Button type="submit" disabled={saveState === "saving" || email.trim() === account.profile.email}>
+              <Button type="submit" disabled={saveState === "saving" || !currentPassword || email.trim() === account.profile.email}>
                 {saveState === "saving" ? "Saving…" : "Save changes"}
               </Button>
             </div>

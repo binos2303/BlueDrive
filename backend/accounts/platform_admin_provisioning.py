@@ -7,6 +7,8 @@ import logging
 from smtplib import SMTPException
 from urllib.parse import urlencode
 
+from .account_email import lock_email_identity
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
@@ -114,6 +116,9 @@ def invite_platform_administrator_view(request):
     # No plaintext password, no promotion of an existing Drive account.
     try:
         with transaction.atomic():
+            lock_email_identity(email)
+            if User.objects.filter(username__iexact=username).exists() or User.objects.filter(email__iexact=email).exists():
+                return Response({"detail": "The username or email is already registered."}, status=409)
             new_user = User.objects.create_user(
                 username=username, email=email, password=None,
                 is_active=False, is_staff=True, is_superuser=False,
