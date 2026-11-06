@@ -33,6 +33,9 @@ import ContextMenu, { type ContextMenuAction } from "@/components/ui/ContextMenu
 import EmptyState from "@/components/shared/EmptyState";
 import Toast from "@/components/ui/Toast";
 import RenameDialog from "@/components/drive/RenameDialog";
+import ShareManagementDialog from "@/components/drive/ShareManagementDialog";
+import { type ShareTarget } from "@/lib/share-service";
+import { canOpenShareManagement } from "@/lib/share-policy";
 import FilePreviewDialog, { type PreviewFile } from "@/components/drive/FilePreviewDialog";
 import type { RenameTarget, RenameResult } from "@/lib/drive-service";
 import DriveNewMenu, {
@@ -230,6 +233,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   } | null>(null);
   const [pendingDestructive, setPendingDestructive] = useState<PendingDestructiveAction | null>(null);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [manageShareTarget, setManageShareTarget] = useState<ShareTarget | null>(null);
   const [shareTargets, setShareTargets] = useState<DriveItem[]>([]);
   const [shareEmail, setShareEmail] = useState("");
   const [sharePermission, setSharePermission] = useState<"viewer" | "editor">("viewer");
@@ -498,6 +502,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     function handleWorkspaceChanged() {
       setPreviewTarget(null);
       setRenameTarget(null);
+      setManageShareTarget(null);
+      setShareDialogOpen(false);
       searchQueryRef.current = "";
       setSearchQuery("");
       setSelectedIds(new Set());
@@ -546,6 +552,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     [driveItems, selectedIds],
   );
   const selectedCanManage = selectedItems.length > 0 && selectedItems.every((item) => item.canManage !== false);
+  const selectedCanShare = selectedItems.length > 0 && canOpenShareManagement(selectedItems);
   const sortedItems = useMemo(
     () =>
       [...driveItems].sort((first, second) => {
@@ -1252,6 +1259,15 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       return;
     }
     if (!canManageItemsInDrive("Share")) return;
+    if (!canOpenShareManagement(targets)) {
+      setToast("Only the original owner with edit permission can manage direct shares.");
+      return;
+    }
+    if (targets.length === 1) {
+      const item = targets[0];
+      setManageShareTarget({ kind: item.type === "folder" ? "folder" : "file", id: item.type === "folder" ? item.folderId ?? Math.abs(item.id) : item.id, name: item.name });
+      return;
+    }
     setShareTargets(targets);
     setShareEmail("");
     setSharePermission("viewer");
@@ -1383,8 +1399,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         onSelect: () => runAction(allStarred ? "Remove from Starred" : "Add to Starred", item),
       });
     }
-    if (canManageTargets && title !== "Shared with me" && title !== "Trash") {
-      actions.push({ label: "Share", onSelect: () => runAction("Share", item) });
+    if (canManageTargets && canOpenShareManagement(actionTarget) && title !== "Shared with me" && title !== "Trash") {
+      actions.push({ label: actionTarget.length === 1 ? "Manage access" : "Share", onSelect: () => runAction("Share", item) });
     }
     if (title === "Trash") {
       actions.push(
@@ -1814,7 +1830,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
               <Star size={16} fill={selectedItems.every((item) => item.starred) ? "currentColor" : "none"} />
             </button>
           )}
-          {title !== "Shared with me" && title !== "Trash" && selectedCanManage && (
+          {title !== "Shared with me" && title !== "Trash" && selectedCanShare && (
             <button
               type="button"
               aria-label="Share"
@@ -2355,6 +2371,9 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           void downloadItems([{ id: file.id, name: file.name, type: "document" }]);
         }}
       />
+
+      <ShareManagementDialog target={manageShareTarget} onClose={() => setManageShareTarget(null)}
+        onChanged={() => { if (listView) void loadItems(listView === "drive" ? currentFolderId : null, listView); }} />
 
       {shareDialogOpen && (
         <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sharing) setShareDialogOpen(false); }}>

@@ -13,7 +13,10 @@ from securedrive.frontend_redirects import redirect_to_frontend
 
 from files.models import File
 from folders.models import Folder
-from .services import get_receiver_share_for_file, get_receiver_share_for_folder, upsert_direct_share
+from .services import (
+    get_receiver_share_for_file, get_receiver_share_for_folder, upsert_direct_share,
+    can_manage_direct_share, change_direct_share_permission, revoke_direct_share,
+)
 from logs.models import ActivityLog
 from logs.services import log_action
 from security.aes_service import build_file_aad, decrypt_bytes, get_master_key, unwrap_dek
@@ -34,6 +37,10 @@ def share_file(request, file_id):
         tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
+
+    if not can_manage_direct_share(drive_file, request.user):
+        messages.error(request, "You cannot manage sharing for this item.")
+        return redirect("dashboard")
 
     form = FileShareForm(
         request.POST,
@@ -113,6 +120,10 @@ def share_folder(request, folder_id):
         deleted_at__isnull=True,
     )
 
+    if not can_manage_direct_share(folder, request.user):
+        messages.error(request, "You cannot manage sharing for this item.")
+        return redirect("dashboard")
+
     form = FileShareForm(
         request.POST,
         owner=request.user,
@@ -181,75 +192,27 @@ def share_folder(request, folder_id):
 @login_required
 @require_POST
 def change_share_permission(request, share_id):
-    """Change Viewer/Editor permission. Only the original owner may do this."""
-    share = get_object_or_404(
-        Share,
-        id=share_id,
-        owner=request.user,
-        tenant__in=active_tenant_ids(request.user),
-    )
-
+    """Legacy form endpoint backed by the same audited service as the JSON API."""
     permission = request.POST.get("permission", "").strip()
-
-    valid_permissions = {
-        Share.Permission.VIEWER,
-        Share.Permission.EDITOR,
-    }
-
-    if permission not in valid_permissions:
+    if permission not in {Share.Permission.VIEWER, Share.Permission.EDITOR}:
         messages.error(request, "Invalid sharing permission.")
         return redirect("shared_with_me")
 
-    old_permission = share.permission
+    with transaction.atomic():
+        share = get_object_or_404(
+            Share.objects.select_for_update(of=("self",)).select_related(
+                "file__tenant", "file__workspace", "file__folder",
+                "folder__tenant", "folder__workspace", "folder__parent", "receiver",
+            ),
+            id=share_id, owner=request.user, tenant__in=active_tenant_ids(request.user),
+        )
+        resource = share.file if share.file_id else share.folder
+        if not can_manage_direct_share(resource, request.user):
+            messages.error(request, "You cannot manage sharing for this item.")
+            return redirect("shared_with_me")
+        changed = change_direct_share_permission(share=share, actor=request.user, permission=permission)
 
-    if old_permission == permission:
-        messages.info(request, "Sharing permission was not changed.")
-        return redirect("shared_with_me")
-
-    share.permission = permission
-    share.save(update_fields=["permission"])
-
-    item_name = (
-        share.file.file_name
-        if share.file_id
-        else share.folder.folder_name
-    )
-
-    permission_label = dict(Share.Permission.choices).get(
-        permission,
-        "Viewer",
-    )
-    old_permission_label = dict(Share.Permission.choices).get(
-        old_permission,
-        "Viewer",
-    )
-
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        (
-            f"Changed access to {item_name} for "
-            f"{share.receiver.username} from "
-            f"{old_permission_label} to {permission_label}"
-        ),
-        obj=share.file if share.file_id else share.folder,
-        metadata={"operation": "permission_changed", "recipient_username": share.receiver.get_username(),
-                  "recipient_email": share.receiver.email, "permission": permission,
-                  "previous_permission": old_permission, "shared_count": 1,
-                  "resource_names": [item_name], "resource_kinds": [share.item_type],
-                  "resource_changes": [{"name": item_name, "kind": share.item_type,
-                      "operation": "permission_changed", "permission": permission,
-                      "previous_permission": old_permission}]},
-    )
-
-    messages.success(
-        request,
-        (
-            f"Access for {share.receiver.username} changed to "
-            f"{permission_label}."
-        ),
-    )
-
+    messages.success(request, "Sharing permission updated." if changed else "Sharing permission was not changed.")
     return redirect("shared_with_me")
 
 
@@ -260,37 +223,22 @@ def shared_with_me(request):
 @login_required
 @require_POST
 def revoke_share(request, share_id):
-    """Chá»‰ owner ban Ä‘áº§u má»›i cĂ³ thá»ƒ thu há»“i quyá»n."""
-    share = get_object_or_404(
-        Share,
-        id=share_id,
-        owner=request.user,
-        tenant__in=active_tenant_ids(request.user),
-    )
-
-    receiver_name = share.receiver.username
-    recipient_email = share.receiver.email
-    previous_permission = share.permission
-    resource = share.file if share.file_id else share.folder
-    item_name = resource.file_name if share.file_id else resource.folder_name
-    resource_kind = share.item_type
+    """Legacy form endpoint; revoke atomically through the common service."""
     with transaction.atomic():
-        share.delete()
-        log_action(
-            request.user, ActivityLog.Action.REVOKE_SHARE,
-            f"Revoked access to {item_name} for {receiver_name}",
-            obj=resource,
-            metadata={"operation": "revoked", "recipient_username": receiver_name,
-                      "recipient_email": recipient_email, "permission": previous_permission,
-                      "shared_count": 1, "resource_names": [item_name],
-                      "resource_kinds": [resource_kind],
-                      "resource_changes": [{"name": item_name, "kind": resource_kind,
-                          "operation": "revoked", "permission": previous_permission}]},
+        share = get_object_or_404(
+            Share.objects.select_for_update(of=("self",)).select_related(
+                "file__tenant", "file__workspace", "file__folder",
+                "folder__tenant", "folder__workspace", "folder__parent", "receiver",
+            ),
+            id=share_id, owner=request.user, tenant__in=active_tenant_ids(request.user),
         )
+        resource = share.file if share.file_id else share.folder
+        if not can_manage_direct_share(resource, request.user):
+            messages.error(request, "You cannot manage sharing for this item.")
+            return redirect("shared_with_me")
+        revoke_direct_share(share=share, actor=request.user)
 
-
-
-    messages.success(request, f"Access revoked for {receiver_name}.")
+    messages.success(request, "Access revoked.")
     return redirect("shared_with_me")
 
 

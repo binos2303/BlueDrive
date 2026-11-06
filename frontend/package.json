@@ -10,7 +10,8 @@
     "test:upload-manager": "node --experimental-strip-types --test components/drive/upload-manager-model.test.mts",
     "test:auth": "node --experimental-strip-types --test lib/auth-redirect.test.mts",
     "test:preview-policy": "node --experimental-strip-types --test lib/file-preview-policy.test.mts",
-    "test:folder-download": "node --experimental-strip-types --test lib/drive-download-policy.test.mts"
+    "test:folder-download": "node --experimental-strip-types --test lib/drive-download-policy.test.mts",
+    "test:share-management": "node --experimental-strip-types --test lib/share-policy.test.mts"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",

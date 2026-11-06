@@ -70,6 +70,7 @@ function formatStorageBytes(value: number | null | undefined): string {
 const navigationItems = [
     { label: "My Drive", href: "/drive", icon: HardDrive },
     { label: "Shared with me", href: "/drive/shared", icon: Share2 },
+    { label: "Shared by me", href: "/drive/shared-by-me", icon: Share2 },
     { label: "Recent", href: "/drive/recent", icon: Clock3 },
     { label: "Starred", href: "/drive/starred", icon: Star },
     { label: "Trash", href: "/drive/trash", icon: Trash2 },

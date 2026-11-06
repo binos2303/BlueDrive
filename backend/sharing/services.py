@@ -1,4 +1,5 @@
 from .models import Share
+from files.models import File
 from accounts.access import (
     active_membership,
     can_access_workspace,
@@ -436,3 +437,70 @@ def upsert_direct_share(*, resource, receiver, owner, permission):
     share.permission = permission
     share.save(update_fields=["permission"])
     return "permission_changed", previous_permission
+
+def can_manage_direct_share(resource, actor):
+    """Only the file/folder owner with current Workspace edit rights manages grants."""
+    if resource is None or resource.owner_id != actor.pk or resource.deleted_at is not None:
+        return False
+    if not _owner_can_edit_workspace_resource(resource, actor):
+        return False
+    if isinstance(resource, File):
+        folder = resource.folder
+    else:
+        folder = resource
+    return folder is None or not _folder_has_deleted_ancestor(folder)
+
+
+def change_direct_share_permission(*, share, actor, permission):
+    """Requires a locked Share row inside transaction.atomic(). Audit real changes."""
+    from logs.models import ActivityLog
+    from logs.services import log_action
+
+    if permission not in {Share.Permission.VIEWER, Share.Permission.EDITOR}:
+        raise ValueError("Unsupported permission")
+    previous = share.permission
+    if previous == permission:
+        return False
+    resource = share.file if share.file_id else share.folder
+    kind = share.item_type
+    name = resource.file_name if share.file_id else resource.folder_name
+    share.permission = permission
+    share.save(update_fields=["permission"])
+    log_action(
+        actor, ActivityLog.Action.SHARE,
+        f"Changed access to {name} for {share.receiver.username} from {previous} to {permission}",
+        obj=resource,
+        metadata={
+            "operation": "permission_changed", "recipient_username": share.receiver.get_username(),
+            "recipient_email": share.receiver.email, "permission": permission,
+            "previous_permission": previous, "shared_count": 1,
+            "resource_names": [name], "resource_kinds": [kind],
+            "resource_changes": [{"name": name, "kind": kind, "operation": "permission_changed",
+                                  "permission": permission, "previous_permission": previous}],
+        },
+    )
+    return True
+
+
+def revoke_direct_share(*, share, actor):
+    """Requires a locked Share row inside transaction.atomic()."""
+    from logs.models import ActivityLog
+    from logs.services import log_action
+
+    resource = share.file if share.file_id else share.folder
+    kind = share.item_type
+    name = resource.file_name if share.file_id else resource.folder_name
+    recipient = share.receiver
+    permission = share.permission
+    share.delete()
+    log_action(
+        actor, ActivityLog.Action.REVOKE_SHARE,
+        f"Revoked access to {name} for {recipient.username}",
+        obj=resource,
+        metadata={
+            "operation": "revoked", "recipient_username": recipient.get_username(),
+            "recipient_email": recipient.email, "permission": permission,
+            "shared_count": 1, "resource_names": [name], "resource_kinds": [kind],
+            "resource_changes": [{"name": name, "kind": kind, "operation": "revoked", "permission": permission}],
+        },
+    )

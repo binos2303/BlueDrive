@@ -1,9 +1,11 @@
 from django.urls import path
 
-from . import views
+from . import views, api_views
 
 
 urlpatterns = [
+    path("drive/api/shares/", api_views.direct_shares_view, name="drive_api_shares"),
+    path("drive/api/shares/<int:share_id>/", api_views.direct_share_detail_view, name="drive_api_share_detail"),
     path(
         "drive/files/<int:file_id>/share/",
         views.share_file,
