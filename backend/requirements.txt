@@ -1,4 +1,5 @@
-﻿asgiref==3.11.1
+﻿
+asgiref==3.11.1
 beautifulsoup4==4.15.0
 boto3==1.43.112
 botocore==1.43.112
@@ -9,7 +10,7 @@ django-cors-headers==4.9.0
 djangorestframework==3.18.0
 pillow==12.2.0
 pycparser==3.0
-psycopg2-binary==2.9.13
+psycopg[binary]==3.3.6
 python-dotenv==1.2.2
 soupsieve==2.9.2
 sqlparse==0.5.5
