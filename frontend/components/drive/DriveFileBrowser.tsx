@@ -28,9 +28,7 @@ import { DRIVE_UPLOAD_COMPLETED_EVENT, useUploadManager } from "@/components/dri
 import {
   downloadDriveFile,
   downloadDriveFolder,
-  getDriveFolderDetails,
   getDriveItems,
-  type DriveFolderDetails,
   type DownloadProgress,
 } from "@/lib/drive-service";
 import {
@@ -38,7 +36,7 @@ import {
   requestAccountApi,
 } from "@/lib/account-service";
 import { isDownloadSelectionSupported } from "@/lib/drive-download-policy";
-import type { DriveItem, DriveItemType } from "./browser/types";
+import type { DriveItem } from "./browser/types";
 import { listViewForTitle } from "./browser/drive-display-utils";
 import useDriveItems from "./browser/useDriveItems";
 import {
@@ -53,6 +51,8 @@ import DriveMoveDialog from "./browser/DriveMoveDialog";
 import DriveShareDialog from "./browser/DriveShareDialog";
 import useDriveSelection from "./browser/useDriveSelection";
 import useDriveItemActions from "./browser/useDriveItemActions";
+import useDriveFileOperations from "./browser/useDriveFileOperations";
+import { ITEM_DRAG_TYPE } from "./browser/drive-move-utils";
 import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 
 type ViewMode = "list" | "grid";
@@ -70,8 +70,6 @@ type ScrollbarDrag = {
   startY: number;
   startThumbTop: number;
 } | null;
-
-const ITEM_DRAG_TYPE = "application/x-securedrive-item";
 
 type DriveFileBrowserProps = {
   title: string;
@@ -135,18 +133,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     scrollHeight: 0,
     trackTop: 0,
   });
-  const moveDestinationRequestIdRef = useRef(0);
   const pasteHandlerRef = useRef<(files: readonly { file: File; relativePath: string }[]) => void>(() => {});
-  const [isMoveDialogOpen, setIsMoveDialogOpen] = useState(false);
-  const [moveTargets, setMoveTargets] = useState<DriveItem[]>([]);
-  const [moveDestinationId, setMoveDestinationId] = useState<number | null>(null);
-  const [moveDestinationItems, setMoveDestinationItems] = useState<DriveItem[]>([]);
-  const [moveDestinationDetails, setMoveDestinationDetails] = useState<DriveFolderDetails | null>(null);
-  const [moveDestinationLoading, setMoveDestinationLoading] = useState(false);
-  const [moveDestinationError, setMoveDestinationError] = useState<string | null>(null);
-  const [isMovingItems, setIsMovingItems] = useState(false);
-  const [dropTargetFolderId, setDropTargetFolderId] = useState<number | null>(null);
-  const [breadcrumbDropTargetIndex, setBreadcrumbDropTargetIndex] = useState<number | null>(null);
   const { enqueue, openManager } = useUploadManager();
 
   const {
@@ -171,6 +158,22 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     clearSelection, clearSelectedIds, setDriveItems,
     notifyFolderTreeChanged, loadItems, postItemAction,
     canManageItemsInDrive, setToast,
+  });
+
+  // Tập trung nghiệp vụ di chuyển và kéo thả nội bộ; upload từ máy tính vẫn ở component chính.
+  const {
+    isMoveDialogOpen, setIsMoveDialogOpen, moveTargets,
+    moveDestinationId, moveDestinationItems, moveDestinationDetails,
+    moveDestinationLoading, moveDestinationError, isMovingItems,
+    dropTargetFolderId, setDropTargetFolderId, breadcrumbDropTargetIndex,
+    loadMoveDestination, openMoveDialog, confirmMoveItems,
+    handleBreadcrumbDragOver, handleBreadcrumbDragLeave, handleBreadcrumbDrop,
+    autoScrollDuringInternalDrag, handleDragStart, handleFolderDragOver, handleDropOnFolder,
+  } = useDriveFileOperations({
+    title, listView, currentFolderId, folderDetails, driveItems,
+    selectedIds, selectedItems, setFileDropActive,
+    clearSelectedIds, notifyFolderTreeChanged, loadItems,
+    postItemAction, canManageItemsInDrive, setToast,
   });
 
   const updateScrollMetrics = useCallback(() => {
@@ -690,137 +693,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     });
   }
 
-  async function loadMoveDestination(folderId: number | null) {
-    const requestId = ++moveDestinationRequestIdRef.current;
-    setMoveDestinationId(folderId);
-    setMoveDestinationLoading(true);
-    setMoveDestinationError(null);
-    try {
-      const [nextItems, details] = await Promise.all([
-        getDriveItems(folderId, "drive"),
-        folderId !== null ? getDriveFolderDetails(folderId) : Promise.resolve(null),
-      ]);
-      if (requestId !== moveDestinationRequestIdRef.current) return;
-      setMoveDestinationItems(nextItems.filter((candidate) => candidate.type === "folder"));
-      setMoveDestinationDetails(details);
-    } catch (error) {
-      if (requestId !== moveDestinationRequestIdRef.current) return;
-      setMoveDestinationError(error instanceof Error ? error.message : "Could not load destination folders.");
-    } finally {
-      if (requestId === moveDestinationRequestIdRef.current) setMoveDestinationLoading(false);
-    }
-  }
-
-  function openMoveDialog(targets: DriveItem[]) {
-    if (!targets.length) {
-      setToast("Select at least one item to move.");
-      return;
-    }
-    if (!canManageItemsInDrive("Move")) return;
-    setMoveTargets(targets);
-    setIsMoveDialogOpen(true);
-    void loadMoveDestination(null);
-  }
-
-  async function confirmMoveItems() {
-    if (!moveTargets.length || isMovingItems) return;
-    setIsMovingItems(true);
-    try {
-      await postItemAction("/drive/api/items/move/", moveTargets, {
-        destination_folder_id: moveDestinationId,
-      });
-      setIsMoveDialogOpen(false);
-      setMoveTargets([]);
-      clearSelectedIds();
-      notifyFolderTreeChanged();
-      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
-      // Successful moves refresh the list silently; keep error notifications below.
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not move selected items.");
-    } finally {
-      setIsMovingItems(false);
-      setDropTargetFolderId(null);
-    }
-  }
-
-  async function moveItemsToFolder(targets: DriveItem[], destinationFolderId: number | null) {
-    if (!targets.length || isMovingItems) return;
-    if (!canManageItemsInDrive("Move")) return;
-    setIsMovingItems(true);
-    setDropTargetFolderId(destinationFolderId);
-    try {
-      await postItemAction("/drive/api/items/move/", targets, {
-        destination_folder_id: destinationFolderId,
-      });
-      clearSelectedIds();
-      notifyFolderTreeChanged();
-      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
-      // Successful drag-and-drop moves refresh the list silently.
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not move selected items.");
-    } finally {
-      setIsMovingItems(false);
-      setDropTargetFolderId(null);
-    }
-  }
-
-  function getBreadcrumbDestinationId(index: number): number | null | undefined {
-    // Breadcrumb move targets are enabled only while browsing My Drive.
-    if (title !== "My Drive" || listView !== "drive") return undefined;
-    if (index === 0) return null; // My Drive root
-
-    const ancestors = folderDetails?.ancestors ?? [];
-    if (index >= 1 && index <= ancestors.length) {
-      return ancestors[index - 1]?.id;
-    }
-
-    // The final crumb represents the folder currently open.
-    if (index === ancestors.length + 1 && currentFolderId !== null) {
-      return currentFolderId;
-    }
-    return undefined;
-  }
-
-  function handleBreadcrumbDragOver(event: React.DragEvent<HTMLElement>, index: number) {
-    if (!Array.from(event.dataTransfer.types).includes(ITEM_DRAG_TYPE)) return;
-    if (getBreadcrumbDestinationId(index) === undefined) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-    setBreadcrumbDropTargetIndex(index);
-  }
-
-  function handleBreadcrumbDragLeave(event: React.DragEvent<HTMLElement>, index: number) {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-    setBreadcrumbDropTargetIndex((current) => current === index ? null : current);
-  }
-
-  async function handleBreadcrumbDrop(event: React.DragEvent<HTMLElement>, index: number) {
-    if (!Array.from(event.dataTransfer.types).includes(ITEM_DRAG_TYPE)) return;
-    const destinationFolderId = getBreadcrumbDestinationId(index);
-    if (destinationFolderId === undefined) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    setBreadcrumbDropTargetIndex(null);
-    try {
-      const raw = event.dataTransfer.getData(ITEM_DRAG_TYPE);
-      const parsed = JSON.parse(raw) as {
-        items?: Array<{ id: number; type: DriveItemType; folderId?: number | null }>;
-      };
-      const targets = (parsed.items ?? [])
-        .map((entry) => driveItems.find((candidate) => candidate.id === entry.id))
-        .filter((candidate): candidate is DriveItem => candidate !== undefined);
-      if (!targets.length) {
-        setToast("Could not identify the dragged Drive items. Select them and try again.");
-        return;
-      }
-      await moveItemsToFolder(targets, destinationFolderId);
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not move the dragged items to this folder.");
-    }
-  }
-
   function openShareDialog(targets: DriveItem[]) {
     if (!targets.length) {
       setToast("Select at least one item to share.");
@@ -981,104 +853,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       });
     }
     return actions;
-  }
-
-  // Scroll the active Drive scroll container while an internal item is being dragged
-  // near its top/bottom edge. This lets users drag from the end of a long list to folders above.
-  function autoScrollDuringInternalDrag(event: React.DragEvent<HTMLElement>) {
-    const pointerY = event.clientY;
-    const edgeSize = 92;
-    const maxStep = 28;
-    const getStep = (distanceIntoEdge: number) => {
-      const progress = Math.max(0, Math.min(1, 1 - distanceIntoEdge / edgeSize));
-      return Math.max(7, Math.ceil(maxStep * progress));
-    };
-
-    let node = event.target instanceof HTMLElement ? event.target : null;
-    while (node && node !== document.documentElement) {
-      const style = window.getComputedStyle(node);
-      const canScrollY = /(auto|scroll|overlay)/.test(style.overflowY)
-        && node.scrollHeight > node.clientHeight + 2;
-      if (canScrollY) {
-        const rect = node.getBoundingClientRect();
-        const topDistance = pointerY - rect.top;
-        const bottomDistance = rect.bottom - pointerY;
-        if (topDistance >= 0 && topDistance < edgeSize && node.scrollTop > 0) {
-          node.scrollTop = Math.max(0, node.scrollTop - getStep(topDistance));
-          return;
-        }
-        if (
-          bottomDistance >= 0
-          && bottomDistance < edgeSize
-          && node.scrollTop + node.clientHeight < node.scrollHeight - 1
-        ) {
-          node.scrollTop = Math.min(
-            node.scrollHeight - node.clientHeight,
-            node.scrollTop + getStep(bottomDistance),
-          );
-          return;
-        }
-      }
-      node = node.parentElement;
-    }
-
-    // Fall back to the document viewport when the page itself is the scroll container.
-    const pageScroller = document.scrollingElement as HTMLElement | null;
-    if (!pageScroller) return;
-    const viewportHeight = window.innerHeight;
-    if (pointerY < edgeSize && pageScroller.scrollTop > 0) {
-      window.scrollBy(0, -getStep(pointerY));
-    } else if (
-      pointerY > viewportHeight - edgeSize
-      && pageScroller.scrollTop + viewportHeight < pageScroller.scrollHeight - 1
-    ) {
-      window.scrollBy(0, getStep(viewportHeight - pointerY));
-    }
-  }
-
-  function handleDragStart(event: React.DragEvent<HTMLButtonElement>, item: DriveItem) {
-    const targets = selectedIds.has(item.id) && selectedItems.length ? selectedItems : [item];
-    event.dataTransfer.setData(ITEM_DRAG_TYPE, JSON.stringify({
-      items: targets.map((target) => ({
-        id: target.id,
-        type: target.type,
-        folderId: target.folderId ?? null,
-      })),
-    }));
-    event.dataTransfer.effectAllowed = "move";
-    setDropTargetFolderId(null);
-    // Internal Drive drags are never upload overlays.
-  }
-
-  function handleFolderDragOver(event: React.DragEvent<HTMLElement>, item: DriveItem) {
-    if (item.type !== "folder" || !Array.from(event.dataTransfer.types).includes(ITEM_DRAG_TYPE)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-    autoScrollDuringInternalDrag(event);
-    if (item.folderId) setDropTargetFolderId(item.folderId);
-  }
-
-  async function handleDropOnFolder(event: React.DragEvent<HTMLElement>, folder: DriveItem) {
-    if (!Array.from(event.dataTransfer.types).includes(ITEM_DRAG_TYPE)) return;
-    if (folder.type !== "folder" || !folder.folderId) return;
-    event.preventDefault();
-    event.stopPropagation();
-    setFileDropActive(false);
-    try {
-      const raw = event.dataTransfer.getData(ITEM_DRAG_TYPE);
-      const parsed = JSON.parse(raw) as { items?: Array<{ id: number; type: DriveItemType; folderId?: number | null }> };
-      const targets = (parsed.items ?? [])
-        .map((entry) => driveItems.find((candidate) => candidate.id === entry.id))
-        .filter((candidate): candidate is DriveItem => candidate !== undefined);
-      if (!targets.length) {
-        setToast("Could not identify the dragged Drive items. Select them and try again.");
-        return;
-      }
-      await moveItemsToFolder(targets, folder.folderId);
-    } catch {
-      setToast("Could not read the dragged items. Use Move to choose a destination instead.");
-    }
   }
 
   function handleDragEnter(event: React.DragEvent<HTMLElement>) {
