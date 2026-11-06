@@ -1,10 +1,11 @@
-"""Read-only, platform-admin-only API. No account mutations are exposed."""
+"""Platform admin directories, account lifecycle, and session management APIs."""
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
-from django.db.models import Count, Q, Sum
-from accounts.models import Tenant, Workspace, TrackedAccountSession, PlatformAdminAuditEvent
+from django.db.models import Count, F, Q, Sum
+from django.db.models.functions import Lower
+from accounts.models import Tenant, Workspace, WorkspaceMembership, Membership, TrackedAccountSession, PlatformAdminAuditEvent
 from files.models import File
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -41,40 +42,63 @@ def admin_access_view(request):
     return Response({"allowed": True, "username": user.get_username(), "email": user.email, "role": platform_role(user), "can_manage_admins": is_platform_super_admin(user)})
 
 
+USER_DIRECTORY_SORTS = {
+    "recent_signin": (F("last_login").desc(nulls_last=True), "pk"),
+    "oldest_signin": (F("last_login").asc(nulls_last=True), "pk"),
+    "newest": ("-date_joined", "pk"),
+    "oldest": ("date_joined", "pk"),
+    "name_asc": (Lower("username").asc(), "pk"),
+    "name_desc": (Lower("username").desc(), "pk"),
+}
+
+
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsPlatformAdmin])
 def admin_users_view(request):
-    """Read-only account directory; the admin/user classification matches dedicated RBAC."""
+    """Filtered account directory with database-level, stable ordering.
+
+    Sorting happens before pagination: sorting only 20 client-side rows would
+    give incorrect results across pages. No password, session key or token is
+    projected into this response.
+    """
     query = str(request.query_params.get("q", "")).strip()[:100]
-    scope = str(request.query_params.get("scope", "all"))
-    status = str(request.query_params.get("status", "all"))
-    users = get_user_model().objects.all()
-    admin_filter = Q(is_staff=True) & (Q(is_superuser=True) | Q(platform_admin_identity__isnull=False))
+    scope = request.query_params.get("scope", "all")
+    status = request.query_params.get("status", "all")
+    sort = request.query_params.get("sort", "recent_signin")
+    if scope not in {"all", "users", "admins"}:
+        return Response({"detail": "Invalid scope."}, status=400)
+    if status not in {"all", "active", "inactive"}:
+        return Response({"detail": "Invalid status."}, status=400)
+    if sort not in USER_DIRECTORY_SORTS:
+        return Response({"detail": "Invalid sort option."}, status=400)
+
+    users = get_user_model().objects.select_related("platform_admin_identity").all()
+    admin_filter = Q(is_staff=True) & (
+        Q(is_superuser=True) | Q(platform_admin_identity__isnull=False)
+    )
     if scope == "users":
         users = users.filter(is_staff=False, is_superuser=False)
     elif scope == "admins":
-        users = users.filter(admin_filter).select_related("platform_admin_identity")
-    elif scope != "all":
-        return Response({"detail": "Invalid scope."}, status=400)
+        users = users.filter(admin_filter)
     if status == "active":
         users = users.filter(is_active=True)
     elif status == "inactive":
         users = users.filter(is_active=False)
-    elif status != "all":
-        return Response({"detail": "Invalid status."}, status=400)
     if query:
         users = users.filter(Q(username__icontains=query) | Q(email__icontains=query))
+
     count = users.count()
     page = _requested_page(request)
-    results = list(users.order_by("pk")[(page - 1) * 20:page * 20])
+    results = list(users.order_by(*USER_DIRECTORY_SORTS[sort])[(page - 1) * 20:page * 20])
+    now = timezone.now()
     online_ids = set(TrackedAccountSession.objects.filter(
         user_id__in=[user.pk for user in results],
-        last_seen_at__gte=timezone.now() - ONLINE_WINDOW,
+        last_seen_at__gte=now - ONLINE_WINDOW,
         user__is_active=True,
-        session__expire_date__gt=timezone.now(),
+        session__expire_date__gt=now,
     ).values_list("user_id", flat=True))
-    return Response({"count": count, "page": page, "page_size": 20, "results": [
+    return Response({"count": count, "page": page, "page_size": 20, "sort": sort, "results": [
         {"id": user.pk, "username": user.get_username(), "email": user.email,
          "is_active": user.is_active, "is_staff": user.is_staff,
          "is_superuser": user.is_superuser,
@@ -176,21 +200,80 @@ def admin_organizations_view(request):
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsPlatformAdmin])
 def admin_workspaces_view(request):
-    """List active collaboration workspaces; never expose internal default rows."""
-    queryset = active_collaboration_workspaces().select_related("tenant")
+    """Active collaboration directory shared by Workspaces and Teams UI.
+
+    A Team is an existing Workspace, not a second authority for membership.
+    Counts refer to active *explicit* assignments, excluding revoked/suspended
+    tenant memberships and disabled users. Tenant owner/admin inherited rights
+    and per-resource Direct Shares are intentionally not counted.
+
+    Read-only: a platform role can inspect metadata but cannot manage workspace
+    membership or access file contents by virtue of this endpoint.
+    """
     query = str(request.query_params.get("q", "")).strip()[:100]
+    scope = request.query_params.get("scope", "all")
+    sort = request.query_params.get("sort", "newest")
+    if scope not in {"all", "personal", "organization"}:
+        return Response({"detail": "Invalid workspace scope."}, status=400)
+    sorts = {
+        "newest": ("-created_at", "pk"),
+        "oldest": ("created_at", "pk"),
+        "name_asc": (Lower("name").asc(), "pk"),
+        "name_desc": (Lower("name").desc(), "pk"),
+    }
+    if sort not in sorts:
+        return Response({"detail": "Invalid workspace sort."}, status=400)
+
+    queryset = active_collaboration_workspaces().select_related("tenant", "created_by")
+    if scope == "personal":
+        queryset = queryset.filter(tenant__kind=Tenant.Kind.PERSONAL)
+    elif scope == "organization":
+        queryset = queryset.filter(tenant__kind=Tenant.Kind.BUSINESS)
     if query:
         queryset = queryset.filter(Q(name__icontains=query) | Q(tenant__name__icontains=query))
-    page = _requested_page(request)
+
     count = queryset.count()
-    results = queryset.order_by("-created_at", "pk")[(page - 1) * 20:page * 20]
-    return Response({"count": count, "page": page, "page_size": 20, "results": [
-        {"id": str(workspace.pk), "name": workspace.name, "status": workspace.status,
-         "organization": workspace.tenant.name if workspace.tenant.kind == Tenant.Kind.BUSINESS else None,
-         "scope": "organization" if workspace.tenant.kind == Tenant.Kind.BUSINESS else "personal",
-         "created_at": workspace.created_at.isoformat()}
-        for workspace in results
-    ]})
+    page = _requested_page(request)
+    # Aggregate only on the selected page; keeps directory size predictable.
+    selected = list(queryset.order_by(*sorts[sort])[(page - 1) * 20:page * 20])
+    workspace_ids = [workspace.pk for workspace in selected]
+    explicit_counts = {}
+    if workspace_ids:
+        assignments = WorkspaceMembership.objects.filter(
+            workspace_id__in=workspace_ids,
+            workspace__status=Workspace.Status.ACTIVE,
+            workspace__is_default=False,
+            workspace__tenant__status=Tenant.Status.ACTIVE,
+            status=WorkspaceMembership.Status.ACTIVE,
+            membership__status=Membership.Status.ACTIVE,
+            membership__user__is_active=True,
+            membership__tenant_id=F("workspace__tenant_id"),
+        ).values("workspace_id", "role").annotate(total=Count("pk"))
+        for row in assignments:
+            key = row["workspace_id"]
+            if key not in explicit_counts:
+                explicit_counts[key] = {"admin": 0, "editor": 0, "viewer": 0}
+            if row["role"] in explicit_counts[key]:
+                explicit_counts[key][row["role"]] = row["total"]
+
+    results = []
+    for workspace in selected:
+        roles = explicit_counts.get(workspace.pk, {"admin": 0, "editor": 0, "viewer": 0})
+        results.append({
+            "id": str(workspace.pk), "name": workspace.name, "status": workspace.status,
+            "organization": workspace.tenant.name if workspace.tenant.kind == Tenant.Kind.BUSINESS else None,
+            "scope": "organization" if workspace.tenant.kind == Tenant.Kind.BUSINESS else "personal",
+            "created_at": workspace.created_at.isoformat(),
+            "created_by": workspace.created_by.get_username() if workspace.created_by else None,
+            "member_count": sum(roles.values()),
+            "role_counts": roles,
+        })
+    response = Response({
+        "count": count, "page": page, "page_size": 20,
+        "scope": scope, "sort": sort, "results": results,
+    })
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
 # --- Phase 02: account lifecycle, observed sessions and platform audit ---

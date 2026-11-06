@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import admin_api, admin_files_api, admin_logs_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api
+from . import admin_api, admin_files_api, admin_logs_api, admin_permissions_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api
 
 
 urlpatterns = [
@@ -9,9 +9,11 @@ urlpatterns = [
     path("api/admin/administrators/<int:user_id>/reinvite/", platform_admin_provisioning.reinvite_platform_administrator_view, name="api-admin-reinvite"),
     path("api/admin-invite/accept/", platform_admin_provisioning.accept_platform_administrator_invitation_view, name="api-admin-invite-accept"),
     path("api/admin/access/", admin_api.admin_access_view, name="api-admin-access"),
+    path("api/admin/permissions/", admin_permissions_api.admin_permissions_view, name="api-admin-permissions"),
     path("api/admin/users/", admin_api.admin_users_view, name="api-admin-users"),
     path("api/admin/files/", admin_files_api.admin_files_view, name="api-admin-files"),
     path("api/admin/files/<int:file_id>/", admin_files_api.admin_file_detail_view, name="api-admin-file-detail"),
+    path("api/admin/files/<int:file_id>/actions/", admin_files_api.admin_file_action_view, name="api-admin-file-action"),
     path("api/admin/users/<int:user_id>/suspend/", admin_api.admin_suspend_user_view, name="api-admin-user-suspend"),
     path("api/admin/users/<int:user_id>/reactivate/", admin_api.admin_reactivate_user_view, name="api-admin-user-reactivate"),
     path("api/admin/sessions/", admin_api.admin_sessions_view, name="api-admin-sessions"),

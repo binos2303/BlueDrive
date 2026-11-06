@@ -121,14 +121,18 @@ function EventDetailList({ rows }: { rows: Array<[string, string]> }) {
 }
 
 function AuditDetailsContent({ row }: { row: LogRow }) {
-  return <EventDetailList rows={[
+  const rows: Array<[string, string]> = [
     ["Event ID", row.id],
     ["Time", localTime(row.created_at)],
     ["Administrator", row.actor || "Not recorded"],
     ["Action", row.action_label || row.action],
     ["Target account", row.target || "Not recorded"],
     ["Reason", row.reason || "Not recorded"],
-  ]} />;
+  ];
+  if (row.resource_type && row.resource_id != null) {
+    rows.push(["Resource", `${row.resource_type} #${row.resource_id}`]);
+  }
+  return <EventDetailList rows={rows} />;
 }
 
 export default function AdminLogDirectory({ mode }: { mode: Mode }) {

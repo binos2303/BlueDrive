@@ -4,8 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { RefreshCw, Search } from "lucide-react";
 import AdminPageHeader from "@/components/admin/AdminPageHeader";
 import Button from "@/components/ui/Button";
-
-const apiBase = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+import { requestAccountApi } from "@/lib/account-service";
 
 type Org = { id: string; name: string; status: string; workspaces: number; created_at: string };
 type Workspace = { id: string; name: string; status: string; scope: "organization" | "personal"; organization: string | null; created_at: string };
@@ -37,11 +36,8 @@ export default function AdminResourceDirectory({ kind }: { kind: "organizations"
   useEffect(() => {
     const controller = new AbortController();
     const params = new URLSearchParams({ page: String(page), q: search, sort });
-    fetch(`${apiBase}/accounts/api/admin/${kind}/?${params}`, {
-      credentials: "include", cache: "no-store", signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok) throw new Error(`Unable to load ${kind} (HTTP ${response.status}).`);
-      return response.json() as Promise<Directory<Org | Workspace>>;
+    requestAccountApi<Directory<Org | Workspace>>(`/accounts/api/admin/${kind}/?${params}`, {
+      cache: "no-store", signal: controller.signal,
     }).then((result) => {
       if (!controller.signal.aborted) { setData(result); setError(""); setLoading(false); }
     }).catch((reason: unknown) => {

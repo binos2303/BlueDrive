@@ -4,62 +4,23 @@ import { useEffect, useState, type FormEvent } from "react";
 import {
   Archive, ChevronLeft, ChevronRight, File as FileIcon, FileImage, FileMusic,
   FileText, FileVideo, FolderOpen, HardDrive, LockKeyhole,
-  RefreshCw, Search, X,
+  RefreshCw, Search, Trash2, RotateCcw, X,
 } from "lucide-react";
 import AdminPageHeader from "@/components/admin/AdminPageHeader";
 import AdminSegmentTabs from "@/components/admin/AdminSegmentTabs";
 import Dialog from "@/components/ui/Dialog";
+import Button from "@/components/ui/Button";
+import { actionsForAdminFile, canSubmitAdminFileAction, type AdminFileAction } from "@/lib/admin-file-policy";
+import {
+  getAdminFiles, getAdminFileDetail, manageAdminFile,
+  type AdminFile as FileRow,
+  type AdminFileDetail as FileDetail,
+  type AdminFileDirectoryPage as Directory,
+  type AdminFileScope as Scope,
+  type AdminFileStatus as Lifecycle,
+  type AdminFileSort as Sort,
+} from "@/lib/admin-file-service";
 import styles from "./AdminFileDirectory.module.css";
-
-const apiBase = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
-
-type Scope = "all" | "my_drive" | "workspace" | "organization";
-type Lifecycle = "active" | "trash" | "all";
-type FileType = "all" | "document" | "image" | "video" | "audio" | "archive" | "other";
-type Sort = "newest" | "updated" | "name" | "largest" | "oldest";
-type FileRow = {
-  id: number;
-  name: string;
-  size_bytes: number;
-  mime_type: string;
-  owner: { id: number; username: string };
-  scope: "my_drive" | "workspace" | "organization";
-  organization: { id: string; name: string } | null;
-  workspace: { id: string; name: string };
-  folder: { id: number; name: string } | null;
-  lifecycle: "active" | "trash";
-  version_state: string | null;
-  current_version: number | null;
-  version_count: number | null;
-  is_encrypted: boolean;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | null;
-};
-type FileVersion = {
-  id: string;
-  number: number;
-  state: string;
-  is_current: boolean;
-  size_bytes: number;
-  mime_type: string;
-  created_at: string;
-  verified_at: string | null;
-  storage: { provider: string; state: string; verified_at: string | null }[];
-};
-type FileDetail = FileRow & {
-  last_accessed_at: string | null;
-  purge_after: string | null;
-  versions: FileVersion[];
-  versions_limit: number;
-};
-type Directory = {
-  count: number;
-  page: number;
-  page_size: number;
-  summary: { active: number; trash: number; active_metadata_bytes: number };
-  results: FileRow[];
-};
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value < 0) return "—";
@@ -98,7 +59,6 @@ export default function AdminFileDirectory() {
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<Scope>("all");
   const [lifecycle, setLifecycle] = useState<Lifecycle>("active");
-  const [fileType, setFileType] = useState<FileType>("all");
   const [sort, setSort] = useState<Sort>("newest");
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
@@ -109,30 +69,25 @@ export default function AdminFileDirectory() {
   const [detail, setDetail] = useState<FileDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  const [actionTarget, setActionTarget] = useState<{ file: FileRow; action: AdminFileAction } | null>(null);
+  const [actionReason, setActionReason] = useState("");
+  const [confirmationName, setConfirmationName] = useState("");
+  const [actionPending, setActionPending] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ q: query, scope, status: lifecycle, type: fileType, sort, page: String(page) });
-    fetch(`${apiBase}/accounts/api/admin/files/?${params}`, { credentials: "include", cache: "no-store", signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(response.status === 403
-          ? "Access denied. Sign in with a Platform Admin account."
-          : `Unable to load file inventory (HTTP ${response.status}).`);
-        return response.json() as Promise<Directory>;
-      })
+    getAdminFiles({ query, scope, status: lifecycle, sort, page }, controller.signal)
       .then((result) => { if (!controller.signal.aborted) { setData(result); setError(""); setLoading(false); } })
       .catch((reason: unknown) => { if (!controller.signal.aborted) { setData(null); setError(reason instanceof Error ? reason.message : "File request failed."); setLoading(false); } });
     return () => controller.abort();
-  }, [query, scope, lifecycle, fileType, sort, page, revision]);
+  }, [query, scope, lifecycle, sort, page, revision]);
 
   useEffect(() => {
     if (selectedId === null) return;
     const controller = new AbortController();
-    fetch(`${apiBase}/accounts/api/admin/files/${selectedId}/`, { credentials: "include", cache: "no-store", signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`Unable to load file details (HTTP ${response.status}).`);
-        return response.json() as Promise<FileDetail>;
-      })
+    getAdminFileDetail(selectedId, controller.signal)
       .then((result) => { if (!controller.signal.aborted) { setDetail(result); setDetailLoading(false); setDetailError(""); } })
       .catch((reason: unknown) => { if (!controller.signal.aborted) { setDetail(null); setDetailLoading(false); setDetailError(reason instanceof Error ? reason.message : "Could not load details."); } });
     return () => controller.abort();
@@ -151,8 +106,44 @@ export default function AdminFileDirectory() {
   }
   function changeScope(value: Scope) { setScope(value); setPage(1); setLoading(true); }
   function changeStatus(value: Lifecycle) { setLifecycle(value); setPage(1); setLoading(true); }
-  function changeType(value: FileType) { setFileType(value); setPage(1); setLoading(true); }
   function changeSort(value: Sort) { setSort(value); setPage(1); setLoading(true); }
+  function openAction(file: FileRow, action: AdminFileAction) {
+    setActionTarget({ file, action });
+    setActionReason("");
+    setConfirmationName("");
+    setActionError("");
+    setActionNotice("");
+  }
+  function closeAction() {
+    if (actionPending) return;
+    setActionTarget(null);
+    setActionError("");
+  }
+  async function confirmAction() {
+    if (!actionTarget || actionPending || !canSubmitAdminFileAction({
+      action: actionTarget.action, reason: actionReason,
+      fileName: actionTarget.file.name, confirmation: confirmationName,
+    })) return;
+    setActionPending(true);
+    setActionError("");
+    try {
+      await manageAdminFile({ fileId: actionTarget.file.id, action: actionTarget.action,
+        reason: actionReason, confirmation: confirmationName });
+      setActionNotice(actionTarget.action === "trash" ? "File moved to Trash." :
+        actionTarget.action === "restore" ? "File restored." : "File permanently deleted.");
+      setActionTarget(null);
+      setSelectedId(null);
+      setDetail(null);
+      setLoading(true);
+      const leavesFilter = actionTarget.action === "purge" || lifecycle !== "all";
+      if (page > 1 && data?.results.length === 1 && leavesFilter) setPage((current) => current - 1);
+      else setRevision((current) => current + 1);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "File operation failed.");
+    } finally {
+      setActionPending(false);
+    }
+  }
   const totalPages = Math.max(1, Math.ceil((data?.count ?? 0) / (data?.page_size || 20)));
   const formatCount = (value: number | undefined) => value === undefined ? "—" : value.toLocaleString("en-US");
 
@@ -169,6 +160,7 @@ export default function AdminFileDirectory() {
       ].map((item) => <section key={item.label} className="rounded-[20px] border border-border bg-surface px-5 py-4"><p className="text-[12px] text-muted">{item.label}</p><p className="mt-2 text-[25px] font-semibold tabular-nums tracking-tight">{item.value}</p><p className="mt-1 text-[11px] text-muted">{item.description}</p></section>)}
     </div>
 
+    {actionNotice && <p role="status" className="rounded-xl border border-border bg-surface px-4 py-3 text-sm">{actionNotice}</p>}
     <section className={`${styles.filterContainer} overflow-hidden rounded-[20px] border border-border bg-surface`}>
       <div className="space-y-4 border-b border-border p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -193,7 +185,7 @@ export default function AdminFileDirectory() {
                 onChange={(e) => setInput(e.target.value)}
                 className="min-w-0 w-full flex-1 bg-transparent text-[13px] text-foreground outline-none"
               />
-              {input && <button type="button" title="Clear search" aria-label="Clear search" onClick={() => { setInput(""); setQuery(""); setPage(1); setLoading(true); }} className="shrink-0 text-muted hover:text-foreground"><X size={14} /></button>}
+              {input && <button type="button" title="Clear search" aria-label="Clear search" onClick={() => { setInput(""); setQuery(""); setPage(1); setLoading(true); setRevision((current) => current + 1); }} className="shrink-0 text-muted hover:text-foreground"><X size={14} /></button>}
               <button type="submit" className="shrink-0 text-xs font-semibold text-brand-contrast">Search</button>
             </form>
           </div>
@@ -201,12 +193,6 @@ export default function AdminFileDirectory() {
             <span className="mb-1.5 block">Status</span>
             <select aria-label="File status" value={lifecycle} onChange={(e) => changeStatus(e.target.value as Lifecycle)} className="h-11 w-full min-w-0 rounded-xl border border-border bg-background px-3 text-[13px] text-foreground">
               <option value="active">Active</option><option value="trash">In trash</option><option value="all">All statuses</option>
-            </select>
-          </label>
-          <label className="min-w-0 text-[12px] text-muted">
-            <span className="mb-1.5 block">File type</span>
-            <select aria-label="File type" value={fileType} onChange={(e) => changeType(e.target.value as FileType)} className="h-11 w-full min-w-0 rounded-xl border border-border bg-background px-3 text-[13px] text-foreground">
-              <option value="all">All types</option><option value="document">Documents</option><option value="image">Images</option><option value="video">Video</option><option value="audio">Audio</option><option value="archive">Archives</option><option value="other">Other</option>
             </select>
           </label>
           <label className={`${styles.sortField} min-w-0 text-[12px] text-muted`}>
@@ -222,7 +208,7 @@ export default function AdminFileDirectory() {
       {loading && <div role="status" className="flex min-h-52 items-center justify-center gap-2 text-[13px] text-muted"><RefreshCw size={16} className="animate-spin" />Loading file metadata…</div>}
       {!loading && !error && <div className="overflow-x-auto">
         <table className="w-full min-w-235 text-left text-[13px]">
-          <thead className="bg-background text-[11px] font-medium text-muted"><tr><th className="px-5 py-3">File</th><th className="px-4 py-3">Owner</th><th className="px-4 py-3">Location</th><th className="px-4 py-3">Size</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Modified</th><th className="px-5 py-3 text-right">Details</th></tr></thead>
+          <thead className="bg-background text-[11px] font-medium text-muted"><tr><th className="px-5 py-3">File</th><th className="px-4 py-3">Owner</th><th className="px-4 py-3">Location</th><th className="px-4 py-3">Size</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Modified</th><th className="px-5 py-3 text-right">Actions</th></tr></thead>
           <tbody>{data?.results.map((file) => {
             const Icon = iconForFile(file);
             return <tr key={file.id} className="border-t border-border/70 transition-colors hover:bg-background/70">
@@ -232,7 +218,16 @@ export default function AdminFileDirectory() {
               <td className="whitespace-nowrap px-4 py-3 tabular-nums">{formatBytes(file.size_bytes)}</td>
               <td className="px-4 py-3"><span className={`inline-flex rounded-lg px-2.5 py-1 text-[11px] font-semibold ${file.lifecycle === "active" ? "bg-brand-soft text-brand-contrast" : "bg-background text-muted"}`}>{file.lifecycle === "active" ? "Active" : "In trash"}</span><p className="mt-1.5 text-[11px] capitalize text-muted">{formatState(file.version_state)}</p></td>
               <td className="whitespace-nowrap px-4 py-3 text-[12px] text-muted">{formatDate(file.updated_at)}</td>
-              <td className="px-5 py-3 text-right"><button type="button" onClick={() => openFile(file.id)} className="rounded-lg border border-border px-3 py-2 text-[11px] font-semibold transition-colors hover:bg-brand-soft hover:text-brand-contrast" aria-label={`View metadata for ${file.name}`}>View</button></td>
+              <td className="px-5 py-3"><div className="flex justify-end gap-2">
+                <button type="button" onClick={() => openFile(file.id)} className="rounded-lg border border-border px-3 py-2 text-[11px] font-semibold transition-colors hover:bg-brand-soft hover:text-brand-contrast" aria-label={`View metadata for ${file.name}`}>View</button>
+                {actionsForAdminFile(file.lifecycle, data?.permissions?.can_manage_files ?? false).map((action) =>
+                  <button key={action} type="button" onClick={() => openAction(file, action)}
+                    className={`inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-[11px] font-semibold transition-colors hover:bg-brand-soft ${action === "purge" ? "text-danger" : ""}`}
+                    aria-label={`${action === "trash" ? "Move to Trash" : action === "restore" ? "Restore" : "Permanently delete"} ${file.name}`}>
+                    {action === "restore" ? <RotateCcw size={13} /> : <Trash2 size={13} />}
+                    {action === "trash" ? "Trash" : action === "restore" ? "Restore" : "Delete"}
+                  </button>)}
+              </div></td>
             </tr>;
           })}</tbody>
         </table>
@@ -241,6 +236,35 @@ export default function AdminFileDirectory() {
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-5 py-3.5 text-xs"><span className="text-muted">Page {page} of {totalPages} · {formatCount(data?.count)} results</span><div className="flex gap-2"><button disabled={page <= 1 || loading} onClick={() => { setPage((n) => n - 1); setLoading(true); }} className="inline-flex h-9 items-center gap-1 rounded-lg border border-border px-3 font-medium disabled:opacity-40"><ChevronLeft size={14}/>Previous</button><button disabled={page >= totalPages || loading} onClick={() => { setPage((n) => n + 1); setLoading(true); }} className="inline-flex h-9 items-center gap-1 rounded-lg border border-border px-3 font-medium disabled:opacity-40">Next<ChevronRight size={14}/></button></div></div>
     </section>
 
+
+    <Dialog open={actionTarget !== null}
+      title={actionTarget?.action === "purge" ? "Permanently delete file?" : actionTarget?.action === "restore" ? "Restore file?" : "Move file to Trash?"}
+      description="Super Admin action · The reason and result are recorded in the platform audit log."
+      onClose={closeAction}>
+      {actionTarget && <div className="space-y-4">
+        <p className="wrap-break-word text-sm font-semibold">{actionTarget.file.name}</p>
+        {actionTarget.action === "purge" && <p className="text-xs leading-5 text-danger">This is irreversible. Stored versions and quota accounting will be cleaned up. Confirm only after checking retention and recovery requirements.</p>}
+        <label className="block text-xs font-semibold">Reason (8–500 characters)
+          <textarea value={actionReason} maxLength={500} onChange={(event) => setActionReason(event.target.value)}
+            className="mt-2 min-h-24 w-full rounded-xl border border-border bg-background p-3 text-sm font-normal" />
+        </label>
+        {actionTarget.action === "purge" && <label className="block text-xs font-semibold">
+          Type the file name exactly to confirm: <span className="font-bold">{actionTarget.file.name}</span>
+          <input value={confirmationName} autoComplete="off" onChange={(event) => setConfirmationName(event.target.value)}
+            className="mt-2 h-11 w-full rounded-xl border border-border bg-background px-3 text-sm font-normal" />
+        </label>}
+        {actionError && <p role="alert" className="text-xs text-danger">{actionError}</p>}
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" disabled={actionPending} onClick={closeAction}>Cancel</Button>
+          <Button variant={actionTarget.action === "purge" ? "destructive" : "primary"}
+            disabled={!canSubmitAdminFileAction({ action: actionTarget.action, reason: actionReason,
+              fileName: actionTarget.file.name, confirmation: confirmationName })}
+            loading={actionPending} onClick={() => void confirmAction()}>
+            {actionTarget.action === "purge" ? "Delete permanently" : actionTarget.action === "restore" ? "Restore file" : "Move to Trash"}
+          </Button>
+        </div>
+      </div>}
+    </Dialog>
 
     <Dialog open={selectedId !== null} title={detail?.name || "File details"} description="Administrative metadata · Read-only" onClose={closeFile} className="max-w-165">
       {detailLoading && <p role="status" className="flex items-center gap-2 text-sm text-muted"><RefreshCw size={16} className="animate-spin"/>Loading file details…</p>}

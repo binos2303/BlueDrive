@@ -7,22 +7,20 @@ import AdminSegmentTabs from "@/components/admin/AdminSegmentTabs";
 import Button from "@/components/ui/Button";
 import Dialog from "@/components/ui/Dialog";
 import { accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
+import UserSessionsDialog from "@/components/admin/UserSessionsDialog";
+import {
+  getAdminUsers,
+  getAdminUserOverview,
+  type AdminUser as Account,
+  type AdminUsersPage as Page,
+  type AdminUserSort as UserSort,
+} from "@/lib/admin-user-service";
 
-type Account = {
-  id: number; username: string; email: string; is_active: boolean;
-  is_staff: boolean; is_superuser: boolean; last_login: string | null;
-  recently_online: boolean; date_joined: string | null;
-  admin_role?: "super_admin" | "platform_admin" | null;
-  admin_status?: "invited" | "active" | "disabled" | null;
-};
-type Page<T> = { count: number; page: number; page_size: number; results: T[]; sort?: UserSort };
 type Tab = "users" | "admins";
 type Status = "all" | "active" | "inactive";
 type AdminAccess = { can_manage_admins: boolean; role: "super_admin" | "platform_admin" };
 type Intent = { kind: "suspend" | "reactivate" | "disable" | "reinvite"; user: Account };
-type UserSort = "recent_signin" | "oldest_signin" | "newest" | "oldest" | "name_asc" | "name_desc";
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const formattedDate = (value: string | null) => value ? new Date(value).toLocaleString() : "Never";
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Request failed.";
 const SORT_OPTIONS: Array<{ value: UserSort; label: string }> = [
@@ -42,13 +40,14 @@ export default function UserDirectory() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
-  const [records, setRecords] = useState<Page<Account> | null>(null);
+  const [records, setRecords] = useState<Page | null>(null);
   const [overview, setOverview] = useState<{ users: { total: number; platform_admins: number } } | null>(null);
   const [access, setAccess] = useState<AdminAccess | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [intent, setIntent] = useState<Intent | null>(null);
+  const [sessionUser, setSessionUser] = useState<Account | null>(null);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteUsername, setInviteUsername] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
@@ -66,25 +65,24 @@ export default function UserDirectory() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ scope: tab, page: String(page), status, q: search, sort });
-    fetch(`${API_BASE}/accounts/api/admin/users/?${params}`, {
-      credentials: "include", cache: "no-store", signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok) throw new Error(`Unable to load accounts (HTTP ${response.status}).`);
-      return response.json() as Promise<Page<Account>>;
-    }).then((data) => {
-      if (controller.signal.aborted) return;
-      setRecords(data); setLoading(false); setError("");
-    }).catch((err: unknown) => {
-      if (!controller.signal.aborted) { setLoading(false); setError(errorText(err)); }
-    });
+    getAdminUsers({ scope: tab, page, status, query: search, sort }, controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        setRecords(data);
+        setLoading(false);
+        setError("");
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setLoading(false);
+        setError(errorText(err));
+      });
     return () => controller.abort();
   }, [tab, status, page, search, sort, revision]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${API_BASE}/accounts/api/admin/overview/`, { credentials: "include", cache: "no-store", signal: controller.signal })
-      .then((response) => { if (!response.ok) throw new Error("Unable to load totals."); return response.json(); })
+    getAdminUserOverview(controller.signal)
       .then((result) => { if (!controller.signal.aborted) setOverview(result); })
       .catch(() => { if (!controller.signal.aborted) setOverview(null); });
     return () => controller.abort();
@@ -165,7 +163,7 @@ export default function UserDirectory() {
           <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-muted">
             <span>Status</span>
             <select aria-label="Account status" className="h-11 rounded-xl border border-border bg-background px-3 text-[12px] text-foreground" value={status} onChange={(event) => { setStatus(event.target.value as Status); setPage(1); refresh(); }}>
-              <option value="all">All statuses</option><option value="active">Enabled</option><option value="inactive">Disabled / Invited</option>
+              <option value="all">All statuses</option><option value="active">Enabled</option><option value="inactive">Disabled{tab === "admins" ? " / Invited" : ""}</option>
             </select>
           </label>
           <label className="flex min-w-0 flex-col gap-1 text-[11px] font-medium text-muted">
@@ -179,10 +177,11 @@ export default function UserDirectory() {
       {loading && <p role="status" className="py-12 text-center text-sm text-muted">Loading accounts…</p>}
       {error && !loading && <p role="alert" className="px-5 py-8 text-sm text-danger">{error}</p>}
       {!loading && !error && <div className="overflow-x-auto"><table className="w-full min-w-200 text-left text-[13px]"><thead className="bg-background text-[12px] text-muted"><tr><th className="px-5 py-3">Account</th><th className="px-5 py-3">Role</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Last sign-in</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody>
-        {records?.results.map((user) => <tr key={user.id} className="border-t border-border/70"><td className="px-5 py-3"><div className="flex items-center gap-2"><span className="rounded-full bg-brand-soft p-2 text-brand-contrast"><UserRound size={16}/></span><div className="min-w-0"><p className="font-semibold">{user.username}</p><p className="max-w-56 truncate text-[11px] text-muted">{user.email || "No email"}</p></div></div></td><td className="px-5 py-3 text-[12px]">{tab === "users" ? "User" : user.admin_role === "super_admin" ? "Super Admin" : "Platform Admin"}</td><td className="px-5 py-3"><span className="rounded-lg bg-background px-2.5 py-1 text-[11px] font-semibold">{tab === "admins" && user.admin_status === "invited" ? "Invitation pending" : user.is_active ? "Enabled" : "Disabled"}</span></td><td className="px-5 py-3 text-[12px] text-muted">{formattedDate(user.last_login)}</td><td className="px-5 py-3 text-right">{tab === "users" && <button type="button" className={`rounded-lg border border-border px-3 py-2 text-[11px] font-semibold ${user.is_active ? "text-danger" : "text-brand-contrast"}`} onClick={() => { setReason(""); setActionError(""); setIntent({ kind: user.is_active ? "suspend" : "reactivate", user }); }}>{user.is_active ? "Suspend" : "Reactivate"}</button>}{tab === "admins" && access?.can_manage_admins && user.admin_role === "platform_admin" && user.admin_status !== "disabled" && <button type="button" className="rounded-lg border border-border px-3 py-2 text-[11px] font-semibold text-danger" onClick={() => { setReason(""); setActionError(""); setIntent({ kind: "disable", user }); }}>Disable</button>}{tab === "admins" && access?.can_manage_admins && user.admin_role === "platform_admin" && user.admin_status !== "active" && <button type="button" className="ml-2 rounded-lg border border-border px-3 py-2 text-[11px] font-semibold text-brand-contrast" onClick={() => { setReason(""); setActionError(""); setIntent({ kind: "reinvite", user }); }}>Reinvite</button>}</td></tr>)}
+        {records?.results.map((user) => <tr key={user.id} className="border-t border-border/70"><td className="px-5 py-3"><div className="flex items-center gap-2"><span className="rounded-full bg-brand-soft p-2 text-brand-contrast"><UserRound size={16}/></span><div className="min-w-0"><p className="font-semibold">{user.username}</p><p className="max-w-56 truncate text-[11px] text-muted">{user.email || "No email"}</p></div></div></td><td className="px-5 py-3 text-[12px]">{tab === "users" ? "User" : user.admin_role === "super_admin" ? "Super Admin" : "Platform Admin"}</td><td className="px-5 py-3"><span className="rounded-lg bg-background px-2.5 py-1 text-[11px] font-semibold">{tab === "admins" && user.admin_status === "invited" ? "Invitation pending" : user.is_active ? "Enabled" : "Disabled"}</span></td><td className="px-5 py-3 text-[12px] text-muted">{formattedDate(user.last_login)}</td><td className="px-5 py-3 text-right">{tab === "users" && <><button type="button" className={`rounded-lg border border-border px-3 py-2 text-[11px] font-semibold ${user.is_active ? "text-danger" : "text-brand-contrast"}`} onClick={() => { setReason(""); setActionError(""); setIntent({ kind: user.is_active ? "suspend" : "reactivate", user }); }}>{user.is_active ? "Suspend" : "Reactivate"}</button><button type="button" className="ml-2 rounded-lg border border-border px-3 py-2 text-[11px] font-semibold text-brand-contrast" onClick={() => setSessionUser(user)}>Sessions</button></>}{tab === "admins" && access?.can_manage_admins && user.admin_role === "platform_admin" && user.admin_status !== "disabled" && <button type="button" className="rounded-lg border border-border px-3 py-2 text-[11px] font-semibold text-danger" onClick={() => { setReason(""); setActionError(""); setIntent({ kind: "disable", user }); }}>Disable</button>}{tab === "admins" && access?.can_manage_admins && user.admin_role === "platform_admin" && user.admin_status !== "active" && <button type="button" className="ml-2 rounded-lg border border-border px-3 py-2 text-[11px] font-semibold text-brand-contrast" onClick={() => { setReason(""); setActionError(""); setIntent({ kind: "reinvite", user }); }}>Reinvite</button>}</td></tr>)}
       </tbody></table>{records?.results.length === 0 && <p className="px-5 py-10 text-center text-[13px] text-muted">No accounts match your filters.</p>}</div>}
       {!loading && !error && <div className="flex justify-between border-t border-border px-5 py-4 text-[12px]"><span className="text-muted">{records?.count ?? 0} accounts · Page {page} of {totalPages}</span><div className="flex gap-2"><button type="button" disabled={page === 1} onClick={() => { setPage(page - 1); setLoading(true); }} className="rounded-lg border border-border px-3 py-1.5 disabled:opacity-40">Previous</button><button type="button" disabled={page >= totalPages} onClick={() => { setPage(page + 1); setLoading(true); }} className="rounded-lg border border-border px-3 py-1.5 disabled:opacity-40">Next</button></div></div>}
     </section>
+    {sessionUser && <UserSessionsDialog key={sessionUser.id} user={sessionUser} onClose={() => setSessionUser(null)} />}
     <Dialog open={showInvite} title="Add Platform Administrator" description="Create a separate account and email a one-time password setup link." onClose={closeModal}>
       <form className="space-y-4" onSubmit={(event) => void submitInvite(event)}>
         <label className="block text-[12px] font-semibold">Username<input required minLength={3} maxLength={150} autoComplete="off" value={inviteUsername} onChange={(event) => setInviteUsername(event.target.value)} className="mt-2 h-10 w-full rounded-xl border border-border bg-background px-3 text-[13px] font-normal"/></label>

@@ -31,7 +31,6 @@ export default function AccountSecurityPanel() {
   const [sessionsMessage, setSessionsMessage] = useState<{ error: boolean; text: string } | null>(null);
 
   const loadSessions = useCallback(async (requestedPage: number) => {
-    setSessionsLoading(true);
     try {
       const result = await getAccountSessions(requestedPage);
       setSessionsPage(result);
@@ -45,7 +44,35 @@ export default function AccountSecurityPanel() {
     }
   }, []);
 
-  useEffect(() => { void loadSessions(1); }, [loadSessions]);
+  useEffect(() => {
+    // Subscribe to the initial asynchronous session load without setting state
+    // synchronously from an effect or applying results after unmount.
+    let active = true;
+    getAccountSessions(1)
+      .then((result) => {
+        if (!active) return;
+        setSessionsPage(result);
+        setPage(result.page);
+        setSessionsMessage(null);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setSessionsPage(null);
+        setSessionsMessage({
+          error: true,
+          text: error instanceof Error ? error.message : "Could not load sessions.",
+        });
+      })
+      .finally(() => {
+        if (active) setSessionsLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  function refreshSessions(requestedPage: number) {
+    setSessionsLoading(true);
+    void loadSessions(requestedPage);
+  }
 
   async function submitPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -126,7 +153,7 @@ export default function AccountSecurityPanel() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div><h2 className="text-base font-semibold text-foreground">Active sessions</h2>
             <p className="mt-1 max-w-2xl text-sm text-muted">Sessions observed since tracking was enabled. An unexpired session is not proof a device is online.</p></div>
-          <Button variant="secondary" size="sm" onClick={() => void loadSessions(page)} disabled={sessionsLoading || sessionsBusy}>Refresh</Button>
+          <Button variant="secondary" size="sm" onClick={() => refreshSessions(page)} disabled={sessionsLoading || sessionsBusy}>Refresh</Button>
         </div>
         <label className="mt-5 block max-w-md">
           <span className="mb-1.5 block text-sm font-medium text-foreground">Current password to revoke sessions</span>
@@ -158,8 +185,8 @@ export default function AccountSecurityPanel() {
         <div className="mt-4 flex items-center justify-between gap-3 text-xs text-muted">
           <span>{sessionsPage?.count ?? 0} observed session(s)</span>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" disabled={sessionsBusy || sessionsLoading || page <= 1} onClick={() => void loadSessions(page - 1)}>Previous</Button>
-            <Button variant="secondary" size="sm" disabled={sessionsBusy || sessionsLoading || !mayHaveNextPage(sessionsPage?.count ?? 0, page, sessionsPage?.pageSize ?? 20)} onClick={() => void loadSessions(page + 1)}>Next</Button>
+            <Button variant="secondary" size="sm" disabled={sessionsBusy || sessionsLoading || page <= 1} onClick={() => refreshSessions(page - 1)}>Previous</Button>
+            <Button variant="secondary" size="sm" disabled={sessionsBusy || sessionsLoading || !mayHaveNextPage(sessionsPage?.count ?? 0, page, sessionsPage?.pageSize ?? 20)} onClick={() => refreshSessions(page + 1)}>Next</Button>
           </div>
         </div>
       </section>

@@ -5,13 +5,19 @@ MinIO object references, presigned URLs, encryption material, or storage secrets
 """
 from uuid import UUID
 
+from django.db import IntegrityError, transaction
 from django.db.models import Count, OuterRef, Q, Subquery, Sum
+from django.utils import timezone
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.response import Response
 
 from files.models import File, FileVersion, StorageLocation
+from files.permanent_delete import permanently_delete_files
+from .api_views import require_csrf
 from .admin_api import IsPlatformAdmin
+from .models import PlatformAdminAuditEvent
+from .platform_admin import is_platform_super_admin
 
 
 DOCUMENT_EXTENSIONS = (".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".csv", ".odt", ".ods")
@@ -152,6 +158,7 @@ def admin_files_view(request):
         "summary": {"active": summary["active"], "trash": summary["trash"],
                     "active_metadata_bytes": summary["active_bytes"] or 0},
         "results": [_serialize_file(file) for file in results],
+        "permissions": {"can_manage_files": is_platform_super_admin(request.user)},
     })
 
 
@@ -193,3 +200,136 @@ def admin_file_detail_view(request, file_id):
         "versions_limit": 30,
     })
     return Response(result)
+
+
+ACTIONS = {"trash", "restore", "purge"}
+
+
+def _validate_admin_file_action(data):
+    """Strict operation contract: no accidental mass action or implicit purge."""
+    if not isinstance(data, dict):
+        return None
+    action = data.get("action")
+    expected = {"action", "reason", "confirm_name"} if action == "purge" else {"action", "reason"}
+    if action not in ACTIONS or set(data) != expected:
+        return None
+    reason = data.get("reason")
+    if not isinstance(reason, str) or not 8 <= len(reason.strip()) <= 500:
+        return None
+    if action == "purge" and (not isinstance(data.get("confirm_name"), str) or len(data["confirm_name"]) > 255):
+        return None
+    return action, reason.strip(), data.get("confirm_name")
+
+
+def _audit_file_action(actor, drive_file, action, reason, **extra):
+    """Only operational identifiers; never store object refs or file bytes."""
+    return PlatformAdminAuditEvent.objects.create(
+        actor=actor, target_user=drive_file.owner,
+        action=action, reason=reason,
+        metadata={
+            "file_id": drive_file.pk,
+            "tenant_id": str(drive_file.tenant_id),
+            "workspace_id": str(drive_file.workspace_id),
+            **extra,
+        },
+    )
+
+
+def _live_parent_chain(drive_file):
+    """A trashed or cross-workspace ancestor must never be bypassed by restore."""
+    folder = drive_file.folder
+    seen = set()
+    while folder is not None:
+        if (folder.pk in seen or folder.deleted_at is not None
+                or folder.tenant_id != drive_file.tenant_id
+                or folder.workspace_id != drive_file.workspace_id):
+            return False
+        seen.add(folder.pk)
+        folder = folder.parent
+    return True
+
+
+@require_csrf
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_file_action_view(request, file_id):
+    """Super Admin-only single-file lifecycle recovery/cleanup.
+
+    Platform Admins keep read-only inventory access. No content is returned.
+    Purge reuses the existing storage+quota service and requires typed confirmation.
+    """
+    if not is_platform_super_admin(request.user):
+        return Response({"detail": "Only a Super Admin can modify user files."}, status=403)
+    validated = _validate_admin_file_action(request.data)
+    if validated is None:
+        return Response({"detail": "Provide action and a reason (8–500 characters). Purge also requires confirm_name."}, status=400)
+    action, reason, confirm_name = validated
+
+    # A row lock prevents competing admin operations and DB updates during
+    # irreversible storage cleanup. This one-file action is deliberately not bulk.
+    with transaction.atomic():
+        drive_file = File.objects.select_for_update(of=("self",)).select_related(
+            "owner", "folder", "tenant", "workspace",
+        ).filter(pk=file_id).first()
+        if drive_file is None:
+            return Response({"detail": "File not found."}, status=404)
+        if action == "trash":
+            if drive_file.deleted_at is not None:
+                return Response({"detail": "File is already in Trash."}, status=409)
+            if not _live_parent_chain(drive_file):
+                return Response({"detail": "Cannot move a file with a trashed parent folder."}, status=409)
+            drive_file.deleted_at = timezone.now()
+            drive_file.save(update_fields=["deleted_at", "updated_at"])
+            _audit_file_action(request.user, drive_file, PlatformAdminAuditEvent.Action.FILE_TRASH, reason)
+            return Response({"id": drive_file.pk, "lifecycle": "trash"})
+
+        if drive_file.deleted_at is None:
+            return Response({"detail": "File must be in Trash."}, status=409)
+        if action == "restore":
+            if not _live_parent_chain(drive_file):
+                return Response({"detail": "Restore the parent folder before restoring this file."}, status=409)
+            if File.objects.filter(
+                workspace_id=drive_file.workspace_id,
+                folder_id=drive_file.folder_id,
+                file_name__iexact=drive_file.file_name,
+                deleted_at__isnull=True,
+            ).exclude(pk=drive_file.pk).exists():
+                return Response({"detail": "A file with this name already exists in the destination."}, status=409)
+            drive_file.deleted_at = None
+            drive_file.purge_after = None
+            try:
+                # The workspace name-uniqueness constraint remains the final
+                # safeguard if a concurrent upload/rename wins the same name.
+                with transaction.atomic():
+                    drive_file.save(update_fields=["deleted_at", "purge_after", "updated_at"])
+                    _audit_file_action(request.user, drive_file, PlatformAdminAuditEvent.Action.FILE_RESTORE, reason)
+            except IntegrityError:
+                return Response({"detail": "A file with this name already exists in the destination."}, status=409)
+            return Response({"id": drive_file.pk, "lifecycle": "active"})
+
+        # For permanent deletion the client must explicitly type the exact file
+        # name. Neither the API nor the UI supports permanent bulk deletion.
+        if confirm_name != drive_file.file_name:
+            return Response({"detail": "The confirmation name does not match this file."}, status=400)
+        _audit_file_action(
+            request.user, drive_file,
+            PlatformAdminAuditEvent.Action.FILE_PURGE_REQUESTED, reason,
+        )
+        try:
+            permanently_delete_files([drive_file])
+        except Exception:
+            # The existing service retains metadata and marks failed storage
+            # locations for retry. Never expose object refs or exception text.
+            _audit_file_action(
+                request.user, drive_file,
+                PlatformAdminAuditEvent.Action.FILE_PURGE_FAILED, reason,
+            )
+            return Response({
+                "detail": "Storage cleanup failed or could not be confirmed. File metadata was retained where possible; check storage health before retrying."
+            }, status=503)
+        _audit_file_action(
+            request.user, drive_file,
+            PlatformAdminAuditEvent.Action.FILE_PURGE_SUCCEEDED, reason,
+        )
+        return Response({"id": file_id, "lifecycle": "purged"})

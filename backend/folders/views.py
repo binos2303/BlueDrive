@@ -43,6 +43,7 @@ from sharing.services import (
     can_edit_folder,
     can_edit_folder_tree,
     can_view_folder,
+    describe_resource_access,
     get_receiver_share_for_file,
     get_receiver_share_for_folder,
     is_descendant_or_same,
@@ -734,22 +735,18 @@ def folder_open(request, folder_id):
 def folder_details(request, folder_id):
     folder = get_object_or_404(Folder, id=folder_id)
     is_owner = folder.owner_id == request.user.id
-    share = None
     if not can_view_folder(folder, request.user):
         raise Http404
+    from accounts.access import workspace_role_for_user
+    workspace_role = workspace_role_for_user(request.user, folder.workspace)
+    share = None if is_owner else get_receiver_share_for_folder(folder, request.user)
     # Recent uses this timestamp to represent opening a folder. Update it without
     # touching updated_at, which is reserved for content/metadata modifications.
     Folder.objects.filter(pk=folder.pk).update(last_accessed_at=timezone.now())
-    if not is_owner:
-        # A shared resource follows the same lifecycle rule as the drive view:
-        # once the owner moves it to Trash, recipients must lose all access,
-        # including metadata/details endpoints.
-        if folder.deleted_at is not None:
-            raise Http404
-        share = get_receiver_share_for_folder(folder, request.user)
-        if share is None:
-            raise Http404
+    if not is_owner and workspace_role is None and share is None:
+        raise Http404
 
+    access = describe_resource_access(folder, request.user, share=share)
     activity = get_last_activity(folder)
     descendants = _subtree(folder, include_deleted=False)
     descendant_ids = [item.id for item in descendants]
@@ -764,7 +761,7 @@ def folder_details(request, folder_id):
 
     ancestors = []
 
-    if is_owner or not share or share.folder_id != folder.id:
+    if is_owner or workspace_role is not None or not share or share.folder_id != folder.id:
         current = folder.parent
         reverse_ancestors = []
 
@@ -772,6 +769,7 @@ def folder_details(request, folder_id):
             # Preserve the existing shared-folder access boundary.
             if (
                 not is_owner
+                and workspace_role is None
                 and share
                 and current.id == share.folder_id
             ):
@@ -787,11 +785,11 @@ def folder_details(request, folder_id):
 
     parts = [item["name"] for item in ancestors]
 
-    location_root = "My Drive" if is_owner else "Shared with me"
+    location_root = "My Drive" if is_owner else (folder.workspace.name if workspace_role else "Shared with me")
     location = location_root + (
         " / " + " / ".join(parts) if parts else ""
     )
-    return JsonResponse({
+    response = JsonResponse({
         "type": "folder",
         "name": folder.folder_name,
         "owner": folder.owner.username,
@@ -801,10 +799,14 @@ def folder_details(request, folder_id):
         "ancestors": ancestors,
         "folder_count": folder_count,
         "file_count": file_count,
-        "access": "Owner" if is_owner else share.permission_label,
-        "shared_by": None if is_owner else share.owner.username,
+        "access": access["access"],
+        "permission": access["permission"],
+        "shared_by": access["shared_by"],
         "last_action": activity.get_action_display() if activity else "No recorded action",
     })
+    response["Cache-Control"] = "private, no-store"
+    return response
+
 
 @login_required
 def trash_folder_open(request, folder_id):

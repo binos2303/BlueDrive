@@ -1,5 +1,5 @@
 import type { UploadStatus, UploadTask } from "./upload-manager-model";
-import { UploadPausedError, UploadTransferControl } from "./upload-transfer-control";
+import { UploadTransferControl } from "./upload-transfer-control";
 import { UploadPartProgress } from "./upload-progress-model";
 import { UploadProgressTelemetry } from "./upload-progress-telemetry";
 import { OnDemandPartAuthorizer } from "./upload-part-authorization";

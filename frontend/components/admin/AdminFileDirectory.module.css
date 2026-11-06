@@ -28,7 +28,7 @@
 
 @container (min-width: 820px) {
   .filterGrid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .searchField {
     grid-column: 1 / -1;
@@ -43,7 +43,7 @@
   .filterGrid {
     grid-template-columns:
       minmax(310px, 1.7fr)
-      repeat(3, minmax(165px, 0.65fr));
+      repeat(2, minmax(165px, 0.65fr));
   }
   .searchField {
     grid-column: auto;

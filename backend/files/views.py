@@ -28,6 +28,7 @@ from sharing.services import (
     can_edit_file,
     can_edit_folder,
     can_view_file,
+    describe_resource_access,
     get_receiver_share_for_file,
 )
 from security.hash_service import verify_sha256
@@ -520,8 +521,9 @@ def file_view(request, file_id):
 def file_details(request, file_id):
     drive_file, is_owner, share = _get_accessible_file(file_id, request.user)
     activity = get_last_activity(drive_file)
-    location = _file_location(drive_file, is_owner=is_owner, share=share)
-    return JsonResponse({
+    location = _file_location(drive_file, user=request.user, share=share)
+    access = describe_resource_access(drive_file, request.user, share=share)
+    response = JsonResponse({
         "type": "file",
         "name": drive_file.file_name,
         "owner": drive_file.owner.username,
@@ -535,21 +537,9 @@ def file_details(request, file_id):
         ),
         "location": location,
         "encrypted": bool(drive_file.is_encrypted),
-        "access": (
-            "Owner"
-            if is_owner
-            else share.permission_label
-        ),
-        "permission": (
-            None
-            if is_owner
-            else share.permission
-        ),
-        "shared_by": (
-            None
-            if is_owner
-            else share.owner.username
-        ),
+        "access": access["access"],
+        "permission": access["permission"],
+        "shared_by": access["shared_by"],
         "last_action": (
             activity.get_action_display()
             if activity
@@ -557,18 +547,33 @@ def file_details(request, file_id):
         ),
         "hash_sha256": drive_file.hash_sha256 or None,
     })
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
-def _file_location(drive_file, *, is_owner=True, share=None):
+def _file_location(drive_file, *, user, share=None):
+    """Never disclose unshared ancestor names to a direct file recipient."""
+    from accounts.access import workspace_role_for_user
+
+    is_owner = drive_file.owner_id == user.pk
+    workspace_role = workspace_role_for_user(user, drive_file.workspace)
+    if not is_owner and workspace_role is None and (share is None or share.folder_id is None):
+        # File-only grants authorize the file, not the owner's folder path.
+        return "Shared with me"
+
     parts = []
     shared_root_id = share.folder_id if share and share.folder_id else None
     current = drive_file.folder
+    visited = set()
     while current is not None:
-        if not is_owner and current.id == shared_root_id:
+        if current.pk in visited:
+            break
+        visited.add(current.pk)
+        if not is_owner and workspace_role is None and current.pk == shared_root_id:
             break
         parts.insert(0, current.folder_name)
         current = current.parent
-    location_root = "My Drive" if is_owner else "Shared with me"
+    location_root = "My Drive" if is_owner else (drive_file.workspace.name if workspace_role else "Shared with me")
     return location_root + (" / " + " / ".join(parts) if parts else "")
 
 

@@ -415,6 +415,11 @@ class PlatformAdminAuditEvent(models.Model):
         INVITE_ADMIN = "admin.invite", "Invite administrator"
         ACCEPT_ADMIN = "admin.accept", "Accept administrator invitation"
         DISABLE_ADMIN = "admin.disable", "Disable administrator"
+        FILE_TRASH = "file.trash", "Move file to Trash"
+        FILE_RESTORE = "file.restore", "Restore file"
+        FILE_PURGE_REQUESTED = "file.purge.requested", "Request file purge"
+        FILE_PURGE_SUCCEEDED = "file.purge.succeeded", "Complete file purge"
+        FILE_PURGE_FAILED = "file.purge.failed", "File purge failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     actor = models.ForeignKey(

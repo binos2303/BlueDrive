@@ -226,6 +226,9 @@ def admin_audit_history_view(request):
     events = _apply_range(events, bounds)
 
     def serialize(row):
+        metadata = row.metadata if isinstance(row.metadata, dict) else {}
+        is_file_action = row.action.startswith("file.")
+        file_id = metadata.get("file_id") if is_file_action else None
         return {
             "id": str(row.pk),
             "created_at": row.created_at.isoformat(),
@@ -235,6 +238,10 @@ def admin_audit_history_view(request):
             "target": row.target_user.get_username(),
             "target_id": row.target_user_id,
             "reason": row.reason,
+            # File operations need a stable audit referent. Only an integer ID
+            # is exposed: never return raw audit metadata or storage object refs.
+            "resource_type": "file" if is_file_action else None,
+            "resource_id": file_id if type(file_id) is int and file_id > 0 else None,
         }
 
     return _response(events, request, serialize, PlatformAdminAuditEvent.Action)

@@ -20,6 +20,7 @@ const groups = [
       { title: "Users", href: "/admin/users", icon: Users },
       { title: "Organizations", href: "/admin/organizations", icon: Building2 },
       { title: "Workspaces", href: "/admin/workspaces", icon: Workflow },
+      { title: "Teams", href: "/admin/teams", icon: Users },
       { title: "Files", href: "/admin/files", icon: FileText },
     ],
   },

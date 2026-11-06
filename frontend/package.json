@@ -13,7 +13,11 @@
     "test:workspace-members": "node --experimental-strip-types --test lib/workspace-member-policy.test.mts",
     "test:preview-policy": "node --experimental-strip-types --test lib/file-preview-policy.test.mts",
     "test:folder-download": "node --experimental-strip-types --test lib/drive-download-policy.test.mts",
-    "test:share-management": "node --experimental-strip-types --test lib/share-policy.test.mts"
+    "test:share-management": "node --experimental-strip-types --test lib/share-policy.test.mts",
+    "test:admin-users": "node --experimental-strip-types --test lib/admin-user-query.test.mts",
+    "test:admin-files": "node --experimental-strip-types --test lib/admin-file-policy.test.mts lib/admin-file-query.test.mts",
+    "test:admin-permissions": "node --experimental-strip-types --test lib/admin-permissions-format.test.mts",
+    "test:admin-teams": "node --experimental-strip-types --test lib/admin-teams-query.test.mts"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
