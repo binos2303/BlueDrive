@@ -19,7 +19,6 @@ import ShareManagementDialog from "@/components/drive/ShareManagementDialog";
 import { type ShareTarget } from "@/lib/share-service";
 import { canOpenShareManagement } from "@/lib/share-policy";
 import FilePreviewDialog, { type PreviewFile } from "@/components/drive/FilePreviewDialog";
-import type { RenameTarget, RenameResult } from "@/lib/drive-service";
 import DriveNewMenu, {
   DRIVE_CREATE_FOLDER_EVENT,
   DRIVE_UPLOAD_FILES_EVENT,
@@ -53,16 +52,11 @@ import DriveCreateFolderDialog from "./browser/DriveCreateFolderDialog";
 import DriveMoveDialog from "./browser/DriveMoveDialog";
 import DriveShareDialog from "./browser/DriveShareDialog";
 import useDriveSelection from "./browser/useDriveSelection";
+import useDriveItemActions from "./browser/useDriveItemActions";
 import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 
 type ViewMode = "list" | "grid";
 export type { DriveItem } from "./browser/types";
-type PendingDestructiveAction = {
-  action: "trash" | "delete";
-  count: number;
-  targets: DriveItem[];
-};
-
 type ScrollMetrics = {
   scrollTop: number;
   clientHeight: number;
@@ -119,14 +113,12 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     text: string;
     progress: DownloadProgress | null;
   } | null>(null);
-  const [pendingDestructive, setPendingDestructive] = useState<PendingDestructiveAction | null>(null);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [manageShareTarget, setManageShareTarget] = useState<ShareTarget | null>(null);
   const [shareTargets, setShareTargets] = useState<DriveItem[]>([]);
   const [shareEmail, setShareEmail] = useState("");
   const [sharePermission, setSharePermission] = useState<"viewer" | "editor">("viewer");
   const [sharing, setSharing] = useState(false);
-  const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [previewTarget, setPreviewTarget] = useState<PreviewFile | null>(null);
   // Only OS/browser file drags activate the upload overlay. Internal Drive drags
   // must never wash out the whole interface.
@@ -153,7 +145,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [moveDestinationLoading, setMoveDestinationLoading] = useState(false);
   const [moveDestinationError, setMoveDestinationError] = useState<string | null>(null);
   const [isMovingItems, setIsMovingItems] = useState(false);
-  const [isDuplicatingItems, setIsDuplicatingItems] = useState(false);
   const [dropTargetFolderId, setDropTargetFolderId] = useState<number | null>(null);
   const [breadcrumbDropTargetIndex, setBreadcrumbDropTargetIndex] = useState<number | null>(null);
   const { enqueue, openManager } = useUploadManager();
@@ -169,6 +160,18 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     toggleItem,
     handleMarqueePointerDown,
   } = useDriveSelection({ items: driveItems, sortedItems, containerRef: driveListRef });
+
+  // Gom các thao tác thay đổi file/thư mục vào một hook theo cùng trách nhiệm nghiệp vụ.
+  const {
+    renameTarget, setRenameTarget, openRenameDialog, handleRenamed,
+    isDuplicatingItems, duplicateItems, restoreItems, toggleStar,
+    pendingDestructive, setPendingDestructive, applyDestructiveAction,
+  } = useDriveItemActions({
+    title, listView, currentFolderId,
+    clearSelection, clearSelectedIds, setDriveItems,
+    notifyFolderTreeChanged, loadItems, postItemAction,
+    canManageItemsInDrive, setToast,
+  });
 
   const updateScrollMetrics = useCallback(() => {
     const container = driveListRef.current;
@@ -367,7 +370,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
     window.addEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
     return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
-  }, [currentFolderId, listView, loadItems, router, clearSelection, searchQueryRef, setSearchQuery, setFolderDetails]);
+  }, [currentFolderId, listView, loadItems, router, clearSelection, searchQueryRef, setSearchQuery, setFolderDetails, setRenameTarget]);
 
   useEffect(() => {
     function handleUploadCompleted(event: Event) {
@@ -818,70 +821,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     }
   }
 
-  async function duplicateItems(targets: DriveItem[]) {
-    if (!targets.length || isDuplicatingItems) return;
-    if (!canManageItemsInDrive("Duplicate")) return;
-    setIsDuplicatingItems(true);
-    try {
-      const result = await postItemAction("/drive/api/items/duplicate/", targets);
-      clearSelectedIds();
-      notifyFolderTreeChanged();
-      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
-      setToast(result.detail || "Duplicate created successfully.");
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not duplicate selected items.");
-    } finally {
-      setIsDuplicatingItems(false);
-    }
-  }
-
-  async function restoreItems(targets: DriveItem[]) {
-    if (!targets.length) return;
-    try {
-      const result = await postItemAction("/drive/api/items/restore/", targets);
-      clearSelectedIds();
-      notifyFolderTreeChanged();
-      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
-      setToast(result.detail || "Items restored successfully.");
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not restore selected items.");
-    }
-  }
-
-  async function applyDestructiveAction(pending: PendingDestructiveAction) {
-    const path = pending.action === "trash"
-      ? "/drive/api/items/trash/"
-      : "/drive/api/items/delete/";
-    try {
-      const result = await postItemAction(path, pending.targets);
-      clearSelection();
-      notifyFolderTreeChanged();
-      if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
-      setToast(result.detail || (pending.action === "trash" ? "Moved to Trash." : "Permanently deleted."));
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "The file operation failed. No success was reported.");
-    }
-  }
-
-  async function toggleStar(targets: DriveItem[], desired?: boolean) {
-    if (!targets.length) return;
-    const shouldStar = desired ?? !targets.every((item) => item.starred);
-    try {
-      const result = await postItemAction("/drive/api/items/star/", targets, { starred: shouldStar });
-      setDriveItems((current) => current.map((item) => {
-        const target = targets.some((selected) => selected.id === item.id && selected.type === item.type);
-        return target ? { ...item, starred: shouldStar } : item;
-      }));
-      clearSelectedIds();
-      if (listView && listView !== "drive") {
-        await loadItems(null, listView);
-      }
-      setToast(result.detail || (shouldStar ? "Added to Starred." : "Removed from Starred."));
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not update Starred.");
-    }
-  }
-
   function openShareDialog(targets: DriveItem[]) {
     if (!targets.length) {
       setToast("Select at least one item to share.");
@@ -929,13 +868,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     if (action === "Open" && item) {
       openItem(item);
     } else if (action === "Rename") {
-      if (targets.length !== 1 || targets[0].canManage === false || title === "Trash") return;
-      const target = targets[0];
-      setRenameTarget({
-        kind: target.type === "folder" ? "folder" : "file",
-        id: target.type === "folder" ? (target.folderId ?? Math.abs(target.id)) : target.id,
-        name: target.name,
-      });
+      openRenameDialog(targets);
     } else if (action === "Download") {
       void downloadItems(targets);
     } else if (action === "Move") {
@@ -1559,15 +1492,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       <RenameDialog
         target={renameTarget}
         onClose={() => setRenameTarget(null)}
-        onRenamed={(result: RenameResult) => {
-          setRenameTarget(null);
-          clearSelectedIds();
-          if (result.changed) {
-            setToast(result.detail);
-            notifyFolderTreeChanged();
-            if (listView) void loadItems(listView === "drive" ? currentFolderId : null, listView);
-          }
-        }}
+        onRenamed={handleRenamed}
       />
       <FilePreviewDialog
         file={previewTarget}
