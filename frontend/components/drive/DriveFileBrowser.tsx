@@ -19,16 +19,10 @@ import ShareManagementDialog from "@/components/drive/ShareManagementDialog";
 import { type ShareTarget } from "@/lib/share-service";
 import { canOpenShareManagement } from "@/lib/share-policy";
 import FilePreviewDialog, { type PreviewFile } from "@/components/drive/FilePreviewDialog";
-import DriveNewMenu, {
-  DRIVE_CREATE_FOLDER_EVENT,
-  DRIVE_UPLOAD_FILES_EVENT,
-  DRIVE_UPLOAD_FOLDER_EVENT,
-} from "@/components/drive/DriveNewMenu";
-import { DRIVE_UPLOAD_COMPLETED_EVENT, useUploadManager } from "@/components/drive/UploadManager";
+import DriveNewMenu, { DRIVE_CREATE_FOLDER_EVENT } from "@/components/drive/DriveNewMenu";
 import {
   downloadDriveFile,
   downloadDriveFolder,
-  getDriveItems,
   type DownloadProgress,
 } from "@/lib/drive-service";
 import {
@@ -39,10 +33,6 @@ import { isDownloadSelectionSupported } from "@/lib/drive-download-policy";
 import type { DriveItem } from "./browser/types";
 import { listViewForTitle } from "./browser/drive-display-utils";
 import useDriveItems from "./browser/useDriveItems";
-import {
-  MAX_UPLOAD_FILES_PER_BATCH, getDroppedEntry, readDroppedEntry,
-  validateUploadPath, type DroppedEntry,
-} from "./browser/drive-upload-utils";
 import DriveGrid from "./browser/DriveGrid";
 import DriveListTable from "./browser/DriveListTable";
 import DriveActionToolbar from "./browser/DriveActionToolbar";
@@ -52,7 +42,7 @@ import DriveShareDialog from "./browser/DriveShareDialog";
 import useDriveSelection from "./browser/useDriveSelection";
 import useDriveItemActions from "./browser/useDriveItemActions";
 import useDriveFileOperations from "./browser/useDriveFileOperations";
-import { ITEM_DRAG_TYPE } from "./browser/drive-move-utils";
+import useDriveUploadIntake from "./browser/useDriveUploadIntake";
 import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 
 type ViewMode = "list" | "grid";
@@ -121,9 +111,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   // Only OS/browser file drags activate the upload overlay. Internal Drive drags
   // must never wash out the whole interface.
   const [fileDropActive, setFileDropActive] = useState(false);
-  const [dragMessage, setDragMessage] = useState("Drop files to upload");
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
   const driveListRef = useRef<HTMLDivElement>(null);
   const scrollbarTrackRef = useRef<HTMLDivElement>(null);
   const scrollbarDragRef = useRef<ScrollbarDrag>(null);
@@ -133,8 +120,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     scrollHeight: 0,
     trackTop: 0,
   });
-  const pasteHandlerRef = useRef<(files: readonly { file: File; relativePath: string }[]) => void>(() => {});
-  const { enqueue, openManager } = useUploadManager();
 
   const {
     selectedIds,
@@ -174,6 +159,15 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     selectedIds, selectedItems, setFileDropActive,
     clearSelectedIds, notifyFolderTreeChanged, loadItems,
     postItemAction, canManageItemsInDrive, setToast,
+  });
+
+  // Nhận dữ liệu từ máy người dùng; thao tác Move nội bộ vẫn do useDriveFileOperations phụ trách.
+  const {
+    fileInputRef, folderInputRef, dragMessage,
+    handleSelectedFiles, handleDragEnter, handleDragLeave, handleDragOver, handleDrop,
+  } = useDriveUploadIntake({
+    currentFolderId, listView, loadItems, setToast, setFileDropActive,
+    setDropTargetFolderId, autoScrollDuringInternalDrag,
   });
 
   const updateScrollMetrics = useCallback(() => {
@@ -375,150 +369,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
   }, [currentFolderId, listView, loadItems, router, clearSelection, searchQueryRef, setSearchQuery, setFolderDetails, setRenameTarget]);
 
-  useEffect(() => {
-    function handleUploadCompleted(event: Event) {
-      const detail = (event as CustomEvent<{ destinationId: string | null }>).detail;
-      if (!detail || !listView) return;
-
-      // Quota and the sidebar folder tree are cached summaries. Invalidate them
-      // after every completed upload, even when the upload target is elsewhere.
-      window.dispatchEvent(new Event(FOLDER_TREE_REFRESH_EVENT));
-      if (listView === "drive") {
-        const currentDestinationId = currentFolderId === null ? null : String(currentFolderId);
-        if (detail.destinationId !== currentDestinationId) return;
-        void loadItems(currentFolderId, "drive");
-        return;
-      }
-
-      // Newly uploaded files can appear immediately in Recent as well.
-      if (listView === "recent") {
-        void loadItems(null, "recent");
-      }
-    }
-
-    window.addEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, handleUploadCompleted);
-    return () => window.removeEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, handleUploadCompleted);
-  }, [currentFolderId, listView, loadItems]);
-
   const selectedCanManage = selectedItems.length > 0 && selectedItems.every((item) => item.canManage !== false);
   const selectedCanShare = selectedItems.length > 0 && canOpenShareManagement(selectedItems);
-
-  const addUploadFiles = useCallback(async (files: readonly { file: File; relativePath: string }[]) => {
-    if (files.length === 0) {
-      setToast("No files were provided by the browser. Folder access may have been denied.");
-      return;
-    }
-    if (files.length > MAX_UPLOAD_FILES_PER_BATCH) {
-      setToast(`A batch can contain at most ${MAX_UPLOAD_FILES_PER_BATCH} files. None of this selection was added.`);
-      return;
-    }
-
-    const baseDestinationId = currentFolderId !== null ? String(currentFolderId) : null;
-    const normalizedFiles = files.map(({ file, relativePath }) => {
-      const normalizedPath = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
-      return {
-        file,
-        relativePath: normalizedPath,
-        validationError: validateUploadPath(normalizedPath, file),
-      };
-    });
-
-    // Folder paths shown in the queue must correspond to real Folder rows. Resolve each
-    // parent path first, then attach that folder's ID to the individual upload task.
-    const folderIdsByPath = new Map<string, string>();
-    const createdOrReusedFolderIds = new Set<string>();
-    const ensureFolder = async (name: string, parentId: string | null): Promise<string> => {
-      const cacheKey = `${parentId ?? "root"}::${name.toLocaleLowerCase()}`;
-      const cached = folderIdsByPath.get(cacheKey);
-      if (cached) return cached;
-
-      // Reuse a same-named folder if it already exists under this parent.
-      const siblings = await getDriveItems(parentId === null ? null : Number(parentId), "drive");
-      const existing = siblings.find((item) =>
-        item.type === "folder" && item.name.localeCompare(name, undefined, { sensitivity: "accent" }) === 0,
-      );
-      if (existing) {
-        const id = String(existing.folderId ?? existing.id);
-        folderIdsByPath.set(cacheKey, id);
-        return id;
-      }
-
-      const created = await requestAccountApi<{
-        id: number;
-        name: string;
-        parent_id: number | null;
-        type: "folder";
-      }>("/drive/api/folders/", {
-        method: "POST",
-        headers: await accountCsrfHeaders(),
-        body: JSON.stringify({ name, parent_id: parentId === null ? null : Number(parentId) }),
-      });
-      const id = String(created.id);
-      folderIdsByPath.set(cacheKey, id);
-      createdOrReusedFolderIds.add(id);
-      return id;
-    };
-
-    try {
-      const queuedFiles: Array<typeof normalizedFiles[number] & { destinationId: string | null }> = [];
-      // Resolve paths sequentially so two files sharing a new parent folder cannot race
-      // and create duplicate folder rows before the in-memory cache is populated.
-      for (const entry of normalizedFiles) {
-        // Invalid entries remain visible as failed/invalid queue items but must not cause
-        // folder creation with unsafe path segments.
-        if (entry.validationError) {
-          queuedFiles.push({ ...entry, destinationId: baseDestinationId });
-          continue;
-        }
-
-        const segments = entry.relativePath.split("/");
-        let destinationId = baseDestinationId;
-        const directorySegments = segments.slice(0, -1);
-        for (const segment of directorySegments) {
-          if (!segment || segment === "." || segment === "..") {
-            throw new Error(`Invalid folder path in "${entry.relativePath}". No upload tasks were added.`);
-          }
-          destinationId = await ensureFolder(segment, destinationId);
-        }
-        queuedFiles.push({ ...entry, destinationId });
-      }
-
-      enqueue(queuedFiles.map(({ file, relativePath, validationError, destinationId }) => ({
-        file,
-        relativePath,
-        validationError,
-        destinationId,
-      })), baseDestinationId);
-      if (createdOrReusedFolderIds.size > 0) {
-        notifyFolderTreeChanged();
-        if (listView === "drive") await loadItems(currentFolderId, "drive");
-      }
-      openManager();
-    } catch (error) {
-      setToast(error instanceof Error
-        ? `Could not prepare the folder structure. No files were queued. ${error.message}`
-        : "Could not prepare the folder structure. No files were queued.");
-    }
-  }, [currentFolderId, enqueue, listView, loadItems, openManager]);
-
-  function handleSelectedFiles(fileList: FileList | null) {
-    if (!fileList) return;
-    const selected = Array.from(fileList).map((file) => ({
-      file,
-      relativePath: file.webkitRelativePath || file.name,
-    }));
-    void addUploadFiles(selected);
-  }
-
-  function openFolderPicker() {
-    const input = folderInputRef.current;
-    if (!input) return;
-    if (!("webkitdirectory" in input)) {
-      setToast("Folder selection isn't supported by this browser. Use Upload files and select files individually.");
-      return;
-    }
-    input.click();
-  }
 
   async function handleCreateFolder() {
     const trimmedName = newFolderName.trim();
@@ -572,75 +424,20 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     }
   }
 
+  // Tạo thư mục thủ công là thao tác nghiệp vụ riêng, không thuộc hàng đợi Upload.
   useEffect(() => {
-    function onUploadFiles() {
-      fileInputRef.current?.click();
-    }
-    function onUploadFolder() {
-      openFolderPicker();
-    }
     function onCreateFolder() {
       if (title !== "My Drive") {
         setToast("Creating folders is only available in My Drive.");
         return;
       }
-
       setNewFolderName("Untitled folder");
       setFolderNameError("");
       setIsCreateFolderOpen(true);
     }
-    function onFilePickerCancel() {
-      setToast("File selection canceled. Nothing was added to the queue.");
-    }
-
-    window.addEventListener(DRIVE_UPLOAD_FILES_EVENT, onUploadFiles);
-    window.addEventListener(DRIVE_UPLOAD_FOLDER_EVENT, onUploadFolder);
     window.addEventListener(DRIVE_CREATE_FOLDER_EVENT, onCreateFolder);
-    const fileInput = fileInputRef.current;
-    const folderInput = folderInputRef.current;
-    fileInput?.addEventListener("cancel", onFilePickerCancel);
-    folderInput?.addEventListener("cancel", onFilePickerCancel);
-    return () => {
-      window.removeEventListener(DRIVE_UPLOAD_FILES_EVENT, onUploadFiles);
-      window.removeEventListener(DRIVE_UPLOAD_FOLDER_EVENT, onUploadFolder);
-      window.removeEventListener(DRIVE_CREATE_FOLDER_EVENT, onCreateFolder);
-      fileInput?.removeEventListener("cancel", onFilePickerCancel);
-      folderInput?.removeEventListener("cancel", onFilePickerCancel);
-    };
+    return () => window.removeEventListener(DRIVE_CREATE_FOLDER_EVENT, onCreateFolder);
   }, [title]);
-
-  // Keep the latest queue handler available to the global paste listener without
-  // reinstalling the listener on every render.
-  useEffect(() => {
-    pasteHandlerRef.current = addUploadFiles;
-  }, [addUploadFiles]);
-
-  useEffect(() => {
-    function onPaste(event: ClipboardEvent) {
-      const target = event.target;
-      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) {
-        return;
-      }
-      const transfer = event.clipboardData;
-      if (!transfer) return;
-      const fromFiles = Array.from(transfer.files ?? []);
-      const fromItems = Array.from(transfer.items ?? [])
-        .filter((item) => item.kind === "file")
-        .map((item) => item.getAsFile())
-        .filter((file): file is File => file !== null);
-      // The FileList is the canonical collection. Some browsers expose the same
-      // clipboard payload through both properties; do not double-enqueue it.
-      const files = fromFiles.length ? fromFiles : fromItems;
-      // Do not interfere with normal text paste if the browser doesn't expose files.
-      if (!files.length) return;
-      event.preventDefault();
-      pasteHandlerRef.current(files.map((file) => ({ file, relativePath: file.name })));
-      setToast(`${files.length} file${files.length === 1 ? "" : "s"} pasted from clipboard and added to uploads.`);
-    }
-
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  }, []);
 
   function showNotConnected(action: string) {
     setToast(`${action} isn't connected yet. No files were changed.`);
@@ -853,80 +650,6 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       });
     }
     return actions;
-  }
-
-  function handleDragEnter(event: React.DragEvent<HTMLElement>) {
-    const types = Array.from(event.dataTransfer.types);
-    if (types.includes(ITEM_DRAG_TYPE)) {
-      // Allow the drop target to receive an internal item without covering the UI.
-      event.preventDefault();
-      return;
-    }
-    if (!types.includes("Files")) return;
-
-    event.preventDefault();
-    const hasDirectory = Array.from(event.dataTransfer.items).some(
-      (item) => getDroppedEntry(item)?.isDirectory,
-    );
-    setDragMessage(hasDirectory ? "Drop folder to prepare files" : "Drop files to upload");
-    setFileDropActive(true);
-  }
-
-  function handleDragLeave(event: React.DragEvent<HTMLElement>) {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-    setFileDropActive(false);
-  }
-
-  function handleDragOver(event: React.DragEvent<HTMLElement>) {
-    const types = Array.from(event.dataTransfer.types);
-    if (types.includes(ITEM_DRAG_TYPE)) {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      autoScrollDuringInternalDrag(event);
-      return;
-    }
-    if (!types.includes("Files")) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    setFileDropActive(true);
-  }
-
-  async function handleDrop(event: React.DragEvent<HTMLElement>) {
-    const types = Array.from(event.dataTransfer.types);
-    if (!types.includes(ITEM_DRAG_TYPE) && !types.includes("Files")) {
-      event.preventDefault();
-      setFileDropActive(false);
-      setToast("This item type cannot be added to the upload queue.");
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    setFileDropActive(false);
-    if (types.includes(ITEM_DRAG_TYPE)) {
-      setDropTargetFolderId(null);
-      setToast("To move Drive items, drop them onto a folder or use Move to choose a destination.");
-      return;
-    }
-
-    const entries = Array.from(event.dataTransfer.items)
-      .filter((item) => item.kind === "file")
-      .map(getDroppedEntry);
-    const hasDirectory = entries.some((entry) => entry?.isDirectory);
-    try {
-      const readableEntries = entries.filter((entry): entry is DroppedEntry => entry !== null);
-      const droppedFiles = readableEntries.length
-        ? (await Promise.all(readableEntries.map(readDroppedEntry))).flat()
-        : Array.from(event.dataTransfer.files).map((file) => ({ file, relativePath: file.name }));
-      if (hasDirectory && droppedFiles.length === 0) {
-        setToast("The browser didn't grant access to the dropped folder. Try Upload folder or select files instead.");
-        return;
-      }
-      await addUploadFiles(droppedFiles);
-    } catch (error) {
-      setToast(error instanceof Error
-        ? `${error.message} No files were added.`
-        : "The browser couldn't read the dropped files. No files were added.");
-    }
   }
 
   const folderPath = [

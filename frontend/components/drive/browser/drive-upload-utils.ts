@@ -59,3 +59,16 @@ export function validateUploadPath(path: string, file: File): string | null {
   return null;
 }
 
+
+/** Phân biệt kéo thả nội bộ (Move) và file từ hệ điều hành (Upload). */
+export function getDriveDropKind(types: Iterable<string>, internalType: string): "internal" | "files" | "unsupported" {
+  const values = Array.from(types);
+  if (values.includes(internalType)) return "internal";
+  if (values.includes("Files")) return "files";
+  return "unsupported";
+}
+
+/** Chọn FileList làm nguồn chuẩn để không thêm trùng file do trình duyệt báo cả files và items. */
+export function preferClipboardFileList<T>(files: readonly T[], itemFiles: readonly T[]): readonly T[] {
+  return files.length ? files : itemFiles;
+}
