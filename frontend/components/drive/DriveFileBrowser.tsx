@@ -314,7 +314,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       void loadItems(listView === "drive" && !initialQuery ? currentFolderId : null, listView, initialQuery);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [listView, currentFolderId, loadItems]);
+  }, [listView, currentFolderId, loadItems, searchQueryRef, setSearchQuery]);
 
   useEffect(() => {
     const handleSearchChanged = (event: Event) => {
@@ -344,7 +344,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       window.removeEventListener(DRIVE_SEARCH_CHANGED_EVENT, handleSearchChanged);
       window.removeEventListener("popstate", handleHistoryNavigation);
     };
-  }, [currentFolderId, listView, loadItems, clearSelection]);
+  }, [currentFolderId, listView, loadItems, clearSelection, searchQueryRef, setSearchQuery, setFolderDetails]);
 
   useEffect(() => {
     function handleWorkspaceChanged() {
@@ -367,7 +367,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
     window.addEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
     return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
-  }, [currentFolderId, listView, loadItems, router, clearSelection]);
+  }, [currentFolderId, listView, loadItems, router, clearSelection, searchQueryRef, setSearchQuery, setFolderDetails]);
 
   useEffect(() => {
     function handleUploadCompleted(event: Event) {
