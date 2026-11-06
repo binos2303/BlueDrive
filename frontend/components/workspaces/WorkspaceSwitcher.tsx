@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   LogIn,
   Plus,
+  Users,
 } from "lucide-react";
 import { useAccount } from "@/components/account/AccountProvider";
 import Dialog from "@/components/ui/Dialog";
@@ -312,6 +313,21 @@ export default function WorkspaceSwitcher() {
                     </span>
                     {active && <Check size={13} className="shrink-0 text-brand-contrast" />}
                   </button>
+                  {workspace.canManage && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        activateWorkspace(workspace, false);
+                        window.dispatchEvent(new Event(FOLDER_TREE_REFRESH_EVENT));
+                        router.push(`/drive/workspaces/${encodeURIComponent(workspace.id)}/members`);
+                      }}
+                      aria-label={`Manage ${workspace.name} members`}
+                      title="Manage workspace members"
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface hover:text-brand-contrast"
+                    >
+                      <Users size={13} />
+                    </button>
+                  )}
                   {workspace.canManage && (
                     <button
                       type="button"

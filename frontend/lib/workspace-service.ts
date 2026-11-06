@@ -132,3 +132,51 @@ export async function getWorkspaceActivity(workspaceId: string): Promise<Workspa
   );
   return result.events;
 }
+
+export type WorkspaceMember = {
+  assignmentId: string;
+  membershipId: string;
+  userId: number;
+  username: string;
+  email: string;
+  organizationRole: "owner" | "admin" | "member";
+  workspaceRole: WorkspaceRole;
+  status: "active";
+  isSelf: boolean;
+  isProtected: boolean;
+};
+
+export type WorkspaceMembersResult = {
+  workspaceId: string;
+  workspaceName: string;
+  members: WorkspaceMember[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasNext: boolean;
+};
+
+export function getWorkspaceMembersPage(workspaceId: string, page = 1): Promise<WorkspaceMembersResult> {
+  const query = new URLSearchParams({ page: String(page), page_size: "20" });
+  return requestAccountApi<WorkspaceMembersResult>(
+    `/accounts/api/workspaces/${encodeURIComponent(workspaceId)}/members/?${query}`,
+  );
+}
+
+export async function changeWorkspaceMemberRole(workspaceId: string, assignmentId: string, role: WorkspaceRole) {
+  return requestAccountApi<{ member: WorkspaceMember; changed: boolean }>(
+    `/accounts/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(assignmentId)}/`,
+    {
+      method: "PATCH",
+      headers: await accountCsrfHeaders(),
+      body: JSON.stringify({ role }),
+    },
+  );
+}
+
+export async function revokeWorkspaceMember(workspaceId: string, assignmentId: string): Promise<void> {
+  return requestAccountApi<void>(
+    `/accounts/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(assignmentId)}/`,
+    { method: "DELETE", headers: await accountCsrfHeaders() },
+  );
+}

@@ -428,6 +428,171 @@ def workspace_member_detail_view(request, tenant_id, workspace_id, membership_id
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+
+# Unified, workspace-ID-based member management for personal SaaS and business
+# workspaces. Organization-specific routes above remain backward-compatible.
+def _managed_workspace(request, workspace_id):
+    workspace = Workspace.objects.select_related("tenant").filter(
+        pk=workspace_id,
+        tenant__status=Tenant.Status.ACTIVE,
+        status=Workspace.Status.ACTIVE,
+    ).first()
+    if workspace is None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
+        return None, Response({"detail": "Workspace is unavailable."}, status=404)
+    if active_membership(request.user, workspace.tenant_id) is None or not can_access_workspace(request.user, workspace):
+        return None, Response({"detail": "Workspace is unavailable."}, status=404)
+    if not can_manage_workspace(request.user, workspace):
+        return None, Response({"detail": "Workspace manager access is required."}, status=403)
+    return workspace, None
+
+
+def _serialize_managed_member(assignment, viewer):
+    member = assignment.membership
+    protected = member.role in ADMIN_ROLES
+    return {
+        "assignmentId": str(assignment.pk),
+        "membershipId": str(member.pk),
+        "userId": member.user_id,
+        "username": member.user.get_username(),
+        "email": member.user.email,
+        "organizationRole": member.role,
+        "workspaceRole": WorkspaceMembership.Role.ADMIN if protected else assignment.role,
+        "status": assignment.status,
+        "isSelf": member.user_id == viewer.pk,
+        "isProtected": protected,
+    }
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def my_workspace_members_view(request, workspace_id):
+    workspace, error = _managed_workspace(request, workspace_id)
+    if error is not None:
+        return error
+    try:
+        page = int(request.query_params.get("page", "1"))
+        size = int(request.query_params.get("page_size", "20"))
+    except (TypeError, ValueError):
+        return Response({"detail": "page and page_size must be positive integers."}, status=400)
+    if page < 1 or not 1 <= size <= 50:
+        return Response({"detail": "page must be positive and page_size must be 1–50."}, status=400)
+    rows = WorkspaceMembership.objects.filter(
+        workspace=workspace,
+        status=WorkspaceMembership.Status.ACTIVE,
+        membership__status=Membership.Status.ACTIVE,
+        membership__user__is_active=True,
+    ).select_related("membership__user").order_by("membership__user__username", "pk")
+    total = rows.count()
+    start = (page - 1) * size
+    members = [_serialize_managed_member(row, request.user) for row in rows[start:start + size]]
+    result = Response({
+        "workspaceId": str(workspace.pk),
+        "workspaceName": workspace.name,
+        "members": members,
+        "total": total,
+        "page": page,
+        "pageSize": size,
+        "hasNext": start + size < total,
+    })
+    result["Cache-Control"] = "private, no-store"
+    return result
+
+
+def _can_remove_workspace_admin(workspace, assignment):
+    """Require another effective manager if the assignment is the last admin."""
+    if assignment.role != WorkspaceMembership.Role.ADMIN:
+        return True
+    active_tenant_managers = Membership.objects.filter(
+        tenant=workspace.tenant,
+        role__in=ADMIN_ROLES,
+        status=Membership.Status.ACTIVE,
+        user__is_active=True,
+    ).exists()
+    if active_tenant_managers:
+        return True
+    return WorkspaceMembership.objects.filter(
+        workspace=workspace,
+        role=WorkspaceMembership.Role.ADMIN,
+        status=WorkspaceMembership.Status.ACTIVE,
+        membership__status=Membership.Status.ACTIVE,
+        membership__user__is_active=True,
+    ).exclude(pk=assignment.pk).exists()
+
+
+@api_view(["PATCH", "DELETE"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def my_workspace_member_detail_view(request, workspace_id, assignment_id):
+    # Validate the payload before any mutation to avoid confusing partial writes.
+    if request.method == "PATCH":
+        data = request.data
+        if not isinstance(data, dict) or set(data) != {"role"}:
+            return Response({"detail": "Only role is accepted."}, status=400)
+        role = data.get("role")
+        if role not in WORKSPACE_ROLES:
+            return Response({"detail": "Role must be admin, editor or viewer."}, status=400)
+    else:
+        role = None
+
+    # All member mutations through this API serialize on the Workspace row,
+    # keeping last-manager checks correct under concurrent requests.
+    with transaction.atomic():
+        workspace = Workspace.objects.select_for_update(of=("self",)).select_related("tenant").filter(
+            pk=workspace_id,
+            tenant__status=Tenant.Status.ACTIVE,
+            status=Workspace.Status.ACTIVE,
+        ).first()
+        if workspace is None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
+            return Response({"detail": "Workspace is unavailable."}, status=404)
+        if active_membership(request.user, workspace.tenant_id) is None or not can_access_workspace(request.user, workspace):
+            return Response({"detail": "Workspace is unavailable."}, status=404)
+        if not can_manage_workspace(request.user, workspace):
+            return Response({"detail": "Workspace manager access is required."}, status=403)
+        assignment = WorkspaceMembership.objects.select_for_update(of=("self",)).select_related(
+            "membership", "membership__user"
+        ).filter(
+            pk=assignment_id,
+            workspace=workspace,
+            status=WorkspaceMembership.Status.ACTIVE,
+            membership__status=Membership.Status.ACTIVE,
+            membership__user__is_active=True,
+        ).first()
+        if assignment is None:
+            return Response({"detail": "Active workspace member not found."}, status=404)
+        if assignment.membership.user_id == request.user.pk:
+            return Response({"detail": "You cannot change or revoke your own workspace access."}, status=409)
+        if assignment.membership.role in ADMIN_ROLES:
+            return Response({"detail": "Organization owners and administrators must be managed at organization level."}, status=403)
+        if request.method == "PATCH":
+            if role == assignment.role:
+                return Response({"member": _serialize_managed_member(assignment, request.user), "changed": False})
+            if not _can_remove_workspace_admin(workspace, assignment):
+                return Response({"detail": "The workspace must retain at least one manager."}, status=409)
+            old_role = assignment.role
+            assignment.role = role
+            assignment.save(update_fields=["role", "updated_at"])
+            _audit(
+                request, workspace.tenant, ActivityLog.Action.ADD_WORKSPACE_MEMBER,
+                f"Changed {assignment.membership.user.get_username()} from {old_role} to {role} in {workspace.name}",
+                workspace_id=str(workspace.pk), membership_id=str(assignment.membership_id),
+                operation="role_changed", previous_role=old_role, role=role,
+            )
+            return Response({"member": _serialize_managed_member(assignment, request.user), "changed": True})
+
+        if not _can_remove_workspace_admin(workspace, assignment):
+            return Response({"detail": "The workspace must retain at least one manager."}, status=409)
+        assignment.status = WorkspaceMembership.Status.REVOKED
+        assignment.save(update_fields=["status", "updated_at"])
+        _audit(
+            request, workspace.tenant, ActivityLog.Action.REMOVE_WORKSPACE_MEMBER,
+            f"Removed {assignment.membership.user.get_username()} from workspace {workspace.name}",
+            workspace_id=str(workspace.pk), membership_id=str(assignment.membership_id),
+            operation="revoked", previous_role=assignment.role,
+        )
+    return Response(status=204)
+
+
 # Personal SaaS workspace lifecycle. These routes use a workspace UUID as the
 # selector and then re-check the caller's tenant membership and workspace role.
 @api_view(["GET", "POST"])

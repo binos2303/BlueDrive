@@ -52,6 +52,16 @@ urlpatterns = [
         name="api-my-workspace-detail",
     ),
     path(
+        "api/workspaces/<uuid:workspace_id>/members/",
+        workspace_api.my_workspace_members_view,
+        name="api-my-workspace-members",
+    ),
+    path(
+        "api/workspaces/<uuid:workspace_id>/members/<uuid:assignment_id>/",
+        workspace_api.my_workspace_member_detail_view,
+        name="api-my-workspace-member-detail",
+    ),
+    path(
         "api/workspaces/<uuid:workspace_id>/invites/",
         workspace_api.create_workspace_invite_view,
         name="api-create-workspace-invite",
