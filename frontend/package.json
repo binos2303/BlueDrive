@@ -17,7 +17,8 @@
     "test:admin-users": "node --experimental-strip-types --test lib/admin-user-query.test.mts",
     "test:admin-files": "node --experimental-strip-types --test lib/admin-file-policy.test.mts lib/admin-file-query.test.mts",
     "test:admin-permissions": "node --experimental-strip-types --test lib/admin-permissions-format.test.mts",
-    "test:admin-teams": "node --experimental-strip-types --test lib/admin-teams-query.test.mts"
+    "test:admin-teams": "node --experimental-strip-types --test lib/admin-teams-query.test.mts",
+    "test:admin-settings": "node --experimental-strip-types --test lib/admin-settings-policy.test.mts"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",

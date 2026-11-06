@@ -401,6 +401,22 @@ class TrackedAccountSession(models.Model):
         ]
 
 
+class PlatformConsoleSettings(models.Model):
+    """Single persisted platform console label, never an authorization policy.
+
+    Security-critical runtime configuration remains in Django settings/env.
+    """
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    display_name = models.CharField(max_length=80, default="BlueDrive")
+    revision = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(id=1), name="platform_console_singleton_id"),
+        ]
+
+
 class PlatformAdminAuditEvent(models.Model):
     """Append-only through the platform administration API.
 
@@ -420,6 +436,7 @@ class PlatformAdminAuditEvent(models.Model):
         FILE_PURGE_REQUESTED = "file.purge.requested", "Request file purge"
         FILE_PURGE_SUCCEEDED = "file.purge.succeeded", "Complete file purge"
         FILE_PURGE_FAILED = "file.purge.failed", "File purge failed"
+        SETTINGS_UPDATE = "settings.update", "Update console settings"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     actor = models.ForeignKey(

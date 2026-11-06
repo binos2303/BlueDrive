@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import admin_api, admin_files_api, admin_logs_api, admin_permissions_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api
+from . import admin_api, admin_files_api, admin_logs_api, admin_permissions_api, admin_settings_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api
 
 
 urlpatterns = [
@@ -10,6 +10,7 @@ urlpatterns = [
     path("api/admin-invite/accept/", platform_admin_provisioning.accept_platform_administrator_invitation_view, name="api-admin-invite-accept"),
     path("api/admin/access/", admin_api.admin_access_view, name="api-admin-access"),
     path("api/admin/permissions/", admin_permissions_api.admin_permissions_view, name="api-admin-permissions"),
+    path("api/admin/settings/", admin_settings_api.admin_settings_view, name="api-admin-settings"),
     path("api/admin/users/", admin_api.admin_users_view, name="api-admin-users"),
     path("api/admin/files/", admin_files_api.admin_files_view, name="api-admin-files"),
     path("api/admin/files/<int:file_id>/", admin_files_api.admin_file_detail_view, name="api-admin-file-detail"),

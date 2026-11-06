@@ -5,13 +5,14 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity, Building2, ChevronDown, ChevronRight, Database, FileText, HardDrive,
-  LayoutDashboard, Menu, ShieldAlert, SunMoon, Users, Workflow, X,
+  LayoutDashboard, Menu, Settings2, ShieldAlert, SunMoon, Users, Workflow, X,
 } from "lucide-react";
 import { BrandLogo } from "@/components/ui/BrandLogo";
 import ContextMenu, { type ContextMenuAction } from "@/components/ui/ContextMenu";
 import Toast from "@/components/ui/Toast";
 import { useAccount } from "@/components/account/AccountProvider";
 import { readThemePreference, resolveTheme, setThemePreference } from "@/lib/theme";
+import { ADMIN_CONSOLE_NAME_UPDATED, getAdminSettings } from "@/lib/admin-settings-service";
 
 const groups = [
   {
@@ -40,6 +41,12 @@ const groups = [
       { title: "Storage & Quotas", href: "/admin/infrastructure/quotas", icon: Database },
     ],
   },
+  {
+    title: "System", icon: Settings2,
+    items: [
+      { title: "Settings", href: "/admin/settings", icon: Settings2 },
+    ],
+  },
 ] as const;
 
 const apiOrigin = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
@@ -60,6 +67,7 @@ export default function AdminConsole({ children }: { children: ReactNode }) {
   const router = useRouter();
   const { state, signOut, actionError, clearActionError } = useAccount();
   const [access, setAccess] = useState<Access | null>(null);
+  const [consoleName, setConsoleName] = useState("Platform console");
   const [error, setError] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -86,6 +94,25 @@ export default function AdminConsole({ children }: { children: ReactNode }) {
     });
     return () => controller.abort();
   }, [state.status, state.account]);
+
+  useEffect(() => {
+    if (!access?.allowed) return;
+    const controller = new AbortController();
+    getAdminSettings(controller.signal).then((result) => {
+      if (!controller.signal.aborted) setConsoleName(result.display_name);
+    }).catch(() => {
+      // Console remains usable when this optional display-label request fails.
+    });
+    function updated(event: Event) {
+      const name = (event as CustomEvent<unknown>).detail;
+      if (typeof name === "string") setConsoleName(name);
+    }
+    window.addEventListener(ADMIN_CONSOLE_NAME_UPDATED, updated);
+    return () => {
+      controller.abort();
+      window.removeEventListener(ADMIN_CONSOLE_NAME_UPDATED, updated);
+    };
+  }, [access?.allowed]);
 
   useEffect(() => {
     if (mobileOpen) mobileNav.current?.querySelector<HTMLAnchorElement>("a")?.focus();
@@ -158,7 +185,7 @@ export default function AdminConsole({ children }: { children: ReactNode }) {
       <header className="flex h-[72px] shrink-0 items-center gap-3 border-b border-border bg-surface/90 px-3 backdrop-blur-sm sm:px-6">
         <button ref={menuButton} type="button" aria-label="Open navigation" aria-controls="admin-navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen(true)} className="flex h-10 w-10 items-center justify-center rounded-xl text-muted hover:bg-brand-soft hover:text-brand-contrast lg:hidden"><Menu size={20} /></button>
         {/* Page titles live in AdminPageHeader, never in the global app bar. */}
-        <span className="truncate text-[13px] font-semibold text-muted sm:text-[14px]">Platform console</span>
+        <span className="truncate text-[13px] font-semibold text-muted sm:text-[14px]">{consoleName}</span>
         <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3">
           <button type="button" aria-label="Toggle light or dark theme" title="Toggle theme" onClick={toggleTheme} className="flex h-9 w-9 items-center justify-center rounded-xl text-muted hover:bg-brand-soft hover:text-brand-contrast"><SunMoon size={17} /></button>
           <ContextMenu
