@@ -42,7 +42,7 @@ const transitions: Record<UploadStatus, readonly UploadStatus[]> = {
   queued: ["preparing", "canceled", "failed"],
   preparing: ["uploading", "failed", "canceled"],
   uploading: ["paused", "verifying", "scanning", "completed", "failed", "canceled"],
-  paused: ["uploading", "failed", "canceled"],
+  paused: ["queued", "uploading", "failed", "canceled"],
   verifying: ["scanning", "completed", "failed", "canceled"],
   scanning: ["completed", "failed", "canceled"],
   completed: [],

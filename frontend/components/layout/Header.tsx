@@ -80,7 +80,7 @@ export default function Header({
     });
 
     return (
-        <header className="flex h-[72px] shrink-0 items-center gap-2 border-b border-border bg-surface/90 px-3 backdrop-blur-sm sm:gap-3 sm:px-6">
+        <header className="flex h-18 shrink-0 items-center gap-2 border-b border-border bg-surface/90 px-3 backdrop-blur-sm sm:gap-3 sm:px-6">
             <button
                 ref={menuButtonRef}
                 type="button"
@@ -88,12 +88,12 @@ export default function Header({
                 aria-controls="drive-navigation"
                 aria-expanded={mobileOpen}
                 onClick={onMenuClick}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-muted transition-colors duration-[var(--motion-fast)] hover:bg-brand-soft hover:text-brand-contrast lg:hidden"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-muted transition-colors duration-(--motion-fast) hover:bg-brand-soft hover:text-brand-contrast lg:hidden"
             >
                 <Menu size={20} />
             </button>
 
-            <form onSubmit={submitSearch} role="search" className="relative min-w-0 w-full max-w-[420px] flex-1">
+            <form onSubmit={submitSearch} role="search" className="relative min-w-0 w-full max-w-105 flex-1">
                 <Search
                     size={16}
                     strokeWidth={1.8}
@@ -141,7 +141,7 @@ export default function Header({
                 />
             </div>
             {actionError && (
-                <div className="fixed bottom-4 left-4 z-[80] w-[min(24rem,calc(100vw-2rem))]">
+                <div className="fixed bottom-4 left-4 z-80 w-[min(24rem,calc(100vw-2rem))]">
                     <Toast title="Account action failed" variant="error" onDismiss={clearActionError}>
                         {actionError}
                     </Toast>

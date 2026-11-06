@@ -52,7 +52,7 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
       });
       acceptAuthenticatedAccount(account);
       const next = new URLSearchParams(window.location.search).get("next");
-      router.replace(safeInternalRedirect(next));
+      router.replace(account.is_platform_admin ? "/admin" : (safeInternalRedirect(next).startsWith("/admin") ? "/drive" : safeInternalRedirect(next)));
     } catch (error) {
       if (error instanceof AccountServiceError) {
         setFieldErrors(error.fieldErrors);

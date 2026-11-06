@@ -86,3 +86,16 @@ test("duplicate paths are marked without choosing an overwrite policy", () => {
   assert.equal(b.duplicate, true);
   assert.equal(a.conflictResolution, null);
 });
+
+
+test("pause and resume preserve UploadSession and do not consume retry budget", () => {
+  let current = transitionTask(task(), "preparing");
+  current = transitionTask(current, "uploading", { uploadSessionId: "session-42" });
+  current = transitionTask(current, "paused");
+  assert.equal(current.uploadSessionId, "session-42");
+  current = transitionTask(current, "queued");
+  assert.equal(current.uploadSessionId, "session-42");
+  assert.equal(current.retryPolicy.retries, 0);
+  current = transitionTask(current, "preparing");
+  assert.equal(current.status, "preparing");
+});

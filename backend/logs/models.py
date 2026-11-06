@@ -27,6 +27,7 @@ class ActivityLog(models.Model):
         RESTORE_MEMBER = "RESTORE_MEMBER", "Restore tenant member"
         CREATE_WORKSPACE = "CREATE_WORKSPACE", "Create workspace"
         UPDATE_WORKSPACE = "UPDATE_WORKSPACE", "Update workspace"
+        # Legacy audit values remain readable after custom Group is removed.
         CREATE_GROUP = "CREATE_GROUP", "Create group"
         UPDATE_GROUP = "UPDATE_GROUP", "Update group"
         ADD_GROUP_MEMBER = "ADD_GROUP_MEMBER", "Add group member"

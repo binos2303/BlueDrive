@@ -32,6 +32,9 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ContextMenu, { type ContextMenuAction } from "@/components/ui/ContextMenu";
 import EmptyState from "@/components/shared/EmptyState";
 import Toast from "@/components/ui/Toast";
+import RenameDialog from "@/components/drive/RenameDialog";
+import FilePreviewDialog, { type PreviewFile } from "@/components/drive/FilePreviewDialog";
+import type { RenameTarget, RenameResult } from "@/lib/drive-service";
 import DriveNewMenu, {
   DRIVE_CREATE_FOLDER_EVENT,
   DRIVE_UPLOAD_FILES_EVENT,
@@ -40,6 +43,7 @@ import DriveNewMenu, {
 import { DRIVE_UPLOAD_COMPLETED_EVENT, useUploadManager } from "@/components/drive/UploadManager";
 import {
   downloadDriveFile,
+  downloadDriveFolder,
   getDriveFolderDetails,
   getDriveItems,
   type DriveFolderDetails,
@@ -50,6 +54,7 @@ import {
   accountCsrfHeaders,
   requestAccountApi,
 } from "@/lib/account-service";
+import { isDownloadSelectionSupported } from "@/lib/drive-download-policy";
 import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 
 type ViewMode = "list" | "grid";
@@ -229,6 +234,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [shareEmail, setShareEmail] = useState("");
   const [sharePermission, setSharePermission] = useState<"viewer" | "editor">("viewer");
   const [sharing, setSharing] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
+  const [previewTarget, setPreviewTarget] = useState<PreviewFile | null>(null);
   // Only OS/browser file drags activate the upload overlay. Internal Drive drags
   // must never wash out the whole interface.
   const [fileDropActive, setFileDropActive] = useState(false);
@@ -489,6 +496,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
   useEffect(() => {
     function handleWorkspaceChanged() {
+      setPreviewTarget(null);
+      setRenameTarget(null);
       searchQueryRef.current = "";
       setSearchQuery("");
       setSelectedIds(new Set());
@@ -1000,7 +1009,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
   function openItem(item: DriveItem) {
     if (item.type !== "folder") {
-      showNotConnected("Opening files");
+      setPreviewTarget({ id: item.id, name: item.name });
       return;
     }
     if (!Number.isSafeInteger(item.folderId) || !item.folderId || item.folderId <= 0) {
@@ -1274,6 +1283,14 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     const targets = actionTargets(item);
     if (action === "Open" && item) {
       openItem(item);
+    } else if (action === "Rename") {
+      if (targets.length !== 1 || targets[0].canManage === false || title === "Trash") return;
+      const target = targets[0];
+      setRenameTarget({
+        kind: target.type === "folder" ? "folder" : "file",
+        id: target.type === "folder" ? (target.folderId ?? Math.abs(target.id)) : target.id,
+        name: target.name,
+      });
     } else if (action === "Download") {
       void downloadItems(targets);
     } else if (action === "Move") {
@@ -1299,29 +1316,32 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     }
   }
 
-  async function downloadItems(targets: DriveItem[]) {
-    const files = targets.filter((target) => target.type !== "folder");
-    if (!files.length) {
-      setDownloadStatus({ text: "Failed: select a file to download.", progress: null });
+  async function downloadItems(targets: Pick<DriveItem, "id" | "folderId" | "name" | "type">[]) {
+    if (!targets.length) {
+      setDownloadStatus({ text: "Failed: select an item to download.", progress: null });
       return;
     }
-    if (files.length !== targets.length) {
-      setToast("Folders are not downloadable here. Downloading the selected files only.");
+    if (!isDownloadSelectionSupported(targets)) {
+      setToast("Select one folder at a time to download its ZIP. Mixed and multiple-folder downloads aren't supported yet.");
+      return;
     }
-    for (const file of files) {
-      setDownloadStatus({ text: `Preparing ${file.name}`, progress: null });
+    for (const target of targets) {
+      setDownloadStatus({ text: `Preparing ${target.name}`, progress: null });
       try {
         let latestProgress: DownloadProgress | null = null;
-        await downloadDriveFile(file.id, file.name, ({ loaded, total }) => {
+        const onProgress = ({ loaded, total }: DownloadProgress) => {
           latestProgress = { loaded, total };
           const amount = total ? ` ${Math.round((loaded / total) * 100)}%` : "";
-          setDownloadStatus({
-            text: `Downloading ${file.name}${amount}`,
-            progress: latestProgress,
-          });
-        });
+          setDownloadStatus({ text: `Downloading ${target.name}${amount}`, progress: latestProgress });
+        };
+        if (target.type === "folder") {
+          const folderId = target.folderId ?? Math.abs(target.id);
+          await downloadDriveFolder(folderId, target.name, onProgress);
+        } else {
+          await downloadDriveFile(target.id, target.name, onProgress);
+        }
         setDownloadStatus({
-          text: `Completed: ${file.name} received; browser save started.`,
+          text: `Completed: ${target.name} received; browser save started.`,
           progress: latestProgress,
         });
       } catch (error) {
@@ -2313,6 +2333,28 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           }}
         />
       )}
+
+      <RenameDialog
+        target={renameTarget}
+        onClose={() => setRenameTarget(null)}
+        onRenamed={(result: RenameResult) => {
+          setRenameTarget(null);
+          setSelectedIds(new Set());
+          if (result.changed) {
+            setToast(result.detail);
+            notifyFolderTreeChanged();
+            if (listView) void loadItems(listView === "drive" ? currentFolderId : null, listView);
+          }
+        }}
+      />
+      <FilePreviewDialog
+        file={previewTarget}
+        onClose={() => setPreviewTarget(null)}
+        onDownload={(file) => {
+          setPreviewTarget(null);
+          void downloadItems([{ id: file.id, name: file.name, type: "document" }]);
+        }}
+      />
 
       {shareDialogOpen && (
         <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sharing) setShareDialogOpen(false); }}>

@@ -29,12 +29,9 @@ from .access import (
     workspace_role_for_user,
 )
 from .models import (
-    Group,
-    GroupMembership,
     Membership,
     Tenant,
     Workspace,
-    WorkspaceGroupAccess,
     WorkspaceInvite,
     WorkspaceMembership,
 )
@@ -42,7 +39,6 @@ from .services import get_personal_tenant
 
 ADMIN_ROLES = (Membership.Role.OWNER, Membership.Role.ADMIN)
 WORKSPACE_ROLES = {choice for choice, _label in WorkspaceMembership.Role.choices}
-GROUP_ROLES = {choice for choice, _label in WorkspaceGroupAccess.Role.choices}
 
 
 def _tenant_context(request, tenant_id, *, require_admin=False):
@@ -170,27 +166,8 @@ def _serialize_workspace(workspace, user):
             status=WorkspaceMembership.Status.ACTIVE,
             membership__status=Membership.Status.ACTIVE,
         ).count(),
-        "groupCount": workspace.group_access_grants.filter(group__status=Group.Status.ACTIVE).count(),
         "createdAt": workspace.created_at,
         "updatedAt": workspace.updated_at,
-    }
-
-
-def _serialize_group(group):
-    return {
-        "id": str(group.pk),
-        "tenantId": str(group.tenant_id),
-        "name": group.name,
-        "description": group.description,
-        "status": group.status,
-        "memberCount": group.member_assignments.filter(
-            membership__status=Membership.Status.ACTIVE,
-        ).count(),
-        "workspaceCount": group.workspace_access_grants.filter(
-            workspace__status=Workspace.Status.ACTIVE,
-        ).count(),
-        "createdAt": group.created_at,
-        "updatedAt": group.updated_at,
     }
 
 
@@ -241,13 +218,6 @@ def workspaces_view(request, tenant_id):
                 WorkspaceMembership.objects.filter(
                     membership=actor_membership,
                     status=WorkspaceMembership.Status.ACTIVE,
-                    workspace__status=Workspace.Status.ACTIVE,
-                ).values_list("workspace_id", flat=True)
-            )
-            accessible_ids.update(
-                WorkspaceGroupAccess.objects.filter(
-                    group__member_assignments__membership=actor_membership,
-                    group__status=Group.Status.ACTIVE,
                     workspace__status=Workspace.Status.ACTIVE,
                 ).values_list("workspace_id", flat=True)
             )
@@ -454,289 +424,6 @@ def workspace_member_detail_view(request, tenant_id, workspace_id, membership_id
         f"Removed {assignment.membership.user.get_username()} from workspace {workspace.name}",
         workspace_id=str(workspace.pk),
         membership_id=str(assignment.membership_id),
-    )
-    return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-@api_view(["GET", "POST"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def groups_view(request, tenant_id):
-    tenant, _actor_membership, error = _tenant_context(
-        request, tenant_id, require_admin=True
-    )
-    if error:
-        return error
-    if request.method == "GET":
-        rows = Group.objects.filter(tenant=tenant).order_by("name")
-        return Response({"groups": [_serialize_group(row) for row in rows]})
-
-    data = request.data
-    if not isinstance(data, dict) or set(data) - {"name", "description"}:
-        return Response({"detail": "Only name and description are accepted."}, status=400)
-    name = data.get("name")
-    description = data.get("description", "")
-    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 255:
-        return Response({"detail": "Group name must contain 1–255 characters."}, status=400)
-    if not isinstance(description, str) or len(description) > 4000:
-        return Response({"detail": "Group description is invalid."}, status=400)
-    try:
-        with transaction.atomic():
-            group = Group.objects.create(
-                tenant=tenant,
-                name=name.strip(),
-                description=description.strip(),
-                created_by=request.user,
-            )
-            _audit(
-                request,
-                tenant,
-                ActivityLog.Action.CREATE_GROUP,
-                f"Created group: {group.name}",
-                group_id=str(group.pk),
-            )
-    except IntegrityError:
-        return Response({"detail": "A group with that name already exists."}, status=409)
-    return Response({"group": _serialize_group(group)}, status=201)
-
-
-@api_view(["PATCH"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def group_detail_view(request, tenant_id, group_id):
-    tenant, _actor_membership, error = _tenant_context(
-        request, tenant_id, require_admin=True
-    )
-    if error:
-        return error
-    group = Group.objects.filter(pk=group_id, tenant=tenant).first()
-    if group is None:
-        return Response({"detail": "Group is unavailable."}, status=404)
-    data = request.data
-    if not isinstance(data, dict) or not data or set(data) - {"name", "description", "status"}:
-        return Response({"detail": "Supported fields are name, description, and status."}, status=400)
-    if "name" in data:
-        name = data["name"]
-        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 255:
-            return Response({"detail": "Group name must contain 1–255 characters."}, status=400)
-        group.name = name.strip()
-    if "description" in data:
-        description = data["description"]
-        if not isinstance(description, str) or len(description) > 4000:
-            return Response({"detail": "Group description is invalid."}, status=400)
-        group.description = description.strip()
-    if "status" in data:
-        if data["status"] not in Group.Status.values:
-            return Response({"detail": "Invalid group status."}, status=400)
-        group.status = data["status"]
-    try:
-        group.save(update_fields=["name", "description", "status", "updated_at"])
-    except IntegrityError:
-        return Response({"detail": "A group with that name already exists."}, status=409)
-    _audit(
-        request,
-        tenant,
-        ActivityLog.Action.UPDATE_GROUP,
-        f"Updated group: {group.name}",
-        group_id=str(group.pk),
-        changed_fields=sorted(data.keys()),
-    )
-    return Response({"group": _serialize_group(group)})
-
-
-@api_view(["GET", "POST"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def group_members_view(request, tenant_id, group_id):
-    tenant, _actor_membership, error = _tenant_context(
-        request, tenant_id, require_admin=True
-    )
-    if error:
-        return error
-    group = Group.objects.filter(pk=group_id, tenant=tenant).first()
-    if group is None:
-        return Response({"detail": "Group is unavailable."}, status=404)
-    if request.method == "POST" and group.status != Group.Status.ACTIVE:
-        return Response(
-            {"detail": "Archived groups cannot receive new members."},
-            status=status.HTTP_409_CONFLICT,
-        )
-    if request.method == "GET":
-        rows = GroupMembership.objects.filter(group=group).select_related(
-            "membership__user"
-        ).order_by("membership__user__username")
-        return Response({"members": [
-            {
-                "assignmentId": str(row.pk),
-                "membershipId": str(row.membership_id),
-                "userId": row.membership.user_id,
-                "username": row.membership.user.get_username(),
-                "email": row.membership.user.email,
-                "organizationRole": row.membership.role,
-            }
-            for row in rows
-        ]})
-
-    data = request.data
-    if not isinstance(data, dict) or set(data) != {"membership_id"}:
-        return Response({"detail": "membership_id is required."}, status=400)
-    membership_id = data.get("membership_id")
-    if not _valid_uuid(membership_id):
-        return Response({"detail": "membership_id must be a valid UUID."}, status=400)
-    target = Membership.objects.filter(
-        pk=membership_id,
-        tenant=tenant,
-        status=Membership.Status.ACTIVE,
-        user__is_active=True,
-    ).select_related("user").first()
-    if target is None:
-        return Response({"detail": "Active organization member not found."}, status=404)
-    try:
-        assignment, created = GroupMembership.objects.get_or_create(
-            group=group,
-            membership=target,
-            defaults={"added_by": request.user},
-        )
-    except IntegrityError:
-        return Response({"detail": "Could not add group member."}, status=409)
-    if not created:
-        return Response({"detail": "Member is already in this group."}, status=409)
-    _audit(
-        request,
-        tenant,
-        ActivityLog.Action.ADD_GROUP_MEMBER,
-        f"Added {target.user.get_username()} to group {group.name}",
-        group_id=str(group.pk),
-        membership_id=str(target.pk),
-    )
-    return Response({"member": {
-        "assignmentId": str(assignment.pk),
-        "membershipId": str(target.pk),
-        "userId": target.user_id,
-        "username": target.user.get_username(),
-        "email": target.user.email,
-        "organizationRole": target.role,
-    }}, status=201)
-
-
-@api_view(["DELETE"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def group_member_detail_view(request, tenant_id, group_id, membership_id):
-    tenant, _actor_membership, error = _tenant_context(
-        request, tenant_id, require_admin=True
-    )
-    if error:
-        return error
-    group = Group.objects.filter(pk=group_id, tenant=tenant).first()
-    if group is None:
-        return Response({"detail": "Group is unavailable."}, status=404)
-    assignment = GroupMembership.objects.filter(
-        group=group,
-        membership_id=membership_id,
-    ).select_related("membership__user").first()
-    if assignment is None:
-        return Response({"detail": "Group membership not found."}, status=404)
-    username = assignment.membership.user.get_username()
-    assignment.delete()
-    _audit(
-        request,
-        tenant,
-        ActivityLog.Action.REMOVE_GROUP_MEMBER,
-        f"Removed {username} from group {group.name}",
-        group_id=str(group.pk),
-        membership_id=str(membership_id),
-    )
-    return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-@api_view(["GET", "POST"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def workspace_groups_view(request, tenant_id, workspace_id):
-    tenant, workspace, error = _workspace_context(
-        request, tenant_id, workspace_id, require_manager=True
-    )
-    if error:
-        return error
-    if request.method == "GET":
-        rows = WorkspaceGroupAccess.objects.filter(
-            workspace=workspace
-        ).select_related("group").order_by("group__name")
-        return Response({"groupAccess": [
-            {
-                "id": str(row.pk),
-                "groupId": str(row.group_id),
-                "groupName": row.group.name,
-                "groupStatus": row.group.status,
-                "role": row.role,
-            }
-            for row in rows
-        ]})
-
-    data = request.data
-    if not isinstance(data, dict) or set(data) - {"group_id", "role"} or "group_id" not in data:
-        return Response({"detail": "group_id is required; role is optional."}, status=400)
-    role = data.get("role", WorkspaceGroupAccess.Role.VIEWER)
-    if not _valid_uuid(data.get("group_id")):
-        return Response({"detail": "group_id must be a valid UUID."}, status=400)
-    if role not in GROUP_ROLES:
-        return Response({"detail": "Invalid workspace group role."}, status=400)
-    if workspace.status != Workspace.Status.ACTIVE:
-        return Response({"detail": "Archived workspaces cannot receive group grants."}, status=409)
-    group = Group.objects.filter(
-        pk=data.get("group_id"),
-        tenant=tenant,
-        status=Group.Status.ACTIVE,
-    ).first()
-    if group is None:
-        return Response({"detail": "Active group not found in this organization."}, status=404)
-    grant, created = WorkspaceGroupAccess.objects.update_or_create(
-        workspace=workspace,
-        group=group,
-        defaults={"role": role, "created_by": request.user},
-    )
-    _audit(
-        request,
-        tenant,
-        ActivityLog.Action.GRANT_WORKSPACE_GROUP,
-        f"Granted group {group.name} {role} access to workspace {workspace.name}",
-        workspace_id=str(workspace.pk),
-        group_id=str(group.pk),
-        role=role,
-    )
-    return Response({"groupAccess": {
-        "id": str(grant.pk),
-        "groupId": str(group.pk),
-        "groupName": group.name,
-        "role": grant.role,
-    }}, status=201 if created else 200)
-
-
-@api_view(["DELETE"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def workspace_group_detail_view(request, tenant_id, workspace_id, group_id):
-    tenant, workspace, error = _workspace_context(
-        request, tenant_id, workspace_id, require_manager=True
-    )
-    if error:
-        return error
-    grant = WorkspaceGroupAccess.objects.filter(
-        workspace=workspace,
-        group_id=group_id,
-    ).select_related("group").first()
-    if grant is None:
-        return Response({"detail": "Workspace group grant not found."}, status=404)
-    group_name = grant.group.name
-    grant.delete()
-    _audit(
-        request,
-        tenant,
-        ActivityLog.Action.REVOKE_WORKSPACE_GROUP,
-        f"Revoked group {group_name} access to workspace {workspace.name}",
-        workspace_id=str(workspace.pk),
-        group_id=str(group_id),
     )
     return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1087,7 +774,9 @@ def workspace_activity_view(request, workspace_id):
     except (TypeError, ValueError):
         limit = 100
     limit = max(1, min(limit, 200))
-    rows = ActivityLog.objects.filter(workspace=workspace).select_related("user").order_by("-created_at")[:limit]
+    rows = ActivityLog.objects.filter(workspace=workspace).exclude(
+        action=ActivityLog.Action.SEARCH,
+    ).select_related("user").order_by("-created_at")[:limit]
     return Response({"events": [
         {
             "id": row.pk,

@@ -1,4 +1,7 @@
 import hashlib
+import tempfile
+
+from files.validators import calculate_sha256
 from datetime import timedelta
 
 from django.conf import settings
@@ -149,26 +152,37 @@ class Command(BaseCommand):
                     )
                 if stat.size_bytes != upload.expected_size_bytes or stat.size_bytes > MAX_UPLOAD_SIZE:
                     raise StorageIntegrityError("Completed object size failed verification.")
-                source = storage.open_object(upload.object_key)
-                try:
-                    plaintext = source.read(MAX_UPLOAD_SIZE + 1)
-                finally:
-                    source.close()
-                # actual_size_bytes is populated only after this validation. Compare
-                # the downloaded quarantine object with the server-owned expected size.
-                if len(plaintext) != upload.expected_size_bytes or len(plaintext) > MAX_UPLOAD_SIZE:
-                    raise ValueError("Verified object size changed before finalization.")
-                digest = hashlib.sha256(plaintext).hexdigest()
-                if upload.expected_sha256 and digest != upload.expected_sha256:
-                    raise StorageIntegrityError("Verified object checksum changed before finalization.")
-                UploadSession.objects.filter(pk=upload.pk, state=UploadSession.State.VERIFYING).update(
-                    received_bytes=len(plaintext), actual_size_bytes=len(plaintext)
-                )
-                if settings.SECUREDRIVE_UPLOAD_SCANNER:
+                # Download to an 8-MiB memory-bounded spool instead of holding
+                # the entire 100-MiB object in RAM. The verified bytes are used
+                # for MIME/ZIP checks and (optionally) a scanner. On success, S3
+                # copies the original object internally, avoiding a second upload
+                # from Django. The original staging key remains until DB commit.
+                with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as verified:
+                    retrieved = storage.download_to(
+                        upload.object_key, verified, max_bytes=MAX_UPLOAD_SIZE
+                    )
+                    if retrieved.size_bytes != stat.size_bytes:
+                        raise StorageIntegrityError("Staging object size changed during verification.")
+                    if stat.etag and retrieved.etag != stat.etag:
+                        raise StorageIntegrityError("Staging object changed during verification.")
+                    verified.seek(0, 2)
+                    actual_size = verified.tell()
+                    if actual_size != upload.expected_size_bytes:
+                        raise StorageIntegrityError("Verified object size changed during finalization.")
+                    digest = calculate_sha256(verified)
+                    if upload.expected_sha256 and digest != upload.expected_sha256:
+                        raise StorageIntegrityError("Verified object checksum changed during finalization.")
                     UploadSession.objects.filter(
                         pk=upload.pk, state=UploadSession.State.VERIFYING
-                    ).update(state=UploadSession.State.SCANNING)
-                finalize_verified_upload(upload, plaintext, upload.initiated_by)
+                    ).update(received_bytes=actual_size, actual_size_bytes=actual_size)
+                    if settings.SECUREDRIVE_UPLOAD_SCANNER:
+                        UploadSession.objects.filter(
+                            pk=upload.pk, state=UploadSession.State.VERIFYING
+                        ).update(state=UploadSession.State.SCANNING)
+                    finalize_verified_upload(
+                        upload, verified, upload.initiated_by,
+                        verified_sha256=digest, verified_etag=retrieved.etag,
+                    )
                 UploadFinalizationJob.objects.filter(pk=job.pk).update(state=UploadFinalizationJob.State.DONE)
                 done += 1
             except Exception as error:

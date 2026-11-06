@@ -1,11 +1,13 @@
 """Regression tests for workspace-scoped Drive access and mutations."""
 import json
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from accounts.access import can_access_workspace, can_edit_workspace_content
+from accounts.access import can_access_workspace, can_edit_workspace_content, get_default_workspace
+from accounts.services import get_personal_tenant
 from accounts.models import Membership, Tenant, Workspace, WorkspaceMembership
 from files.models import File, UploadSession
 from folders.models import Folder
@@ -107,14 +109,25 @@ class WorkspaceDriveAccessTests(TestCase):
         names = {item["name"] for item in response.json()["items"]}
         self.assertEqual(names, {"read-only.txt"})
 
-    def test_legacy_default_context_does_not_leak_other_workspace_items(self):
+    def test_default_context_returns_only_personal_my_drive(self):
+        """No workspace selector must never fall back to a business tenant."""
+        personal_tenant = get_personal_tenant(self.member)
+        personal_workspace = get_default_workspace(personal_tenant)
+        File.objects.create(
+            tenant=personal_tenant,
+            workspace=personal_workspace,
+            owner=self.member,
+            file_name="my-drive.txt",
+            file_path="uploads/my-drive.txt",
+            file_size=12,
+            mime_type="text/plain",
+        )
+
         response = self.client.get(reverse("drive_items_api"))
 
         self.assertEqual(response.status_code, 200)
         names = {item["name"] for item in response.json()["items"]}
-        self.assertIn("general.txt", names)
-        self.assertNotIn("read-only.txt", names)
-        self.assertNotIn("restricted.txt", names)
+        self.assertEqual(names, {"my-drive.txt"})
 
     def test_explicit_workspace_without_membership_is_not_fallback_to_default(self):
         response = self.client.get(
@@ -142,19 +155,65 @@ class WorkspaceDriveAccessTests(TestCase):
 
     def test_viewer_cannot_start_upload_in_read_only_workspace(self):
         before = UploadSession.objects.count()
-        response = self.client.post(
-            reverse("api-upload-create"),
-            data=json.dumps({
-                "name": "not-allowed.txt",
-                "size_bytes": 1,
-                "sha256": "0" * 64,
-                "workspace_id": str(self.viewer_workspace.pk),
-            }),
-            content_type="application/json",
-        )
+        with patch("files.upload_api.get_storage_adapter") as storage_adapter:
+            response = self.client.post(
+                reverse("api-upload-create"),
+                data=json.dumps({
+                    "name": "not-allowed.txt",
+                    "size_bytes": 1,
+                    "sha256": "0" * 64,
+                    "workspace_id": str(self.viewer_workspace.pk),
+                }),
+                content_type="application/json",
+            )
+            storage_adapter.assert_not_called()
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(UploadSession.objects.count(), before)
+
+
+    def test_downgraded_editor_cannot_authorize_parts_or_complete_upload(self):
+        """A previously writable session must not survive role revocation."""
+        membership = WorkspaceMembership.objects.get(
+            workspace=self.viewer_workspace,
+            membership=self.member_membership,
+        )
+        membership.role = WorkspaceMembership.Role.EDITOR
+        membership.save(update_fields=["role"])
+        upload = UploadSession.objects.create(
+            tenant=self.tenant,
+            workspace=self.viewer_workspace,
+            initiated_by=self.member,
+            client_name="report.txt",
+            expected_size_bytes=9 * 1024 * 1024,
+            expected_sha256="a" * 64,
+            object_key="staging/" + "a" * 32,
+            provider_upload_id="s3-upload-id",
+            expires_at="2035-01-01T00:00:00Z",
+            state=UploadSession.State.UPLOADING,
+        )
+        membership.role = WorkspaceMembership.Role.VIEWER
+        membership.save(update_fields=["role"])
+
+        with patch("files.upload_api.get_storage_adapter") as storage_adapter:
+            responses = [
+                self.client.get(reverse("api-upload-parts-list", args=[upload.pk])),
+                self.client.post(reverse("api-upload-part-authorization", args=[upload.pk, 1])),
+                self.client.post(
+                    reverse("api-upload-parts-authorization-batch", args=[upload.pk]),
+                    data=json.dumps({"part_numbers": [1]}),
+                    content_type="application/json",
+                ),
+                self.client.post(
+                    reverse("api-upload-complete", args=[upload.pk]),
+                    data=json.dumps({"parts": [{"part_number": 1, "etag": '"part-etag"'}]}),
+                    content_type="application/json",
+                ),
+            ]
+            storage_adapter.assert_not_called()
+        self.assertEqual([response.status_code for response in responses], [404, 404, 404, 404])
+        upload.refresh_from_db()
+        self.assertEqual(upload.state, UploadSession.State.UPLOADING)
 
     def test_move_api_cannot_select_an_item_from_another_workspace(self):
         response = self.client.post(

@@ -409,3 +409,30 @@ def can_edit_destination_folder(
         return False
 
     return can_edit_folder(folder, user)
+
+def upsert_direct_share(*, resource, receiver, owner, permission):
+    """Upsert one grant and report a *real* change under a row lock.
+
+    Caller must use transaction.atomic. Identical repeated shares are no-ops
+    and should not generate an activity event or an email notification.
+    """
+    from .models import Share
+
+    if resource.__class__.__name__ == "File":
+        target = {"file": resource}
+    elif resource.__class__.__name__ == "Folder":
+        target = {"folder": resource}
+    else:
+        raise ValueError("Only files and folders may be directly shared")
+    share, created = Share.objects.select_for_update().get_or_create(
+        **target, receiver=receiver,
+        defaults={"tenant": resource.tenant, "owner": owner, "permission": permission},
+    )
+    if created:
+        return "created", None
+    previous_permission = share.permission
+    if previous_permission == permission:
+        return "unchanged", previous_permission
+    share.permission = permission
+    share.save(update_fields=["permission"])
+    return "permission_changed", previous_permission

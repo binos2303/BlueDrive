@@ -25,6 +25,7 @@ import {
 import {
   djangoMultipartUploadService,
   UploadServiceUnavailableError,
+  UploadPausedError,
   type UploadFailure,
   type UploadProgressReport,
   type UploadService,
@@ -118,6 +119,7 @@ export default function UploadManager({
   const tasksRef = useRef(tasks);
   const filesRef = useRef(new Map<string, File>());
   const controllersRef = useRef(new Map<string, AbortController>());
+  const cancelingRef = useRef(new Set<string>());
   const nextId = useRef(0);
 
   const commit = useCallback((update: (current: UploadTask[]) => UploadTask[]) => {
@@ -261,6 +263,13 @@ export default function UploadManager({
       }
     } catch (error) {
       if (controller.signal.aborted) return;
+      if (error instanceof UploadPausedError) {
+        const latest = tasksRef.current.find((task) => task.id === id);
+        if (latest?.status === "uploading") {
+          updateTask(id, (task) => transitionTask(task, "paused"));
+        }
+        return;
+      }
       if (error instanceof UploadServiceUnavailableError) {
         applyFailure(id, { message: error.message, retryable: false, action: error.action });
       } else {
@@ -289,14 +298,36 @@ export default function UploadManager({
     }
   }, [start, updateTask]);
 
-  const cancel = useCallback((id: string) => {
+  const cancel = useCallback(async (id: string) => {
     const current = tasksRef.current.find((task) => task.id === id);
-    if (!current || ["completed", "failed", "canceled"].includes(current.status)) return;
+    // Once Complete has been submitted, a cancel click cannot reliably
+    // undo storage completion or DB publication. Do not claim it was canceled.
+    if (!current || !["queued", "preparing", "uploading", "paused"].includes(current.status)) return;
+    if (cancelingRef.current.has(id)) return;
+    if ((current.status === "paused" || current.status === "queued") &&
+        current.uploadSessionId && !controllersRef.current.has(id)) {
+      const file = filesRef.current.get(id);
+      if (!file || !service.cancelPaused) {
+        setNotification("Cannot cancel the paused upload safely without its file and server abort support.");
+        return;
+      }
+      cancelingRef.current.add(id);
+      try {
+        await service.cancelPaused(current, file);
+      } catch (error) {
+        setNotification(error instanceof Error ? error.message : "Could not abort the server upload session.");
+        return;
+      } finally {
+        cancelingRef.current.delete(id);
+      }
+    }
+    const latest = tasksRef.current.find((task) => task.id === id);
+    if (!latest || !["queued", "preparing", "uploading", "paused"].includes(latest.status)) return;
     controllersRef.current.get(id)?.abort();
     updateTask(id, (task) => transitionTask(task, "canceled"));
     filesRef.current.delete(id);
     controllersRef.current.delete(id);
-  }, [updateTask]);
+  }, [service, updateTask]);
 
   const closeManager = useCallback(() => {
     setDismissedTaskIds(new Set(tasksRef.current.map((task) => task.id)));
@@ -321,11 +352,16 @@ export default function UploadManager({
 
   const resume = useCallback(async (id: string) => {
     const task = tasksRef.current.find((item) => item.id === id);
-    if (!task || !service.supportsPauseResume || !service.resume || task.status !== "paused" || !task.uploadSessionId) return;
+    if (!task || cancelingRef.current.has(id) || !service.supportsPauseResume || !service.resume || task.status !== "paused" || !task.uploadSessionId) return;
     try {
       await service.resume(task);
       const latest = tasksRef.current.find((item) => item.id === id);
-      if (latest?.status === "paused") updateTask(id, (item) => transitionTask(item, "uploading"));
+      if (latest?.status === "paused") {
+        // A resumed run must rehash/verify its file and reconcile remote parts.
+        // It is a new transport invocation using the same server UploadSession.
+        updateTask(id, (item) => transitionTask(item, "queued"));
+        // Normal scheduler enforces MAX_CONCURRENT_UPLOADS before restart.
+      }
     } catch (error) {
       setNotification(error instanceof Error ? error.message : "The upload could not be resumed.");
     }
@@ -338,7 +374,7 @@ export default function UploadManager({
 
     const activeIds = new Set(
       tasks
-        .filter((task) => ["preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status))
+        .filter((task) => ["preparing", "uploading", "verifying", "scanning"].includes(task.status))
         .map((task) => task.id),
     );
     for (const id of controllersRef.current.keys()) activeIds.add(id);
@@ -394,7 +430,7 @@ export default function UploadManager({
 
   const visibleCount = queuedCount + activeCount;
   const cancellableCount = visibleTasks.filter((task) =>
-    ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
+    ["queued", "preparing", "uploading", "paused"].includes(task.status),
   ).length;
   const etaSeconds = visibleTasks
     .filter((task) => task.status === "uploading" && Number.isFinite(task.progress?.etaSeconds))
@@ -492,7 +528,7 @@ export default function UploadManager({
                   task={task}
                   connected={service.connected}
                   canPause={service.supportsPauseResume && Boolean(task.uploadSessionId)}
-                  onCancel={() => cancel(task.id)}
+                  onCancel={() => { void cancel(task.id); }}
                   onRetry={() => retry(task.id)}
                   onPause={() => { void pause(task.id); }}
                   onResume={() => { void resume(task.id); }}
@@ -545,7 +581,7 @@ function UploadTaskRow({
   onConflictResolution: (value: UploadConflictResolution) => void;
 }) {
   const terminal = task.status === "completed" || task.status === "failed" || task.status === "canceled";
-  const canCancel = ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status);
+  const canCancel = ["queued", "preparing", "uploading", "paused"].includes(task.status);
   const showProgress = Boolean(task.progress)
     && ["uploading", "verifying", "scanning"].includes(task.status);
   const transferred = task.progress?.uploadedBytes ?? 0;
@@ -593,7 +629,10 @@ function UploadTaskRow({
       {!terminal && task.status !== "verifying" && task.status !== "scanning" && (
         <p className="mt-1 text-[11px] text-muted">
           {task.status === "uploading" && task.progress
-            ? `${progressPercent}% uploaded`
+            ? `${progressPercent}% uploaded${task.progress.bytesPerSecond
+              ? ` · ${formatBytes(task.progress.bytesPerSecond)}/s${task.progress.etaSeconds !== undefined
+                ? ` · ${formatDuration(task.progress.etaSeconds)} remaining` : ""}`
+              : ""}`
             : statusLabel(task.status)}
         </p>
       )}

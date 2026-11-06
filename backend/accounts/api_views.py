@@ -1,3 +1,4 @@
+from .platform_admin import is_platform_admin
 from django import forms
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.core.exceptions import ValidationError
@@ -90,6 +91,7 @@ def _account_snapshot(user):
         else None
     )
     return {
+        "is_platform_admin": is_platform_admin(user),
         "profile": {
             "username": user.get_username(),
             "email": user.email,

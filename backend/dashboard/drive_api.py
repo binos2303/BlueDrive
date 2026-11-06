@@ -30,10 +30,11 @@ from files.models import File, UploadSession
 from files.permanent_delete import PermanentDeleteError, permanently_delete_files
 from files.quota import QuotaExceeded, QuotaStateError
 from files.services import unique_copy_name
+from files.rename_service import rename_resource, RenameError
 from folders.models import Folder
 from dashboard.models import StarredItem
 from sharing.models import Share
-from sharing.services import can_edit_file, can_edit_folder, can_view_file, can_view_folder
+from sharing.services import can_edit_file, can_edit_folder, can_view_file, can_view_folder, upsert_direct_share
 from logs.models import ActivityLog
 from logs.services import log_action
 from .views import _folder_contains_ids, _top_level_folders, _owned_subtree, _unique_copy_folder_name
@@ -114,6 +115,43 @@ def _items_for_operation(payload, request, tenant, workspace):
         if not item.folder_id or not any(_folder_contains_ids(folder, item.folder_id) for folder in top_folders)
     ]
     return (file_ids, folder_ids, direct_files, top_folders), None
+
+
+@login_required
+@require_POST
+def drive_items_rename_api(request):
+    """Rename exactly one live file or folder within the selected workspace."""
+    payload, error = _json_payload(request)
+    if error:
+        return error
+    kind = payload.get("kind")
+    item_id = payload.get("id")
+    name = payload.get("name")
+    if kind not in ("file", "folder") or type(item_id) is not int or item_id <= 0:
+        return JsonResponse({"detail": "Provide a valid item kind and positive ID."}, status=400)
+    if not isinstance(name, str):
+        return JsonResponse({"detail": "Name must be a string."}, status=400)
+
+    tenant, workspace = _drive_context(request, payload)
+    model = File if kind == "file" else Folder
+    resource = model.objects.filter(
+        pk=item_id, tenant=tenant, workspace=workspace,
+        deleted_at__isnull=True,
+    ).first()
+    if resource is None:
+        return JsonResponse({"detail": "Item not found."}, status=404)
+    try:
+        changed = rename_resource(resource=resource, actor=request.user, name=name)
+    except RenameError as exc:
+        return JsonResponse({"detail": exc.detail}, status=exc.status)
+    resource.refresh_from_db(fields=["file_name" if kind == "file" else "folder_name"])
+    return JsonResponse({
+        "id": item_id,
+        "kind": kind,
+        "name": resource.file_name if kind == "file" else resource.folder_name,
+        "changed": changed,
+        "detail": "Renamed successfully." if changed else "Name is unchanged.",
+    })
 
 
 @login_required
@@ -796,30 +834,61 @@ def drive_items_share_api(request):
     if permission not in {Share.Permission.VIEWER, Share.Permission.EDITOR}:
         return JsonResponse({"detail": "Permission must be viewer or editor."}, status=400)
 
-    shared_count = 0
+    # A repeated identical grant is not a new Share event. Persist the grant
+    # and its activity atomically, including one event for multi-item requests.
+    changed_names = []
+    changed_kinds = []
+    resource_changes = []
+    created_count = 0
+    updated_count = 0
     with transaction.atomic():
-        for drive_file in direct_files:
-            Share.objects.update_or_create(
-                file=drive_file,
-                receiver=recipient,
-                defaults={"tenant": tenant, "owner": request.user, "permission": permission},
+        for item, kind, name in [
+            *[(file, "file", file.file_name) for file in direct_files],
+            *[(folder, "folder", folder.folder_name) for folder in top_folders],
+        ]:
+            operation, _previous = upsert_direct_share(
+                resource=item, receiver=recipient, owner=request.user, permission=permission,
             )
-            shared_count += 1
-        for folder in top_folders:
-            Share.objects.update_or_create(
-                folder=folder,
-                receiver=recipient,
-                defaults={"tenant": tenant, "owner": request.user, "permission": permission},
+            if operation == "unchanged":
+                continue
+            created_count += int(operation == "created")
+            updated_count += int(operation == "permission_changed")
+            changed_names.append(name)
+            changed_kinds.append(kind)
+            if len(resource_changes) < 20:
+                resource_changes.append({
+                    "name": name, "kind": kind, "operation": operation,
+                    "previous_permission": _previous if operation == "permission_changed" else None,
+                    "permission": permission,
+                })
+
+        shared_count = created_count + updated_count
+        if shared_count:
+            log_action(
+                request.user, ActivityLog.Action.SHARE,
+                f"Updated {shared_count} Drive grant(s) for {recipient.get_username()}",
+                workspace=workspace,
+                metadata={
+                    "operation": "created" if updated_count == 0 else "permission_changed" if created_count == 0 else "mixed",
+                    "recipient_username": recipient.get_username(),
+                    "recipient_email": recipient.email,
+                    "permission": permission,
+                    "shared_count": shared_count,
+                    "created_count": created_count,
+                    "updated_count": updated_count,
+                    "resource_names": changed_names[:20],
+                    "resource_kinds": changed_kinds[:20],
+                    "resource_changes": resource_changes,
+                },
             )
-            shared_count += 1
 
     permission_label = dict(Share.Permission.choices).get(permission, "Viewer")
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        f"Shared {shared_count} Drive item(s) with {recipient.email or recipient.username} as {permission_label}",
-        workspace=workspace,
-    )
+    if shared_count == 0:
+        return JsonResponse({
+            "detail": "No changes: all selected items already have this permission for the recipient.",
+            "count": 0, "email": recipient.email, "permission": permission,
+            "notification_sent": False,
+        })
 
     # Send a lightweight notification when SMTP is explicitly configured. Sharing
     # permissions remain valid if mail is unavailable; that failure is reported.

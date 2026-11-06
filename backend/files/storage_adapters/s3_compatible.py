@@ -343,6 +343,17 @@ class S3CompatibleStorageAdapter:
             object_key, expected_size, expected_upload_session_id
         )
 
+    def list_uploaded_parts(self, object_key: str, upload_id: str) -> list[MultipartPart]:
+        """Read provider-confirmed part receipts for resume reconciliation.
+
+        These are not used as the completion manifest: the browser must retain
+        ETags returned by its own successful UploadPart calls.
+        """
+        self._validate_object_key(object_key)
+        if not upload_id:
+            raise StorageNonRetryableError("Multipart upload identifier is required.")
+        return self._list_all_parts(object_key, upload_id)
+
     def abort_multipart(self, object_key: str, upload_id: str) -> None:
         self._validate_object_key(object_key)
         if not upload_id:
@@ -389,10 +400,14 @@ class S3CompatibleStorageAdapter:
         )
         return response["Body"]
 
-    def download_to(self, object_key: str, destination: BinaryIO) -> ObjectStat:
+    def download_to(
+        self, object_key: str, destination: BinaryIO, *, max_bytes: int | None = None
+    ) -> ObjectStat:
         self._validate_object_key(object_key)
         if not destination.seekable():
             raise StorageNonRetryableError("Download destination must support safe retry reset.")
+        if max_bytes is not None and max_bytes < 0:
+            raise StorageNonRetryableError("Download size limit is invalid.")
         for attempt in range(1, self._retry.attempts + 1):
             body = None
             try:
@@ -400,13 +415,20 @@ class S3CompatibleStorageAdapter:
                 destination.truncate(0)
                 response = self._client.get_object(Bucket=self._bucket, Key=object_key)
                 body = response["Body"]
+                declared_size = int(response.get("ContentLength", -1))
+                if max_bytes is not None and (declared_size < 0 or declared_size > max_bytes):
+                    raise StorageIntegrityError("Downloaded object exceeds the allowed size.")
+                downloaded = 0
                 while True:
                     chunk = body.read(1024 * 1024)
                     if not chunk:
                         break
+                    downloaded += len(chunk)
+                    if max_bytes is not None and downloaded > max_bytes:
+                        raise StorageIntegrityError("Downloaded object exceeds the allowed size.")
                     destination.write(chunk)
                 destination.flush()
-                if destination.tell() != int(response.get("ContentLength", -1)):
+                if downloaded != declared_size:
                     raise StorageIntegrityError(
                         "Downloaded object length does not match storage metadata."
                     )
@@ -466,6 +488,84 @@ class S3CompatibleStorageAdapter:
         return self.verify_object(
             object_key, expected_size=size_bytes, expected_sha256=sha256_hex
         )
+
+    def publish_verified_object(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        expected_size: int,
+        expected_sha256: str,
+        upload_session_id: str,
+        content_type: str = "application/octet-stream",
+        expected_source_etag: str = "",
+    ) -> ObjectStat:
+        """Publish a SHA-256-verified staging object using an S3-side copy.
+
+        SHA-256 is computed independently by the finalizer over GET data before
+        this call. CopyObject is *not* a replacement for that verification.
+        Source ETag is used only as an If-Match concurrency condition, not as a
+        content digest. The source is retained until the DB publication commits.
+        """
+        self._validate_object_key(source_key)
+        self._validate_object_key(destination_key)
+        if (
+            not source_key.startswith("staging/")
+            or not destination_key.startswith("primary/")
+            or source_key == destination_key
+            or expected_size < 0
+            or not _SHA256_HEX.fullmatch(expected_sha256)
+            or not upload_session_id
+        ):
+            raise StorageNonRetryableError("Invalid verified publication request.")
+
+        source = self.stat_object(source_key)
+        if (
+            source.size_bytes != expected_size
+            or source.metadata.get("securedrive-upload-id") != upload_session_id
+        ):
+            raise StorageIntegrityError("Staging object no longer matches its upload session.")
+        if not source.etag:
+            raise StorageIntegrityError("Staging object has no conditional-copy ETag.")
+        if expected_source_etag and source.etag != expected_source_etag:
+            raise StorageIntegrityError("Staging object changed after its checksum was verified.")
+
+        def verified_destination():
+            target = self.stat_object(destination_key)
+            if (
+                target.size_bytes != expected_size
+                or target.metadata.get("securedrive-sha256") != expected_sha256.lower()
+                or target.metadata.get("securedrive-upload-id") != upload_session_id
+            ):
+                raise StorageIntegrityError("Published object metadata/size verification failed.")
+            return target
+
+        try:
+            self._call(
+                "copy_object",
+                lambda: self._client.copy_object(
+                    Bucket=self._bucket,
+                    Key=destination_key,
+                    CopySource={"Bucket": self._bucket, "Key": source_key},
+                    CopySourceIfMatch=f'"{source.etag}"',
+                    MetadataDirective="REPLACE",
+                    Metadata={
+                        "securedrive-sha256": expected_sha256.lower(),
+                        "securedrive-upload-id": upload_session_id,
+                    },
+                    ContentType=content_type or "application/octet-stream",
+                    **self._sse_parameters(),
+                ),
+                idempotent=False,
+            )
+        except StorageRetryableError as copy_error:
+            # A lost CopyObject response is ambiguous. HEAD can reconcile a
+            # completed copy; otherwise retain staging for a bounded retry.
+            try:
+                return verified_destination()
+            except StorageNotFoundError:
+                raise copy_error
+        return verified_destination()
 
     def quarantine_object(
         self,
@@ -546,7 +646,13 @@ class S3CompatibleStorageAdapter:
             )
             if not response.get("IsTruncated"):
                 return parts
-            marker = response.get("NextPartNumberMarker")
+            next_marker = response.get("NextPartNumberMarker")
+            if (
+                not isinstance(next_marker, int)
+                or next_marker <= (marker or 0)
+            ):
+                raise StorageIntegrityError("Storage returned an invalid multipart pagination marker.")
+            marker = next_marker
 
     @staticmethod
     def _validate_manifest(parts: Sequence[MultipartPart]) -> list[MultipartPart]:

@@ -3,15 +3,24 @@ from django.contrib.contenttypes.models import ContentType
 from .models import ActivityLog
 
 
-def log_action(user, action, description="", *, obj=None, workspace=None):
+def log_action(user, action, description="", *, obj=None, workspace=None, metadata=None):
     """Write an immutable audit event, optionally linked to a resource."""
     if not getattr(user, "is_authenticated", False):
         return
 
+    # Make a private event snapshot. Never depend on mutable objects for the
+    # name shown later in audit (the object may be renamed or deleted).
+    details = dict(metadata) if isinstance(metadata, dict) else {}
+    if obj is not None:
+        resource_name = getattr(obj, "file_name", None) or getattr(obj, "folder_name", None)
+        if isinstance(resource_name, str):
+            details.setdefault("resource_name", resource_name[:200])
+            details.setdefault("resource_kind", "file" if hasattr(obj, "file_name") else "folder")
     kwargs = {
         "user": user,
         "action": action,
         "description": description[:500],
+        "metadata": details,
     }
     if workspace is not None:
         kwargs["workspace_id"] = workspace.pk

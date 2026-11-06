@@ -113,6 +113,37 @@ class StorageAdapterTests(unittest.TestCase):
         self.assertEqual(stat.size_bytes, len(payload))
         self.assertEqual(client.get_object.call_count, 2)
 
+    def test_list_uploaded_parts_paginates_without_completing(self):
+        client = Mock()
+        client.list_parts.side_effect = [
+            {"Parts": [{"PartNumber": 1, "ETag": '"etag-1"', "Size": 8}],
+             "IsTruncated": True, "NextPartNumberMarker": 1},
+            {"Parts": [{"PartNumber": 2, "ETag": '"etag-2"', "Size": 3}],
+             "IsTruncated": False},
+        ]
+        result = self.build_adapter(client).list_uploaded_parts(
+            "staging/" + "a" * 32, "multipart-id"
+        )
+        self.assertEqual([(p.part_number, p.etag, p.size_bytes) for p in result], [
+            (1, '"etag-1"', 8), (2, '"etag-2"', 3),
+        ])
+        self.assertEqual(client.list_parts.call_count, 2)
+        self.assertEqual(client.list_parts.call_args.kwargs["PartNumberMarker"], 1)
+        client.complete_multipart_upload.assert_not_called()
+
+    def test_list_parts_rejects_nonadvancing_page_marker(self):
+        client = Mock()
+        client.list_parts.return_value = {
+            "Parts": [{"PartNumber": 1, "ETag": '"etag-1"', "Size": 8}],
+            "IsTruncated": True,
+            "NextPartNumberMarker": 0,
+        }
+        with self.assertRaises(StorageIntegrityError):
+            self.build_adapter(client).list_uploaded_parts(
+                "staging/" + "a" * 32, "multipart-id"
+            )
+        self.assertEqual(client.list_parts.call_count, 1)
+
     def test_complete_uses_provider_manifest_and_rejects_mismatch(self):
         client = Mock()
         client.list_parts.return_value = {
@@ -198,3 +229,111 @@ class StorageAdapterTests(unittest.TestCase):
             client.put_object.call_args.kwargs["ChecksumSHA256"],
             base64.b64encode(bytes.fromhex(digest)).decode(),
         )
+
+    def test_download_size_limit_rejects_provider_declared_oversize(self):
+        client = Mock()
+        client.get_object.return_value = {
+            "Body": BytesIO(b"large"), "ContentLength": 50,
+        }
+        destination = BytesIO()
+        with self.assertRaises(StorageIntegrityError):
+            self.build_adapter(client).download_to(
+                "staging/" + "a" * 32, destination, max_bytes=10
+            )
+        self.assertEqual(destination.getvalue(), b"")
+
+    def test_download_size_limit_rejects_stream_longer_than_declared(self):
+        client = Mock()
+        client.get_object.return_value = {
+            "Body": BytesIO(b"longer than metadata"), "ContentLength": 5,
+        }
+        with self.assertRaises(StorageIntegrityError):
+            self.build_adapter(client).download_to(
+                "staging/" + "a" * 32, BytesIO(), max_bytes=10
+            )
+
+    def test_publish_verified_object_uses_conditional_server_side_copy(self):
+        content = b"verified multipart bytes"
+        digest = hashlib.sha256(content).hexdigest()
+        session_id = "session-uuid"
+        client = Mock()
+        client.head_object.side_effect = [
+            {
+                "ContentLength": len(content), "ETag": '"source-etag-2"',
+                "Metadata": {"securedrive-upload-id": session_id},
+            },
+            {
+                "ContentLength": len(content), "ETag": '"destination-etag"',
+                "Metadata": {
+                    "securedrive-sha256": digest,
+                    "securedrive-upload-id": session_id,
+                },
+            },
+        ]
+        storage = self.build_adapter(client)
+        stat = storage.publish_verified_object(
+            "staging/" + "a" * 32, "primary/" + "b" * 32,
+            expected_size=len(content), expected_sha256=digest,
+            upload_session_id=session_id, content_type="text/plain",
+            expected_source_etag="source-etag-2",
+        )
+        self.assertEqual(stat.size_bytes, len(content))
+        self.assertEqual(client.copy_object.call_count, 1)
+        params = client.copy_object.call_args.kwargs
+        self.assertEqual(params["CopySourceIfMatch"], '"source-etag-2"')
+        self.assertEqual(params["MetadataDirective"], "REPLACE")
+        self.assertEqual(params["Metadata"]["securedrive-sha256"], digest)
+        self.assertEqual(params["ContentType"], "text/plain")
+        client.put_object.assert_not_called()
+        client.get_object.assert_not_called()
+        client.delete_object.assert_not_called()
+
+    def test_publish_rejects_source_changed_since_full_sha256(self):
+        client = Mock()
+        client.head_object.return_value = {
+            "ContentLength": 3, "ETag": '"new-etag"',
+            "Metadata": {"securedrive-upload-id": "session-uuid"},
+        }
+        with self.assertRaises(StorageIntegrityError):
+            self.build_adapter(client).publish_verified_object(
+                "staging/" + "a" * 32, "primary/" + "b" * 32,
+                expected_size=3, expected_sha256="a" * 64,
+                upload_session_id="session-uuid", expected_source_etag="old-etag",
+            )
+        client.copy_object.assert_not_called()
+
+    def test_publish_rejects_destination_without_verified_metadata(self):
+        client = Mock()
+        client.head_object.side_effect = [
+            {"ContentLength": 3, "ETag": '"etag"',
+             "Metadata": {"securedrive-upload-id": "session-uuid"}},
+            {"ContentLength": 3, "Metadata": {}},
+        ]
+        with self.assertRaises(StorageIntegrityError):
+            self.build_adapter(client).publish_verified_object(
+                "staging/" + "a" * 32, "primary/" + "b" * 32,
+                expected_size=3, expected_sha256="a" * 64,
+                upload_session_id="session-uuid",
+            )
+
+    def test_publish_recovers_lost_copy_response_by_head(self):
+        client = Mock()
+        client.copy_object.side_effect = ReadTimeoutError(
+            endpoint_url="http://storage", error="response lost"
+        )
+        client.head_object.side_effect = [
+            {"ContentLength": 3, "ETag": '"etag"',
+             "Metadata": {"securedrive-upload-id": "session-uuid"}},
+            {"ContentLength": 3,
+             "Metadata": {
+                 "securedrive-sha256": "a" * 64,
+                 "securedrive-upload-id": "session-uuid",
+             }},
+        ]
+        result = self.build_adapter(client).publish_verified_object(
+            "staging/" + "a" * 32, "primary/" + "b" * 32,
+            expected_size=3, expected_sha256="a" * 64,
+            upload_session_id="session-uuid",
+        )
+        self.assertEqual(result.size_bytes, 3)
+        self.assertEqual(client.copy_object.call_count, 1)

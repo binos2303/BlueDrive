@@ -108,6 +108,27 @@ def permanently_delete_files(files):
                 0, int(actual_sizes.get(reservation.upload_session_id, 0))
             )
 
+        # Legacy files imported before UploadSession bookkeeping may have no
+        # consumed reservation. The reconciliation command includes those
+        # logical bytes, so release them on physical deletion as well.
+        billed_files = {
+            session.file_id for session in sessions
+            if any(res.upload_session_id == session.pk for res in reservations)
+        }
+        for file in files:
+            if file.pk in billed_files:
+                continue
+            if file.workspace and not file.workspace.is_default:
+                quota = QuotaAccount.objects.filter(
+                    workspace_id=file.workspace_id, scope=QuotaAccount.Scope.WORKSPACE,
+                ).first()
+            else:
+                quota = QuotaAccount.objects.filter(
+                    tenant_id=file.tenant_id, scope=QuotaAccount.Scope.TENANT,
+                ).first()
+            if quota is not None:
+                decrement_by_account[quota.pk] += max(0, int(file.file_size))
+
         accounts = {
             account.pk: account
             for account in QuotaAccount.objects.select_for_update()

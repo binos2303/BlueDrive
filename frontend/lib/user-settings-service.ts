@@ -56,20 +56,27 @@ export async function getMyQuota(): Promise<MyQuotaSummary> {
   });
 }
 
-export async function getMyActivity(limit = 50): Promise<UserActivityEvent[]> {
-  const params = new URLSearchParams({ limit: String(Math.max(1, Math.min(100, limit))) });
-  const result = await requestAccountApi<{ events: UserActivityEvent[] }>(
-    `/accounts/api/me/activity/?${params.toString()}`,
-  );
-  return result.events;
+export type ActivityPage = { events: UserActivityEvent[]; hasMore: boolean };
+export type SearchHistoryPage = { items: SearchHistoryItem[]; hasMore: boolean };
+
+// Request pages directly from Django so older uploads/downloads are not hidden
+// behind the former 100-event limit. The backend owns chronological ordering.
+export async function getMyActivity(limit = 50, offset = 0): Promise<ActivityPage> {
+  const params = new URLSearchParams({
+    limit: String(Math.max(1, Math.min(100, limit))),
+    offset: String(Math.max(0, offset)),
+  });
+  return requestAccountApi<ActivityPage>(`/accounts/api/me/activity/?${params.toString()}`);
 }
 
-export async function getMySearchHistory(limit = 50): Promise<SearchHistoryItem[]> {
-  const params = new URLSearchParams({ limit: String(Math.max(1, Math.min(100, limit))) });
-  const result = await requestAccountApi<{ items: SearchHistoryItem[] }>(
+export async function getMySearchHistory(limit = 50, offset = 0): Promise<SearchHistoryPage> {
+  const params = new URLSearchParams({
+    limit: String(Math.max(1, Math.min(100, limit))),
+    offset: String(Math.max(0, offset)),
+  });
+  return requestAccountApi<SearchHistoryPage>(
     `/accounts/api/me/search-history/?${params.toString()}`,
   );
-  return result.items;
 }
 
 export async function clearMySearchHistory(): Promise<number> {

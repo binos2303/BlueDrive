@@ -1,58 +1,39 @@
-import Link from "next/link";
-import { Activity, ArrowRight, Cpu, Database, HardDrive, MemoryStick, Server } from "lucide-react";
+"use client";
 
-const metrics = [
-  { name: "CPU utilization", value: "Unknown", icon: Cpu },
-  { name: "Memory usage", value: "Unknown", icon: MemoryStick },
-  { name: "Disk capacity", value: "Unknown", icon: HardDrive },
-];
-const services = [
-  { name: "Django backend", href: "/admin/infrastructure/servers" },
-  { name: "PostgreSQL database", href: "/admin/infrastructure/database" },
-  { name: "File storage", href: "/admin/infrastructure/storage" },
-  { name: "MinIO", href: "/admin/infrastructure/minio" },
-];
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import AdminPageHeader from "@/components/admin/AdminPageHeader";
+import { ArrowRight, Database, HardDrive, Server } from "lucide-react";
+
+const apiBase = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 
 export default function InfrastructurePage() {
-  return (
-    <div>
-      <div className="mb-5">
-        <h2 className="text-2xl font-semibold tracking-tight">Infrastructure Overview</h2>
-      </div>
+  const [connected, setConnected] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${apiBase}/accounts/api/admin/overview/`, { credentials: "include", cache: "no-store", signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Unable to verify system health (HTTP ${response.status}).`);
+        return response.json();
+      }).then(() => {
+        if (!controller.signal.aborted) { setConnected(true); setLoading(false); }
+      }).catch((reason: unknown) => {
+        if (!controller.signal.aborted) { setError(reason instanceof Error ? reason.message : "Health check failed."); setLoading(false); }
+      });
+    return () => controller.abort();
+  }, []);
 
-      <div className="mb-5 grid gap-4 md:grid-cols-3">
-        {metrics.map(({ name, value, icon: Icon }) => (
-          <section key={name} className="rounded-[22px] border border-border bg-surface p-5">
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-muted">{name}</p>
-              <span className="rounded-xl bg-brand-soft p-2.5 text-brand"><Icon size={19} /></span>
-            </div>
-            <p className="mt-4 text-2xl font-semibold">{value}</p>
-          </section>
-        ))}
-      </div>
-
-      <section className="overflow-hidden rounded-[22px] border border-border bg-surface">
-        <div className="border-b border-border p-5"><h3 className="font-semibold">Service status</h3></div>
-        {services.map((service) => (
-          <Link key={service.name} href={service.href} className="flex items-center gap-3 border-b border-border/70 px-5 py-4 last:border-0 hover:bg-background">
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-soft text-brand">
-              {service.name.includes("database") ? <Database size={18} /> : <Server size={18} />}
-            </span>
-            <span className="min-w-0 flex-1 text-sm font-medium">{service.name}</span>
-            <span className="rounded-full bg-background px-2.5 py-1 text-xs font-medium text-muted">Unknown</span>
-            <ArrowRight size={16} className="text-muted" />
-          </Link>
-        ))}
-      </section>
-
-      <section className="mt-5 rounded-[22px] border border-border bg-surface p-5">
-        <div className="flex items-center gap-2">
-          <Activity size={18} className="text-brand" />
-          <h3 className="font-semibold">Recent alerts</h3>
-        </div>
-        <p className="mt-3 text-sm text-muted">Unknown</p>
-      </section>
-    </div>
-  );
+  return <div className="space-y-5">
+    <AdminPageHeader title="System Health" />
+    {error && <p role="alert" className="rounded-xl border border-danger/30 bg-surface p-4 text-sm text-danger">{error}</p>}
+    <section className="overflow-hidden rounded-[20px] border border-border bg-surface"><h3 className="border-b border-border px-5 py-4 text-[14px] font-semibold">Current visibility</h3>
+      <div className="flex items-center gap-3 border-b border-border/60 px-5 py-4"><Server size={18} className="text-brand-contrast" /><div className="flex-1"><p className="text-[13px] font-medium">Django API</p><p className="mt-1 text-xs text-muted">Platform overview endpoint</p></div><span className="text-xs font-semibold">{loading ? "Checking…" : connected ? "Responding" : "Unavailable"}</span></div>
+      <div className="flex items-center gap-3 border-b border-border/60 px-5 py-4"><Database size={18} className="text-brand-contrast" /><div className="flex-1"><p className="text-[13px] font-medium">PostgreSQL</p><p className="mt-1 text-xs text-muted">Database queries executed by overview API</p></div><span className="text-xs font-semibold">{loading ? "Checking…" : connected ? "Responding" : "Not verified"}</span></div>
+      <div className="flex items-center gap-3 px-5 py-4"><HardDrive size={18} className="text-muted" /><div className="flex-1"><p className="text-[13px] font-medium">MinIO and host storage</p><p className="mt-1 text-xs text-muted">No connected device telemetry</p></div><span className="text-xs text-muted">Not monitored</span></div>
+    </section>
+    <p className="text-[12px] text-muted">A responding API is not a full uptime check. CPU, RAM, individual disks, cluster capacity and backup health require dedicated metrics and monitoring agents.</p>
+    <Link href="/admin/infrastructure/topology" className="inline-flex items-center gap-2 text-[13px] font-semibold text-brand-contrast hover:underline">Storage Topology<ArrowRight size={15} /></Link>
+  </div>;
 }

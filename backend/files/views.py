@@ -41,7 +41,8 @@ from security.aes_service import (
     wrap_dek,
 )
 
-from .forms import FileRenameForm, FileUploadForm
+from .forms import FileUploadForm
+from .rename_service import rename_resource, RenameError
 from .models import File, FileVersion, StorageLocation, UploadSession
 from .services import (
     clone_encrypted_file_with_quota,
@@ -627,6 +628,7 @@ def file_download(request, file_id):
         ActivityLog.Action.DOWNLOAD,
         f"Downloaded {drive_file.file_name}",
         obj=drive_file,
+        metadata={"size_bytes": len(plaintext)},
     )
     if was_encrypted:
         log_action(
@@ -901,32 +903,14 @@ def file_rename(request, file_id):
         id=file_id,
         deleted_at__isnull=True,
     )
-    if not can_edit_file(drive_file, request.user):
-        messages.error(request, "You do not have permission to rename this file.")
-        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-
-    form = FileRenameForm(request.POST, instance=drive_file)
-    if form.is_valid():
-        new_name = form.cleaned_data["file_name"]
-        duplicate = File.objects.filter(
-            owner=drive_file.owner,
-            tenant=drive_file.tenant,
-            workspace=drive_file.workspace,
-            folder=drive_file.folder,
-            file_name__iexact=new_name,
-            deleted_at__isnull=True,
-        ).exclude(id=drive_file.id).exists()
-        if duplicate:
-            messages.error(request, "A file with this name already exists in this folder.")
-        else:
-            old_name = drive_file.file_name
-            form.save()
-            log_action(request.user, ActivityLog.Action.RENAME, f"Renamed file from {old_name} to {drive_file.file_name}", obj=drive_file)
-            messages.success(request, "File renamed successfully.")
-    else:
-        for errors in form.errors.values():
-            for error in errors:
-                messages.error(request, f"Could not rename file: {error}")
+    try:
+        changed = rename_resource(
+            resource=drive_file, actor=request.user,
+            name=request.POST.get("file_name", ""),
+        )
+        messages.success(request, "File renamed successfully." if changed else "Name is unchanged.")
+    except RenameError as exc:
+        messages.error(request, exc.detail)
 
     current_folder_id = request.POST.get("current_folder_id")
     if current_folder_id:

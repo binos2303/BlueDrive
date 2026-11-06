@@ -1,4 +1,11 @@
 import type { UploadStatus, UploadTask } from "./upload-manager-model";
+import { UploadPausedError, UploadTransferControl } from "./upload-transfer-control";
+import { UploadPartProgress } from "./upload-progress-model";
+import { UploadProgressTelemetry } from "./upload-progress-telemetry";
+import { OnDemandPartAuthorizer } from "./upload-part-authorization";
+import { sha256File } from "./upload-file-hash";
+export { UploadPausedError } from "./upload-transfer-control";
+import { reconcilePartReceipts, restorePartReceipts, serializePartReceipts, type ProviderPart } from "./upload-resume-model";
 import { AccountServiceError, accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
 import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 
@@ -33,6 +40,8 @@ export interface UploadService {
   /** Must preserve and operate on the upload session ID held by the task. */
   pause?(task: UploadTask): Promise<void>;
   resume?(task: UploadTask): Promise<void>;
+  /** Abort a paused server session and release its reserved quota. */
+  cancelPaused?(task: UploadTask, file: File): Promise<void>;
 }
 
 export class UploadServiceUnavailableError extends Error {
@@ -56,6 +65,19 @@ export const notConnectedUploadService: UploadService = {
 const PART_SIZE = 8 * 1024 * 1024;
 const PART_CONCURRENCY = 3;
 const PART_RETRIES = 3;
+// Limit URL age: the backend currently signs each part for only 180 seconds.
+const AUTHORIZATION_BATCH_SIZE = 6;
+const activeTransfers = new Map<string, UploadTransferControl>();
+function resumeStorageKey(task: UploadTask, file: File): string {
+  const workspaceScope = getActiveWorkspaceIdForRequest() ?? "default";
+  const destinationScope = task.destinationId ?? "root";
+  return `securedrive-upload:${workspaceScope}:${encodeURIComponent(destinationScope)}:${encodeURIComponent(file.name)}:${file.size}:${file.lastModified}`;
+}
+function forgetResumeState(key: string): void {
+  removeSessionValue(key);
+  removeSessionValue(`${key}:idempotency`);
+  removeSessionValue(`${key}:parts`);
+}
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const readSessionValue = (key: string) => {
   try { return typeof window === "undefined" ? null : window.localStorage.getItem(key); } catch { return null; }
@@ -74,6 +96,10 @@ type AuthorizedPart = PartAuthorization & { part_number: number };
 function uploadPart(url: string, headers: Record<string, string>, blob: Blob, signal: AbortSignal,
   report: (loaded: number) => void): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Upload canceled", "AbortError"));
+      return;
+    }
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url);
     xhr.timeout = 120_000;
@@ -90,14 +116,16 @@ function uploadPart(url: string, headers: Record<string, string>, blob: Blob, si
     xhr.onerror = () => reject(Object.assign(new Error("Network interrupted during part upload."), { retryable: true }));
     xhr.ontimeout = () => reject(Object.assign(new Error("Upload part timed out."), { retryable: true }));
     xhr.onabort = () => reject(new DOMException("Upload canceled", "AbortError"));
-    signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    const onAbort = () => xhr.abort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    xhr.onloadend = () => signal.removeEventListener("abort", onAbort);
+    if (signal.aborted) {
+      signal.removeEventListener("abort", onAbort);
+      reject(new DOMException("Upload canceled", "AbortError"));
+      return;
+    }
     xhr.send(blob);
   });
-}
-
-async function sha256Hex(file: File): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function authorize(uploadId: string, part: number): Promise<PartAuthorization> {
@@ -124,6 +152,16 @@ async function authorizeBatch(uploadId: string, partNumbers: number[]): Promise<
   return partNumbers.map((partNumber) => authorized.get(partNumber)!);
 }
 
+async function fetchReconciledPartReceipts(
+  uploadId: string,
+  fileSize: number,
+  receipts: ReadonlyMap<number, string>,
+): Promise<Map<number, string>> {
+  if (!receipts.size) return new Map();
+  const response = await requestUploadApi<{ parts: ProviderPart[] }>(`/files/api/uploads/${uploadId}/parts/`);
+  return reconcilePartReceipts(receipts, response.parts, fileSize, PART_SIZE);
+}
+
 async function requestUploadApi<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     return await requestAccountApi<T>(path, init);
@@ -137,13 +175,44 @@ async function requestUploadApi<T>(path: string, init: RequestInit = {}): Promis
 
 export const djangoMultipartUploadService: UploadService = {
   connected: true,
-  supportsPauseResume: false,
+  supportsPauseResume: true,
   async upload(task, file, observer, signal) {
+    if (activeTransfers.has(task.id)) throw new Error("Upload task already has an active transfer.");
+    const control = new UploadTransferControl(signal);
+    activeTransfers.set(task.id, control);
+    try {
     observer.onStatus("preparing", task.uploadSessionId ?? undefined);
-    const workspaceScope = getActiveWorkspaceIdForRequest() ?? "default";
-    const resumeKey = `securedrive-upload:${workspaceScope}:${encodeURIComponent(file.name)}:${file.size}:${file.lastModified}`;
-    const fileSha256 = await sha256Hex(file);
-    if (signal.aborted) return;
+    // A file with the same name/size can be uploaded to different folders.
+    const resumeKey = resumeStorageKey(task, file);
+    // Abort during hashing must not allocate a new UploadSession. If this is a
+    // resumed task, release its existing reservation on *cancel* (not pause).
+    const cancelBeforeUpload = async () => {
+      const existingSession = task.uploadSessionId ?? readSessionValue(resumeKey);
+      if (existingSession) {
+        try {
+          await requestUploadApi(`/files/api/uploads/${existingSession}/abort/`, {
+            method: "POST", headers: await accountCsrfHeaders(),
+          });
+        } catch { /* Expiry/reconciliation will clean up on network failure. */ }
+      }
+      forgetResumeState(resumeKey);
+    };
+    let fileSha256: string;
+    try {
+      fileSha256 = await sha256File(file, { signal: control.signal });
+    } catch (error) {
+      control.throwIfPaused();
+      if (signal.aborted) {
+        await cancelBeforeUpload();
+        return;
+      }
+      throw error;
+    }
+    control.throwIfPaused();
+    if (signal.aborted) {
+      await cancelBeforeUpload();
+      return;
+    }
     let uploadId = task.uploadSessionId ?? readSessionValue(resumeKey);
     let alreadyCompleting = false;
     if (uploadId) {
@@ -159,6 +228,8 @@ export const djangoMultipartUploadService: UploadService = {
           observer.onStatus("verifying", uploadId);
           observer.onCompleted();
           removeSessionValue(resumeKey);
+          removeSessionValue(`${resumeKey}:idempotency`);
+          removeSessionValue(`${resumeKey}:parts`);
           return;
         }
         alreadyCompleting = state.state === "verifying" || state.state === "scanning";
@@ -185,43 +256,66 @@ export const djangoMultipartUploadService: UploadService = {
       uploadId = created.upload_id;
     }
     saveSessionValue(resumeKey, uploadId);
+    const count = Math.ceil(file.size / PART_SIZE);
+    const receiptsKey = `${resumeKey}:parts`;
+    // Receipts originate from successful XHR responses. Never store presigned URLs.
+    // The server independently validates the manifest against MinIO ListParts.
+    const savedReceipts = alreadyCompleting ? new Map<number, string>()
+      : restorePartReceipts(readSessionValue(receiptsKey), uploadId, count);
+    // A previously uploaded part can disappear or be overwritten by another tab.
+    // Reuse only receipts still confirmed by the storage provider.
+    const completed = alreadyCompleting ? savedReceipts
+      : await fetchReconciledPartReceipts(uploadId, file.size, savedReceipts);
+    if (savedReceipts.size > 0) {
+      saveSessionValue(receiptsKey, serializePartReceipts(uploadId, completed));
+    }
+    const progress = new UploadPartProgress(file.size, PART_SIZE);
+    completed.forEach((_etag, number) => progress.update(number, PART_SIZE));
+    const telemetry = new UploadProgressTelemetry(file.size, progress.uploadedBytes);
+    const updatePartProgress = (number: number, loaded: number, force = false) => {
+      const uploadedBytes = progress.update(number, loaded);
+      const report = telemetry.report(uploadedBytes, force);
+      if (report) observer.onProgress(report);
+    };
     observer.onStatus("uploading", uploadId);
     if (alreadyCompleting) observer.onStatus("verifying", uploadId);
-    const count = Math.ceil(file.size / PART_SIZE);
-    const authorizedParts = new Map<number, PartAuthorization>();
-    if (!alreadyCompleting && count > 0) {
-      const batch = await authorizeBatch(uploadId!, Array.from({ length: count }, (_, index) => index + 1));
-      batch.forEach((part) => authorizedParts.set(part.part_number, part));
+    else if (completed.size > 0) {
+      const report = telemetry.report(progress.uploadedBytes, true);
+      if (report) observer.onProgress(report);
     }
-    const completed = new Map<number, string>();
-    const loadedByPart = new Map<number, number>();
-    let next = 1;
+    const pending = Array.from({ length: count }, (_, index) => index + 1)
+      .filter((number) => !completed.has(number));
+    // Workers request each small batch just before use rather than minting all
+    // short-lived URLs at once (especially useful on slow or paused uploads).
+    const partAuthorizations = new OnDemandPartAuthorizer<AuthorizedPart>(
+      pending, AUTHORIZATION_BATCH_SIZE,
+      (numbers) => authorizeBatch(uploadId!, numbers),
+    );
+    let next = 0;
     let fatal: unknown;
     const worker = async () => {
-      while (!signal.aborted && !fatal) {
-        const partNumber = next++;
-        if (partNumber > count) return;
+      while (!control.signal.aborted && !fatal) {
+        const partNumber = pending[next++];
+        if (partNumber === undefined) return;
         const start = (partNumber - 1) * PART_SIZE;
         const part = file.slice(start, Math.min(file.size, start + PART_SIZE));
         for (let attempt = 0; attempt <= PART_RETRIES; attempt++) {
           try {
-            const permission = authorizedParts.get(partNumber);
-            if (!permission) throw new Error(`Missing storage authorization for part ${partNumber}.`);
-            const etag = await uploadPart(permission.url, permission.headers, part, signal, (loaded) => {
-              loadedByPart.set(partNumber, loaded);
-              observer.onProgress({ uploadedBytes: [...loadedByPart.values()].reduce((a, b) => a + b, 0), totalBytes: file.size });
+            const permission = await partAuthorizations.get(partNumber, control.signal);
+            const etag = await uploadPart(permission.url, permission.headers, part, control.signal, (loaded) => {
+              updatePartProgress(partNumber, loaded);
             });
             completed.set(partNumber, etag);
-            loadedByPart.set(partNumber, part.size);
-            observer.onProgress({ uploadedBytes: [...loadedByPart.values()].reduce((a, b) => a + b, 0), totalBytes: file.size });
+            saveSessionValue(receiptsKey, serializePartReceipts(uploadId!, completed));
+            updatePartProgress(partNumber, part.size, true);
             break;
           } catch (error) {
-            if (signal.aborted) throw error;
+            if (control.signal.aborted) throw error;
             if (attempt === PART_RETRIES || (error as { retryable?: boolean }).retryable !== true) { fatal = error; return; }
-            loadedByPart.delete(partNumber);
+            updatePartProgress(partNumber, 0, true);
             if ((error as { status?: number }).status === 403) {
               const refreshed = await authorize(uploadId!, partNumber);
-              authorizedParts.set(partNumber, refreshed);
+              partAuthorizations.replace({ part_number: partNumber, ...refreshed });
             }
             await sleep(Math.min(2000, 200 * (2 ** attempt) + Math.random() * 150));
           }
@@ -229,12 +323,19 @@ export const djangoMultipartUploadService: UploadService = {
       }
     };
     if (!alreadyCompleting) {
-      try {
-        await Promise.all(Array.from({ length: Math.min(PART_CONCURRENCY, count) }, worker));
-      } catch (error) {
-        if (!signal.aborted) throw error;
+      // Wait for every interrupted PUT to settle before exposing Resume.
+      const outcomes = await Promise.allSettled(
+        Array.from({ length: Math.min(PART_CONCURRENCY, pending.length) }, worker),
+      );
+      control.throwIfPaused();
+      if (!signal.aborted) {
+        const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+        if (rejected?.status === "rejected") throw rejected.reason;
       }
     }
+    // Pause preserves the server-side UploadSession and its uploaded parts.
+    // Do not call the Django abort endpoint or discard the saved receipts.
+    control.throwIfPaused();
     if (signal.aborted) {
       try {
         await requestUploadApi(`/files/api/uploads/${uploadId}/abort/`, {
@@ -244,10 +345,13 @@ export const djangoMultipartUploadService: UploadService = {
         // Session expiry cleanup is the recovery path if the network is already gone.
       }
       removeSessionValue(resumeKey);
+      removeSessionValue(`${resumeKey}:idempotency`);
+      removeSessionValue(receiptsKey);
       return;
     }
     if (fatal) throw fatal;
     if (!alreadyCompleting) {
+      control.throwIfPaused();
       observer.onStatus("verifying", uploadId);
       await requestUploadApi<{ state: string; file_id?: number }>(`/files/api/uploads/${uploadId}/complete/`, {
         method: "POST", headers: await accountCsrfHeaders(),
@@ -267,8 +371,30 @@ export const djangoMultipartUploadService: UploadService = {
     if (result.state !== "available" && result.state !== "completed") throw Object.assign(new Error("Finalization is still running; retry to resume status polling."), { retryable: true, action: "The server retains this upload session; retry to check its status." });
     removeSessionValue(resumeKey);
     removeSessionValue(`${resumeKey}:idempotency`);
+    removeSessionValue(receiptsKey);
     observer.onCompleted();
+    } finally {
+      activeTransfers.delete(task.id);
+      control.finish();
+    }
   },
-  async pause() { /* Browser transport cannot pause an in-flight XHR; abort and resume by overwriting parts. */ },
-  async resume() { /* upload() reuses the persisted Django session and re-uploads parts idempotently. */ },
+  async pause(task) {
+    const transfer = activeTransfers.get(task.id);
+    if (!transfer) throw new Error("There is no active upload to pause.");
+    transfer.pause();
+    await transfer.finished;
+  },
+  async resume(task) {
+    if (activeTransfers.has(task.id)) throw new Error("The previous upload has not stopped yet.");
+    // UploadManager schedules upload() again. That method verifies the saved
+    // UploadSession/receipt manifest against the provider before sending parts.
+  },
+  async cancelPaused(task, file) {
+    if (!task.uploadSessionId) throw new Error("Paused upload has no server session to cancel.");
+    if (activeTransfers.has(task.id)) throw new Error("Cannot cancel while an upload is still stopping.");
+    await requestUploadApi(`/files/api/uploads/${task.uploadSessionId}/abort/`, {
+      method: "POST", headers: await accountCsrfHeaders(),
+    });
+    forgetResumeState(resumeStorageKey(task, file));
+  },
 };

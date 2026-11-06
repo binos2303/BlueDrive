@@ -18,7 +18,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from accounts.access import (
-    active_membership, can_access_workspace, get_default_tenant, get_default_workspace,
+    active_membership, can_access_workspace, can_edit_workspace_content,
+    get_default_tenant, get_default_workspace,
     resolve_request_workspace,
 )
 from files.models import File, QuotaReservation, UploadFinalizationJob, UploadSession
@@ -172,7 +173,8 @@ def create_upload(request):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-    if active_membership(request.user, tenant.pk) is None or not can_access_workspace(request.user, workspace):
+    # Authorize the write BEFORE creating a session or connecting to object storage.
+    if active_membership(request.user, tenant.pk) is None or not can_edit_workspace_content(request.user, workspace):
         return Response(
             {"detail": "Destination is not writable."},
             status=status.HTTP_404_NOT_FOUND,
@@ -240,6 +242,8 @@ def create_upload(request):
                 {"detail": "Available storage quota is insufficient."},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
+        except QuotaStateError:
+            return Response({"detail": "Storage quota is not configured for this workspace."}, status=409)
         except StorageError:
             logger.exception(
                 "Storage error while initializing existing session_id=%s",
@@ -346,6 +350,14 @@ def create_upload(request):
 
     try:
         _initialize_upload_session(session, request.user, adapter)
+    except QuotaStateError:
+        session.state = UploadSession.State.FAILED
+        session.failure_code = "quota_unconfigured"
+        session.save(update_fields=["state", "failure_code", "updated_at"])
+        return Response(
+            {"detail": "Storage quota is not configured for this workspace.", "failure_code": "quota_unconfigured"},
+            status=status.HTTP_409_CONFLICT,
+        )
     except QuotaExceeded:
         logger.warning("Upload quota exceeded for session_id=%s", session.pk)
         session.state = UploadSession.State.FAILED
@@ -412,6 +424,10 @@ def create_upload(request):
 @permission_classes([IsAuthenticated])
 def authorize_part(request, upload_id, part_number):
     session = _owned_session(request, upload_id)
+    # An Editor can be downgraded to Viewer after initiating an upload.
+    # Never grant fresh S3 write authorization after the role is revoked.
+    if not can_edit_workspace_content(request.user, session.workspace):
+        return Response({"detail": "Destination is not writable."}, status=404)
     if session.state != UploadSession.State.UPLOADING or session.expires_at <= timezone.now():
         return Response({"detail": "Upload session is not active."}, status=409)
     part_count = (session.expected_size_bytes + PART_SIZE - 1) // PART_SIZE
@@ -431,6 +447,10 @@ def authorize_part(request, upload_id, part_number):
 def authorize_parts(request, upload_id):
     """Issue a batch of short-lived S3 multipart PUT URLs to the session owner."""
     session = _owned_session(request, upload_id)
+    # An Editor can be downgraded to Viewer after initiating an upload.
+    # Never grant fresh S3 write authorization after the role is revoked.
+    if not can_edit_workspace_content(request.user, session.workspace):
+        return Response({"detail": "Destination is not writable."}, status=404)
     if session.state != UploadSession.State.UPLOADING or session.expires_at <= timezone.now():
         return Response({"detail": "Upload session is not active."}, status=409)
 
@@ -475,6 +495,32 @@ def authorize_parts(request, upload_id):
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
+def list_uploaded_parts(request, upload_id):
+    """Reconcile client-persisted receipts against S3 without exposing its upload ID.
+
+    This endpoint does not generate the CompleteMultipartUpload manifest. The
+    browser keeps the original ETags from successful UploadPart responses.
+    """
+    session = _owned_session(request, upload_id)
+    if not can_edit_workspace_content(request.user, session.workspace):
+        return Response({"detail": "Destination is not writable."}, status=404)
+    if session.state != UploadSession.State.UPLOADING or session.expires_at <= timezone.now():
+        return Response({"detail": "Upload session is not active."}, status=409)
+    if not session.provider_upload_id:
+        return Response({"parts": []})  # Empty files do not use multipart.
+    try:
+        parts = get_storage_adapter().list_uploaded_parts(session.object_key, session.provider_upload_id)
+    except StorageError:
+        return Response({"detail": "Unable to reconcile multipart upload."}, status=503)
+    return Response({"parts": [
+        {"part_number": part.part_number, "etag": part.etag, "size_bytes": part.size_bytes}
+        for part in parts
+    ]})
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
 def upload_status(request, upload_id):
     session = _owned_session(request, upload_id)
     if session.state in (UploadSession.State.INITIATED, UploadSession.State.UPLOADING) and session.expires_at <= timezone.now():
@@ -505,6 +551,10 @@ def abort_upload(request, upload_id):
         session = UploadSession.objects.select_for_update().get(pk=session.pk)
         if session.state in (UploadSession.State.COMPLETED, UploadSession.State.AVAILABLE):
             return Response({"detail": "Completed uploads cannot be canceled."}, status=409)
+        if session.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+            # Multipart completion may already have succeeded. Deleting the
+            # object concurrently with the finalizer could corrupt publication.
+            return Response({"detail": "Upload is finalizing and cannot be canceled."}, status=409)
         if session.state in (UploadSession.State.CANCELED, UploadSession.State.FAILED):
             return Response({"state": session.state})
         session.state = UploadSession.State.CANCELED
@@ -528,6 +578,8 @@ def abort_upload(request, upload_id):
 @permission_classes([IsAuthenticated])
 def complete_upload(request, upload_id):
     session = _owned_session(request, upload_id)
+    if not can_edit_workspace_content(request.user, session.workspace):
+        return Response({"detail": "Destination is not writable."}, status=404)
     if session.state in (UploadSession.State.COMPLETED, UploadSession.State.AVAILABLE):
         return Response({"upload_id": str(session.pk), "state": session.state, "file_id": session.file_id})
     if session.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):

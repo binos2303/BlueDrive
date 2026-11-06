@@ -1,350 +1,176 @@
 "use client";
 
-import Link from "next/link";
-import { useState } from "react";
-import { AlertTriangle, ArrowLeft, Database, HardDrive, Pencil, UsersRound, X } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { HardDrive, RefreshCw, Search, Settings2, X } from "lucide-react";
+import AdminPageHeader from "@/components/admin/AdminPageHeader";
+import AdminSegmentTabs from "@/components/admin/AdminSegmentTabs";
+import QuotaPlanPolicies from "@/components/admin/QuotaPlanPolicies";
+import styles from "./QuotaManagement.module.css";
+import { accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
 
-type QuotaUser = {
-  name: string;
-  limit: number;
-  used: number;
-  changed: string;
+type Quota = {
+  id: string; limit_bytes: number | null; used_bytes: number; reserved_bytes: number;
+  remaining_bytes: number | null; percentage: number | null; plan_code: string | null;
+  status: "normal" | "warning" | "critical" | "full" | "over_quota";
 };
-
-type QuotaTeam = {
-  name: string;
-  limit: number;
-  used: number;
-  members: number;
-  changed: string;
+type DirectoryRow = {
+  scope: "personal" | "workspace"; id: string; name: string; detail: string;
+  tenant_status: string; tenant_kind?: "personal" | "business";
+  editable: boolean; quota: Quota | null;
 };
+type Directory = { count: number; page: number; page_size: number; results: DirectoryRow[] };
+type Plan = { code: string; name: string; scope: "personal" | "workspace"; limit_bytes: number; is_active: boolean };
+type Change = { selected: DirectoryRow; plan_code: string; custom_mib: string; reason: string };
+type ConfigEvent = { id: string; created_at: string; actor: string; target?: string; action?: string; reason: string };
+type ConfigAudit = { plan_change_count: number; policy_change_count: number; plan_changes: ConfigEvent[]; policy_changes: ConfigEvent[] };
+type Audit = { id: string; actor: string; created_at: string; quota_account_id: string; old_limit_bytes: number | null; new_limit_bytes: number | null; old_plan_code: string; new_plan_code: string; reason: string };
 
-const initialUsers: QuotaUser[] = [
-  { name: "user_a", limit: 10, used: 7.5, changed: "No changes recorded" },
-  { name: "user_b", limit: 5, used: 4.8, changed: "No changes recorded" },
-  { name: "user_c", limit: 10, used: 10, changed: "No changes recorded" },
-];
-
-const initialTeams: QuotaTeam[] = [
-  { name: "Team Alpha", limit: 50, used: 32, members: 8, changed: "No changes recorded" },
-  { name: "Team Beta", limit: 30, used: 28, members: 5, changed: "No changes recorded" },
-];
-
+const SIZE = 1024 * 1024;
+const BASE = "/admin/infrastructure/quotas";
+const fmt = (n: number) => new Intl.NumberFormat("en-US").format(n);
+function readable(n: number | null): string {
+  if (n === null) return "Unlimited";
+  if (n < 1024) return `${n} B`;
+  const unit = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let value = n; let index = 0;
+  while (value >= 1024 && index < unit.length - 1) { value /= 1024; index++; }
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit[index]}`;
+}
+function errorMessage(e: unknown) { return e instanceof Error ? e.message : "Request failed."; }
 const sections = [
-  { id: "users", label: "User Quotas" },
-  { id: "teams", label: "Team Quotas" },
-  { id: "capacity", label: "Storage Capacity" },
-  { id: "policies", label: "Quota Policies" },
+  { key: "users", text: "Personal" },
+  { key: "teams", text: "Workspaces" },
+  { key: "policies", text: "Plans & Policies" },
+  { key: "capacity", text: "Audit" },
+] as const;
+const sortOptions = [
+  { value: "name_asc", label: "Name A–Z" },
+  { value: "name_desc", label: "Name Z–A" },
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
 ];
 
 export default function QuotaManagement({ section = "overview" }: { section?: string }) {
-  const [users, setUsers] = useState(initialUsers);
-  const [teams, setTeams] = useState(initialTeams);
-  const [selectedUser, setSelectedUser] = useState<QuotaUser | null>(null);
-  const [editingQuota, setEditingQuota] = useState<{ name: string; limit: number; used: number; entity: "user" | "team" } | null>(null);
+  const active = section === "overview" ? "users" : section;
+  const scope = active === "teams" ? "workspace" : "personal";
+  const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState("name_asc");
+  const [page, setPage] = useState(1);
+  const [revision, setRevision] = useState(0);
+  const [directory, setDirectory] = useState<Directory | null>(null);
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [audit, setAudit] = useState<{ count: number; results: Audit[] } | null>(null);
+  const [configAudit, setConfigAudit] = useState<ConfigAudit | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [change, setChange] = useState<Change | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [canEdit, setCanEdit] = useState(false);
 
-  function saveQuota(limit: number) {
-    if (!editingQuota) return;
-    const changed = `Preview updated · ${formatGB(editingQuota.limit)} → ${formatGB(limit)}`;
-    if (editingQuota.entity === "user") {
-      setUsers((current) => current.map((user) => user.name === editingQuota.name ? { ...user, limit, changed } : user));
-      setSelectedUser((current) => current?.name === editingQuota.name ? { ...current, limit, changed } : current);
-    } else {
-      setTeams((current) => current.map((team) => team.name === editingQuota.name ? { ...team, limit, changed } : team));
+  useEffect(() => {
+    const controller = new AbortController();
+    const run = async () => {
+      setLoading(true); setError("");
+      try {
+        const params = new URLSearchParams({ scope, q: search, sort, page: String(page) });
+        const endpoint = active === "policies" ? "/accounts/api/admin/quota-plans/" :
+          active === "capacity" ? `/accounts/api/admin/quotas/history/?page=${page}` :
+            `/accounts/api/admin/quotas/?${params}`;
+        const result = await requestAccountApi<Directory | { plans: Plan[] } | { count: number; results: Audit[] }>(endpoint, { signal: controller.signal, cache: "no-store" });
+        if (controller.signal.aborted) return;
+        if (active === "policies") setPlans((result as { plans: Plan[] }).plans);
+        else if (active === "capacity") {
+          setAudit(result as { count: number; results: Audit[] });
+          const config = await requestAccountApi<ConfigAudit>(`/accounts/api/admin/quotas/configuration-history/?page=${page}`, { signal: controller.signal, cache: "no-store" });
+          if (!controller.signal.aborted) setConfigAudit(config);
+        }
+        else setDirectory(result as Directory);
+      } catch (e) {
+        if (!controller.signal.aborted) setError(errorMessage(e));
+      } finally { if (!controller.signal.aborted) setLoading(false); }
+    };
+    void run();
+    return () => controller.abort();
+  }, [scope, search, sort, page, revision, active]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestAccountApi<{ can_manage_admins: boolean }>("/accounts/api/admin/access/", { signal: controller.signal })
+      .then((access) => { if (!controller.signal.aborted) setCanEdit(access.can_manage_admins); })
+      .catch(() => { if (!controller.signal.aborted) setCanEdit(false); });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestAccountApi<{ plans: Plan[] }>("/accounts/api/admin/quota-plans/", { signal: controller.signal })
+      .then((r) => { if (!controller.signal.aborted) setPlans(r.plans); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  function refresh() { setRevision((r) => r + 1); }
+  function searchSubmit(e: FormEvent<HTMLFormElement>) { e.preventDefault(); setPage(1); setSearch(query.trim()); refresh(); }
+  const totalPages = Math.max(1, Math.ceil((directory?.count ?? 0) / (directory?.page_size || 20)));
+
+  async function applyChange(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!change?.selected.quota || saving) return;
+    setSaving(true); setError(""); setNotice("");
+    const custom = Number(change.custom_mib);
+    if (!change.plan_code && (!Number.isSafeInteger(custom) || custom < 0 || custom > 1000000000)) {
+      setError("Custom quota must be an integer between 0 and 1,000,000,000 MiB."); setSaving(false); return;
     }
-    setEditingQuota(null);
+    try {
+      const headers = await accountCsrfHeaders();
+      await requestAccountApi(`/accounts/api/admin/quotas/${change.selected.quota.id}/`, {
+        method: "PATCH", headers,
+        body: JSON.stringify({
+          plan_code: change.plan_code || null,
+          limit_bytes: change.plan_code ? null : custom * SIZE,
+          reason: change.reason.trim(),
+        }),
+      });
+      setNotice(`Quota updated for ${change.selected.name}.`);
+      setChange(null); refresh();
+    } catch (e) { setError(errorMessage(e)); }
+    finally { setSaving(false); }
   }
 
-  return (
-    <div>
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          {section !== "overview" && <Link href="/admin/infrastructure/quotas" aria-label="Back to quota overview" className="rounded-lg p-2 text-muted hover:bg-background"><ArrowLeft size={18} /></Link>}
-          <h2 className="text-2xl font-semibold tracking-tight">{getTitle(section)}</h2>
+  const title = "Quota Management";
+  return <div className="space-y-5">
+    <AdminPageHeader title={title} actions={<button type="button" onClick={refresh} disabled={loading} className="inline-flex h-10 items-center gap-2 rounded-xl border border-border bg-surface px-4 text-[13px] disabled:opacity-40"><RefreshCw size={15} className={loading ? "animate-spin" : ""} />Refresh</button>} />
+    <AdminSegmentTabs value={active} label="Quota management sections" tabs={sections.map(({ key, text }) => ({ value: key, label: text, href: `${BASE}/${key}` }))} />
+    {notice && <p role="status" className="rounded-xl border border-border bg-surface px-4 py-3 text-[13px] text-foreground">{notice}</p>}
+    {error && <p role="alert" className="rounded-xl border border-border bg-surface px-4 py-3 text-[13px] text-danger">{error}</p>}
+    {(active === "users" || active === "teams") && <>
+      <p className="text-[12px] text-muted">{active === "users" ? "Personal Drive accounts" : "Active collaboration workspaces"}: <strong className="ml-1 tabular-nums text-foreground">{loading ? "—" : fmt(directory?.count || 0)}</strong></p>
+      <section className="overflow-hidden rounded-[20px] border border-border bg-surface">
+        <div className={`${styles.filterGrid} border-b border-border p-4`}>
+          <form role="search" onSubmit={searchSubmit} className="flex h-11 min-w-0 items-center gap-2 rounded-xl border border-border bg-background px-3 focus-within:ring-2 focus-within:ring-brand-contrast/30"><Search size={16} className="shrink-0 text-muted"/><input aria-label="Search quotas" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search account, workspace or organization" className="w-full min-w-0 bg-transparent text-[13px] outline-none focus:outline-none focus-visible:outline-none focus-visible:ring-0"/><button type="submit" className="shrink-0 text-[12px] font-semibold text-brand-contrast">Search</button></form>
+          <select aria-label="Sort quotas" value={sort} onChange={(e) => { setSort(e.target.value); setPage(1); }} className="h-11 min-w-0 rounded-xl border border-border bg-background px-3 text-[13px] text-foreground">{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
         </div>
-        {section !== "capacity" && <span className="rounded-full bg-brand-soft px-2.5 py-1 text-xs font-medium text-brand">Illustrative data</span>}
-      </div>
-
-      <nav aria-label="Quota management sections" className="mb-5 flex gap-2 overflow-x-auto pb-1">
-        <SectionLink id="overview" active={section === "overview"}>Overview</SectionLink>
-        {sections.map(({ id, label }) => <SectionLink key={id} id={id} active={section === id}>{label}</SectionLink>)}
-      </nav>
-
-      {section === "overview" && <Overview users={users} />}
-      {section === "users" && <UserQuotas users={users} onSelectUser={setSelectedUser} onEditUser={(user) => setEditingQuota({ ...user, entity: "user" })} />}
-      {section === "teams" && <TeamQuotas teams={teams} onEditTeam={(team) => setEditingQuota({ ...team, entity: "team" })} />}
-      {section === "capacity" && <StorageCapacity />}
-      {section === "policies" && <QuotaPolicies />}
-      {selectedUser && <UserDetails user={selectedUser} onClose={() => setSelectedUser(null)} onEdit={() => setEditingQuota({ ...selectedUser, entity: "user" })} />}
-      {editingQuota && <QuotaEditor quota={editingQuota} onClose={() => setEditingQuota(null)} onSave={saveQuota} />}
-    </div>
-  );
-}
-
-function getTitle(section: string) {
-  if (section === "overview") return "Quota Management";
-  return sections.find((item) => item.id === section)?.label ?? "Quota Management";
-}
-
-function SectionLink({ id, active, children }: { id: string; active: boolean; children: React.ReactNode }) {
-  return (
-    <Link href={id === "overview" ? "/admin/infrastructure/quotas" : `/admin/infrastructure/quotas/${id}`} aria-current={active ? "page" : undefined} className={`shrink-0 rounded-xl px-3.5 py-2.5 text-sm font-medium transition ${active ? "bg-brand-soft text-brand" : "bg-surface text-muted hover:bg-background hover:text-foreground"}`}>
-      {children}
-    </Link>
-  );
-}
-
-function Overview({ users }: { users: QuotaUser[] }) {
-  const used = users.reduce((total, user) => total + user.used, 0);
-  const quota = users.reduce((total, user) => total + user.limit, 0);
-  const remaining = quota - used;
-  const nearLimit = users.filter((user) => user.used / user.limit >= 0.9).length;
-  const metrics = [
-    { label: "Total quota", value: formatGB(quota), icon: Database },
-    { label: "Used", value: formatGB(used), icon: HardDrive },
-    { label: "Available", value: formatGB(remaining), icon: HardDrive },
-    { label: "Users near quota", value: `${nearLimit}`, icon: UsersRound },
-  ];
-
-  return (
-    <>
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {metrics.map(({ label, value, icon: Icon }) => <Metric key={label} label={label} value={value} icon={Icon} />)}
-      </div>
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        <SectionCard href="/admin/infrastructure/quotas/users" title="User Quotas" detail="Review usage and individual limits" icon={UsersRound} />
-        <SectionCard href="/admin/infrastructure/quotas/capacity" title="Storage Capacity" detail="Physical disk and object storage" icon={HardDrive} />
-      </div>
-      <div className="mt-5 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
-        <AlertTriangle size={18} className="mt-0.5 shrink-0" />
-        <p className="text-sm">Quota values are illustrative. Physical storage capacity is monitored separately.</p>
-      </div>
-    </>
-  );
-}
-
-function UserQuotas({ users, onSelectUser, onEditUser }: { users: QuotaUser[]; onSelectUser: (user: QuotaUser) => void; onEditUser: (user: QuotaUser) => void }) {
-  return (
-    <section className="overflow-hidden rounded-[22px] border border-border bg-surface">
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left">
-          <thead className="bg-background text-[11px] font-semibold tracking-wide text-muted">
-            <tr><th className="px-5 py-3">USER</th><th className="px-4 py-3">QUOTA LIMIT</th><th className="px-4 py-3">USED</th><th className="px-4 py-3">AVAILABLE</th><th className="px-4 py-3">USAGE</th><th className="px-4 py-3">ACTIONS</th></tr>
-          </thead>
-          <tbody>
-            {users.map((user) => {
-              const available = Math.max(0, user.limit - user.used);
-              const percent = Math.round((user.used / user.limit) * 100);
-              return (
-                <tr key={user.name} className="border-t border-border/70">
-                  <td className="px-5 py-4 text-sm font-semibold">{user.name}</td>
-                  <td className="px-4 py-4 text-sm">{formatGB(user.limit)}</td>
-                  <td className="px-4 py-4 text-sm">{formatGB(user.used)}</td>
-                  <td className="px-4 py-4 text-sm">{formatGB(available)}</td>
-                  <td className="px-4 py-4">
-                    <div className="flex min-w-32 items-center gap-2"><div className="h-2 flex-1 overflow-hidden rounded-full bg-background"><div className={`h-full rounded-full ${percent >= 90 ? "bg-amber-500" : "bg-brand"}`} style={{ width: `${percent}%` }} /></div><span className="w-10 text-right text-xs font-medium">{percent}%</span></div>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="flex items-center gap-1">
-                      <button type="button" onClick={() => onSelectUser(user)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-muted hover:bg-background">Details</button>
-                      <button type="button" onClick={() => onEditUser(user)} className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-brand hover:bg-brand-soft"><Pencil size={13} />Edit quota</button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function TeamQuotas({ teams, onEditTeam }: { teams: QuotaTeam[]; onEditTeam: (team: QuotaTeam) => void }) {
-  return (
-    <div className="space-y-4">
-      <UnavailableNotice>Illustrative team quotas. Confirm shared storage ownership and quota calculation before enabling backend enforcement.</UnavailableNotice>
-      <section className="overflow-hidden rounded-[22px] border border-border bg-surface">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[620px] text-left">
-            <thead className="bg-background text-[11px] font-semibold tracking-wide text-muted"><tr><th className="px-5 py-3">TEAM</th><th className="px-4 py-3">QUOTA LIMIT</th><th className="px-4 py-3">USED</th><th className="px-4 py-3">AVAILABLE</th><th className="px-4 py-3">MEMBERS</th><th className="px-4 py-3">ACTIONS</th></tr></thead>
-            <tbody>
-              {teams.map((team) => (
-                <tr key={team.name} className="border-t border-border/70">
-                  <td className="px-5 py-4 text-sm font-semibold">{team.name}</td>
-                  <td className="px-4 py-4 text-sm">{formatGB(team.limit)}</td>
-                  <td className="px-4 py-4 text-sm">{formatGB(team.used)}</td>
-                  <td className="px-4 py-4 text-sm">{formatGB(Math.max(0, team.limit - team.used))}</td>
-                  <td className="px-4 py-4 text-sm">{team.members}</td>
-                  <td className="px-4 py-4"><button type="button" onClick={() => onEditTeam(team)} className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-brand hover:bg-brand-soft"><Pencil size={13} />Edit quota</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        {loading ? <p role="status" className="p-8 text-center text-sm text-muted">Loading quota records…</p> : <div className="overflow-x-auto">
+          <table className="w-full min-w-212.5 text-left text-[13px]"><thead className="bg-background text-xs text-muted"><tr><th className="px-5 py-4">{active === "users" ? "Account" : "Workspace"}</th><th className="px-4 py-4">Plan</th><th className="px-4 py-4">Used / Reserved</th><th className="px-4 py-4">Limit</th><th className="px-4 py-4">Usage</th><th className="px-4 py-4">Status</th><th className="px-5 py-4 text-right">Actions</th></tr></thead>
+            <tbody>{directory?.results.map((row) => {
+              const q = row.quota; const width = Math.max(0, Math.min(q?.percentage ?? 0, 100));
+              return <tr key={row.id} className="border-t border-border/70"><td className="px-5 py-4"><p className="font-semibold">{row.name}</p><p className="mt-0.5 text-xs text-muted">{row.detail}</p></td><td className="px-4 py-4 text-muted">{plans.find((p) => p.code === q?.plan_code)?.name ?? (q ? "Custom" : "Unconfigured")}</td><td className="px-4 py-4"><p>{q ? readable(q.used_bytes) : "—"}</p><p className="text-xs text-muted">Reserved: {q ? readable(q.reserved_bytes) : "—"}</p></td><td className="px-4 py-4">{q ? readable(q.limit_bytes) : "—"}</td><td className="px-4 py-4"><div className="h-2 w-28 overflow-hidden rounded-full bg-background"><div className="h-full rounded-full bg-brand-contrast" style={{ width: `${width}%` }} /></div><p className="mt-1 text-xs text-muted">{q?.percentage === null || !q ? "—" : `${q.percentage}%`}</p></td><td className="px-4 py-4 capitalize">{q?.status.replaceAll("_", " ") ?? "Unconfigured"}</td><td className="px-5 py-4 text-right">{row.editable && q && canEdit ? <button type="button" onClick={() => { setError(""); setChange({ selected: row, plan_code: q.plan_code || "", custom_mib: String(Math.round((q.limit_bytes || 0) / SIZE)), reason: "" }); }} className="rounded-xl border border-border px-3 py-2 text-xs font-semibold text-brand-contrast">Manage</button> : <span className="text-xs text-muted">{!row.editable ? "Organization managed" : !q ? "Requires reconciliation" : "View only"}</span>}</td></tr>;
+            })}</tbody></table>{!directory?.results.length && <p className="p-8 text-center text-sm text-muted">No matching storage accounts.</p>}
+          </div>}
+        <div className="flex items-center justify-between gap-3 border-t border-border p-4 text-xs text-muted"><span>Page {page} of {totalPages}</span><div className="flex gap-2"><button type="button" disabled={page <= 1 || loading} onClick={() => setPage((p) => p - 1)} className="rounded-lg border border-border px-3 py-2 disabled:opacity-30">Previous</button><button type="button" disabled={page >= totalPages || loading} onClick={() => setPage((p) => p + 1)} className="rounded-lg border border-border px-3 py-2 disabled:opacity-30">Next</button></div></div>
       </section>
-    </div>
-  );
-}
-
-function StorageCapacity() {
-  return (
-    <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Metric label="Physical capacity" value="Unknown" icon={HardDrive} />
-        <Metric label="Used capacity" value="Unknown" icon={Database} />
-        <Metric label="Available capacity" value="Unknown" icon={HardDrive} />
-      </div>
-      <UnavailableNotice>Disk and MinIO capacity are separate from user and team quotas.</UnavailableNotice>
-      <section className="overflow-hidden rounded-[22px] border border-border bg-surface">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[560px] text-left">
-            <thead className="bg-background text-[11px] font-semibold tracking-wide text-muted"><tr><th className="px-5 py-3">STORAGE</th><th className="px-4 py-3">TYPE</th><th className="px-4 py-3">CAPACITY</th><th className="px-4 py-3">STATUS</th></tr></thead>
-            <tbody>
-              <tr className="border-t border-border/70"><td className="px-5 py-4 text-sm font-medium">Server disk</td><td className="px-4 py-4 text-sm text-muted">Filesystem</td><td className="px-4 py-4 text-sm text-muted">Unknown</td><td className="px-4 py-4"><UnknownBadge /></td></tr>
-              <tr className="border-t border-border/70"><td className="px-5 py-4 text-sm font-medium">MinIO</td><td className="px-4 py-4 text-sm text-muted">Object storage</td><td className="px-4 py-4 text-sm text-muted">Unknown</td><td className="px-4 py-4"><UnknownBadge /></td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function QuotaPolicies() {
-  return (
-    <div className="space-y-4">
-      <UnavailableNotice>Policy changes are disabled until the backend supports quota enforcement.</UnavailableNotice>
-      <section className="max-w-3xl space-y-5 rounded-[22px] border border-border bg-surface p-5 sm:p-6">
-        <ReadOnlyField label="Default user quota" value="Not configured" />
-        <ReadOnlyField label="Maximum file upload size" value="Not configured" />
-        <ReadOnlyField label="Warning threshold" value="Not configured" />
-        <ReadOnlyField label="Quota enforcement" value="Unknown" />
-        <div className="flex items-start gap-3 rounded-xl bg-background p-4 text-sm text-muted">
-          <AlertTriangle size={17} className="mt-0.5 shrink-0 text-amber-600" />
-          Lowering a quota below current usage should block new uploads without deleting existing files.
-        </div>
-        <button type="button" disabled className="rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white opacity-50">Save policy</button>
-      </section>
-    </div>
-  );
-}
-
-function UserDetails({ user, onClose, onEdit }: { user: QuotaUser; onClose: () => void; onEdit: () => void }) {
-  const percent = Math.round((user.used / user.limit) * 100);
-  const overLimit = user.used > user.limit;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section role="dialog" aria-modal="true" aria-labelledby="quota-user-title" className="w-full max-w-lg rounded-[22px] bg-surface p-5 shadow-xl sm:p-6">
-        <div className="flex items-center justify-between">
-          <h3 id="quota-user-title" className="text-lg font-semibold">{user.name}</h3>
-          <button type="button" aria-label="Close user details" onClick={onClose} className="rounded-lg p-2 text-muted hover:bg-background"><X size={18} /></button>
-        </div>
-        <div className="mt-5 grid grid-cols-2 gap-3">
-          <DetailValue label="Quota limit" value={formatGB(user.limit)} />
-          <DetailValue label="Used" value={formatGB(user.used)} />
-          <DetailValue label="Available" value={formatGB(Math.max(0, user.limit - user.used))} />
-          <DetailValue label="Usage" value={`${percent}%`} />
-        </div>
-        <div className="mt-4 rounded-xl bg-background p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted">Quota change history</p>
-          <p className="mt-2 text-sm">{user.changed}</p>
-        </div>
-        {overLimit && <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-900">Usage exceeds quota. New uploads should be blocked; existing files remain unchanged.</p>}
-        <button type="button" onClick={onEdit} className="mt-5 w-full rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-hover">Edit quota</button>
-      </section>
-    </div>
-  );
-}
-
-function QuotaEditor({
-  quota,
-  onClose,
-  onSave,
-}: {
-  quota: { name: string; limit: number; used: number; entity: "user" | "team" };
-  onClose: () => void;
-  onSave: (limit: number) => void;
-}) {
-  const [newLimit, setNewLimit] = useState(String(quota.limit));
-  const parsedLimit = Number(newLimit);
-  const validLimit = newLimit.trim() !== "" && Number.isFinite(parsedLimit) && parsedLimit > 0;
-  const exceedsUsage = validLimit && parsedLimit < quota.used;
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <form
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="quota-editor-title"
-        className="w-full max-w-md rounded-[22px] bg-surface p-5 shadow-xl sm:p-6"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (validLimit) onSave(parsedLimit);
-        }}
-      >
-        <div className="flex items-center justify-between">
-          <h3 id="quota-editor-title" className="text-lg font-semibold">Edit {quota.entity} quota</h3>
-          <button type="button" aria-label="Close quota editor" onClick={onClose} className="rounded-lg p-2 text-muted hover:bg-background"><X size={18} /></button>
-        </div>
-        <p className="mt-1 text-sm text-muted">{quota.name}</p>
-        <label className="mt-5 block text-sm font-medium">
-          New quota limit (GB)
-          <input autoFocus type="number" min="0.1" step="0.1" required value={newLimit} onChange={(event) => setNewLimit(event.target.value)} className="mt-2 h-11 w-full rounded-xl border border-border bg-background px-3 text-sm outline-none focus:border-brand" />
-        </label>
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <DetailValue label="Current usage" value={formatGB(quota.used)} />
-          <DetailValue label="Available after change" value={validLimit ? formatGB(Math.max(0, parsedLimit - quota.used)) : "—"} />
-        </div>
-        {exceedsUsage && (
-          <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
-            The new limit is below current usage. New uploads should be blocked; existing files will not be deleted.
-          </p>
-        )}
-        <p className="mt-4 rounded-xl bg-background p-3 text-xs text-muted">Preview only — quota changes are not saved to the backend.</p>
-        <div className="mt-5 flex gap-3">
-          <button type="button" onClick={onClose} className="flex-1 rounded-xl border border-border px-4 py-2.5 text-sm font-semibold text-muted hover:bg-background">Cancel</button>
-          <button type="submit" disabled={!validLimit} className="flex-1 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-hover disabled:opacity-50">Preview change</button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function Metric({ label, value, icon: Icon }: { label: string; value: string; icon: typeof Database }) {
-  return (
-    <section className="rounded-[20px] border border-border bg-surface p-5">
-      <div className="flex items-center justify-between"><p className="text-sm text-muted">{label}</p><span className="rounded-xl bg-brand-soft p-2.5 text-brand"><Icon size={18} /></span></div>
-      <p className="mt-4 text-2xl font-semibold">{value}</p>
-    </section>
-  );
-}
-
-function SectionCard({ href, title, detail, icon: Icon }: { href: string; title: string; detail: string; icon: typeof Database }) {
-  return (
-    <Link href={href} className="flex items-center gap-4 rounded-[20px] border border-border bg-surface p-5 transition hover:bg-background">
-      <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand-soft text-brand"><Icon size={20} /></span>
-      <span className="min-w-0 flex-1"><span className="block text-sm font-semibold">{title}</span><span className="mt-1 block text-xs text-muted">{detail}</span></span>
-    </Link>
-  );
-}
-
-function UnavailableNotice({ children }: { children: React.ReactNode }) {
-  return <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900"><AlertTriangle size={18} className="mt-0.5 shrink-0" /><p className="text-sm">{children}</p></div>;
-}
-
-function ReadOnlyField({ label, value }: { label: string; value: string }) {
-  return <label className="block text-sm font-medium">{label}<input disabled value={value} readOnly className="mt-2 h-11 w-full rounded-xl border border-border bg-background px-3 text-sm font-normal text-muted disabled:opacity-70" /></label>;
-}
-
-function DetailValue({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-xl bg-background p-3"><p className="text-xs text-muted">{label}</p><p className="mt-1 text-sm font-semibold">{value}</p></div>;
-}
-
-function UnknownBadge() {
-  return <span className="rounded-full bg-background px-2.5 py-1 text-xs font-medium text-muted">Unknown</span>;
-}
-
-function formatGB(value: number) {
-  return `${Number.isInteger(value) ? value : value.toFixed(1)} GB`;
+    </>}
+    {active === "policies" && <QuotaPlanPolicies canEdit={canEdit} />}
+    {active === "capacity" && <section className="overflow-hidden rounded-[20px] border border-border bg-surface"><div className="flex items-center gap-2 border-b border-border px-5 py-4 text-[14px] font-semibold"><HardDrive size={17}/>Quota changes</div>{loading ? <p className="p-8 text-sm text-muted">Loading audit history…</p> : <div className="overflow-x-auto"><table className="w-full min-w-162.5 text-left text-[13px]"><thead className="bg-background text-xs text-muted"><tr><th className="px-5 py-3">Changed</th><th className="px-5 py-3">Administrator</th><th className="px-5 py-3">Old limit</th><th className="px-5 py-3">New limit</th><th className="px-5 py-3">Reason</th></tr></thead><tbody>{audit?.results.map((item) => <tr className="border-t border-border" key={item.id}><td className="px-5 py-4">{new Date(item.created_at).toLocaleString()}</td><td className="px-5 py-4">{item.actor}</td><td className="px-5 py-4">{readable(item.old_limit_bytes)}</td><td className="px-5 py-4">{readable(item.new_limit_bytes)}</td><td className="px-5 py-4">{item.reason}</td></tr>)}</tbody></table>{!audit?.results.length && <p className="p-8 text-center text-xs text-muted">No quota changes recorded.</p>}</div>}<div className="flex items-center justify-between border-t border-border p-4 text-xs"><span>{audit?.count ?? 0} events · Page {page}</span><div className="flex gap-2"><button disabled={page === 1} onClick={() => setPage((p) => p - 1)} className="rounded-lg border border-border px-3 py-2 disabled:opacity-30">Previous</button><button disabled={!audit || page * 20 >= audit.count} onClick={() => setPage((p) => p + 1)} className="rounded-lg border border-border px-3 py-2 disabled:opacity-30">Next</button></div></div></section>}
+    {active === "capacity" && !loading && configAudit && <section className="overflow-hidden rounded-[20px] border border-border bg-surface">
+      <h2 className="border-b border-border px-4 py-3 text-[13px] font-semibold">Plan & policy changes</h2>
+      <div className="overflow-x-auto"><table className="w-full min-w-160 text-left text-[12px]"><thead className="bg-background text-muted"><tr><th className="px-4 py-3">Changed</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Administrator</th><th className="px-4 py-3">Reason</th></tr></thead><tbody>
+        {[...configAudit.plan_changes.map((e) => ({ ...e, type: `Plan ${e.target || ""} · ${e.action || "updated"}` })), ...configAudit.policy_changes.map((e) => ({ ...e, type: "Storage policy" }))].sort((a, b) => b.created_at.localeCompare(a.created_at)).map((event) => <tr key={event.id} className="border-t border-border/70"><td className="px-4 py-3">{new Date(event.created_at).toLocaleString()}</td><td className="px-4 py-3">{event.type}</td><td className="px-4 py-3">{event.actor}</td><td className="px-4 py-3">{event.reason}</td></tr>)}
+      </tbody></table></div>
+      <p className="border-t border-border px-4 py-3 text-[11px] text-muted">{configAudit.plan_change_count} plan changes · {configAudit.policy_change_count} policy changes. Page {page} for each change type.</p>
+    </section>}
+    {change && <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setChange(null); }}><section role="dialog" aria-modal="true" aria-label="Manage storage quota" className="w-full max-w-md rounded-[20px] border border-border bg-surface p-6 shadow-xl"><div className="flex items-center justify-between"><div className="flex items-center gap-2 text-[17px] font-semibold"><Settings2 size={18}/>Manage quota</div><button type="button" disabled={saving} aria-label="Close" onClick={() => setChange(null)}><X size={20}/></button></div><p className="mt-2 text-[13px] text-muted">{change.selected.name}</p><form onSubmit={(e) => void applyChange(e)} className="mt-5 space-y-4"><label className="block text-[12px] font-medium">Storage plan<select className="mt-2 h-11 w-full rounded-xl border border-border bg-background px-3" value={change.plan_code} onChange={(e) => setChange({ ...change, plan_code: e.target.value })}><option value="">Custom quota</option>{plans.filter((p) => p.is_active && p.scope === change.selected.scope).map((p) => <option key={p.code} value={p.code}>{p.name} — {readable(p.limit_bytes)}</option>)}</select></label>{!change.plan_code && <label className="block text-[12px] font-medium">Limit (MiB)<input type="number" min={0} max={1000000000} step={1} required value={change.custom_mib} onChange={(e) => setChange({ ...change, custom_mib: e.target.value })} className="mt-2 h-11 w-full rounded-xl border border-border bg-background px-3" /></label>}<label className="block text-[12px] font-medium">Reason (8–500 characters)<textarea minLength={8} maxLength={500} required value={change.reason} onChange={(e) => setChange({ ...change, reason: e.target.value })} className="mt-2 min-h-24 w-full rounded-xl border border-border bg-background p-3" /></label><p className="text-xs text-muted">Lowering quota never deletes files. It prevents new uploads when capacity is insufficient.</p><div className="flex justify-end gap-2"><button type="button" disabled={saving} onClick={() => setChange(null)} className="rounded-xl border border-border px-4 py-2.5 text-sm">Cancel</button><button type="submit" disabled={saving || change.reason.trim().length < 8} className="rounded-xl bg-brand-soft px-4 py-2.5 text-sm font-semibold text-brand-contrast disabled:opacity-50">{saving ? "Saving…" : "Save quota"}</button></div></form></section></div>}
+  </div>;
 }

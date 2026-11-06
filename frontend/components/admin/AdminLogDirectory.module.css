@@ -1,0 +1,73 @@
+/* Log filters share one layout across User Activity and Admin Audit Logs.
+   Query the available panel width, not the viewport (which includes the sidebar). */
+.filterContainer {
+  container-type: inline-size;
+}
+
+.filterForm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.filterForm > label {
+  min-width: 0;
+  width: 100%;
+}
+
+.filterForm > label > :is(span, input, select) {
+  min-width: 0;
+  width: 100%;
+}
+
+.filterActions {
+  justify-self: start;
+}
+
+/* Tablets: no narrow columns or off-screen horizontal scrolling. */
+@container (min-width: 580px) {
+  .filterForm {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .searchField,
+  .filterActions {
+    grid-column: 1 / -1;
+  }
+}
+
+@container (min-width: 850px) {
+  .filterForm {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .searchField {
+    grid-column: span 2;
+  }
+}
+
+/* Large panels: one compact, aligned row, with no wasted blank region. */
+@container (min-width: 1100px) {
+  .filterForm.activity {
+    grid-template-columns:
+      minmax(215px, 2fr)
+      minmax(125px, 1fr)
+      minmax(145px, 1fr)
+      minmax(140px, 1fr)
+      minmax(140px, 1fr)
+      max-content;
+  }
+
+  .filterForm.audit {
+    grid-template-columns:
+      minmax(250px, 2fr)
+      repeat(3, minmax(145px, 1fr))
+      max-content;
+  }
+
+  .searchField,
+  .filterActions {
+    grid-column: auto;
+  }
+}

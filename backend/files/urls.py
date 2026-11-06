@@ -7,6 +7,7 @@ urlpatterns = [
     path("files/api/uploads/<uuid:upload_id>/", upload_api.upload_status, name="api-upload-status"),
     path("files/api/uploads/<uuid:upload_id>/parts/<int:part_number>/authorization/", upload_api.authorize_part, name="api-upload-part-authorization"),
     path("files/api/uploads/<uuid:upload_id>/parts/authorizations/", upload_api.authorize_parts, name="api-upload-parts-authorization-batch"),
+    path("files/api/uploads/<uuid:upload_id>/parts/", upload_api.list_uploaded_parts, name="api-upload-parts-list"),
     path("files/api/uploads/<uuid:upload_id>/complete/", upload_api.complete_upload, name="api-upload-complete"),
     path("files/api/uploads/<uuid:upload_id>/abort/", upload_api.abort_upload, name="api-upload-abort"),
     path("drive/upload/", views.file_upload, name="file_upload"),

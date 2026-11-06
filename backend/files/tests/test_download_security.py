@@ -7,6 +7,7 @@ from django.urls import reverse
 from accounts.models import Membership
 from files.models import File, FileVersion, StorageConfig, StorageLocation
 from files.views import _safe_download_filename
+from logs.models import ActivityLog
 
 
 User = get_user_model()
@@ -109,6 +110,37 @@ class DownloadSecurityTests(TestCase):
         self.assertEqual(response["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response["Cache-Control"], "private, no-store")
         self.assertEqual(response["Referrer-Policy"], "no-referrer")
+
+    def test_successful_download_is_visible_in_personal_activity(self):
+        from unittest.mock import patch
+
+        with patch("files.views._decrypt_file", return_value=b"verified bytes"):
+            result = self.client.get(reverse("file_download", args=[self.file.pk]))
+        self.assertEqual(result.status_code, 200)
+        events = ActivityLog.objects.filter(
+            user=self.user, action=ActivityLog.Action.DOWNLOAD,
+        )
+        self.assertEqual(events.count(), 1)
+        self.assertEqual(events.first().object_id, self.file.pk)
+        self.assertEqual(events.first().metadata["size_bytes"], len(b"verified bytes"))
+
+        response = self.client.get(reverse("api-my-activity"), {"action": "DOWNLOAD"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["events"]), 1)
+        self.assertEqual(response.json()["events"][0]["action"], "DOWNLOAD")
+
+    def test_blocked_download_does_not_create_download_activity(self):
+        self.storage_location.state = StorageLocation.State.ERROR
+        self.storage_location.save(update_fields=["state", "updated_at"])
+        result = self.client.get(
+            reverse("file_download", args=[self.file.pk]),
+            HTTP_ACCEPT="application/octet-stream, application/json",
+        )
+        self.assertEqual(result.status_code, 409)
+        self.assertIn("primary storage", result.json()["detail"].lower())
+        self.assertFalse(ActivityLog.objects.filter(
+            user=self.user, action=ActivityLog.Action.DOWNLOAD,
+        ).exists())
 
     def test_download_without_available_primary_location_is_blocked(self):
         from django.urls import reverse

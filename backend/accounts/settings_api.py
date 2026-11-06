@@ -34,6 +34,34 @@ def my_quota_view(request):
     if tenant is None or workspace is None:
         return Response({"detail": "An accessible workspace is required."}, status=404)
 
+    # Shared workspaces have a separate quota, visible to authorized members;
+    # do not reveal personal My Drive usage to collaborators.
+    if not workspace.is_default:
+        from accounts.access import can_access_workspace
+        if not can_access_workspace(request.user, workspace):
+            return Response({"detail": "Workspace unavailable."}, status=404)
+        ws_quota = QuotaAccount.objects.filter(
+            tenant=tenant, workspace=workspace, scope=QuotaAccount.Scope.WORKSPACE,
+        ).first()
+        if ws_quota is None:
+            return Response({
+                "workspaceId": str(workspace.pk), "tenantName": tenant.name,
+                "configured": False, "limitBytes": None, "usedBytes": None,
+                "reservedBytes": None, "remainingBytes": None, "percentUsed": None,
+                "message": "Workspace quota is not initialized. Ask a platform administrator to reconcile quota data.",
+            })
+        total = ws_quota.used_bytes + ws_quota.reserved_bytes
+        limit = ws_quota.limit_bytes
+        return Response({
+            "workspaceId": str(workspace.pk), "tenantName": tenant.name,
+            "configured": True, "scope": "workspace",
+            "limitBytes": limit, "usedBytes": ws_quota.used_bytes,
+            "reservedBytes": ws_quota.reserved_bytes,
+            "remainingBytes": None if limit is None else max(0, limit - total),
+            "percentUsed": None if not limit else min(100, round(100 * total / limit)),
+            "updatedAt": ws_quota.updated_at,
+        })
+
     # Personal-tenant owners see their own tenant quota. Guests do not see the
     # owner's aggregate usage because that includes private My Drive data. For
     # business tenants, upload enforcement requires both tenant and member caps.
@@ -149,19 +177,37 @@ def my_quota_view(request):
     return Response(result)
 
 
+def _history_window(request, default=50):
+    """Bounds-check untrusted pagination params for history endpoints."""
+    try:
+        limit = int(request.query_params.get("limit", str(default)))
+    except (TypeError, ValueError):
+        limit = default
+    try:
+        offset = int(request.query_params.get("offset", "0"))
+    except (TypeError, ValueError):
+        offset = 0
+    return max(1, min(limit, 100)), max(0, min(offset, 100000))
+
+
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def my_activity_view(request):
-    try:
-        limit = int(request.query_params.get("limit", "50"))
-    except (TypeError, ValueError):
-        limit = 50
-    limit = max(1, min(limit, 100))
-    rows = ActivityLog.objects.filter(user=request.user).select_related(
-        "tenant", "workspace"
-    ).order_by("-created_at")[:limit]
-    return Response({"events": [
+    limit, offset = _history_window(request)
+    action_filter = str(request.query_params.get("action", "all")).strip().upper()
+    if action_filter not in {"ALL", ActivityLog.Action.UPLOAD, ActivityLog.Action.DOWNLOAD}:
+        return Response({"detail": "Invalid activity action filter."}, status=400)
+    rows = ActivityLog.objects.filter(user=request.user).exclude(
+        action=ActivityLog.Action.SEARCH,
+    )
+    if action_filter != "ALL":
+        rows = rows.filter(action=action_filter)
+    rows = list(rows.select_related("tenant", "workspace").order_by(
+        "-created_at", "-pk",
+    )[offset:offset + limit + 1])
+    has_more = len(rows) > limit
+    return Response({"hasMore": has_more, "events": [
         {
             "id": row.pk,
             "action": row.action,
@@ -173,7 +219,7 @@ def my_activity_view(request):
             "createdAt": row.created_at,
             "metadata": row.metadata if isinstance(row.metadata, dict) else {},
         }
-        for row in rows
+        for row in rows[:limit]
     ]})
 
 
@@ -186,13 +232,12 @@ def my_search_history_view(request):
         deleted_count, _ = history.delete()
         return Response({"deletedCount": deleted_count})
 
-    try:
-        limit = int(request.query_params.get("limit", "50"))
-    except (TypeError, ValueError):
-        limit = 50
-    limit = max(1, min(limit, 100))
-    rows = history.select_related("workspace").order_by("-created_at")[:limit]
-    return Response({"items": [
+    limit, offset = _history_window(request)
+    rows = list(history.select_related("workspace").order_by(
+        "-created_at", "-pk",
+    )[offset:offset + limit + 1])
+    has_more = len(rows) > limit
+    return Response({"hasMore": has_more, "items": [
         {
             "id": row.pk,
             "query": row.query,
@@ -200,7 +245,7 @@ def my_search_history_view(request):
             "workspaceName": row.workspace.name if row.workspace_id else None,
             "createdAt": row.created_at,
         }
-        for row in rows
+        for row in rows[:limit]
     ]})
 
 

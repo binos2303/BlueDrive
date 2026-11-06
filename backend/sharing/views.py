@@ -1,4 +1,5 @@
-﻿from django.contrib import messages
+from django.contrib import messages
+from django.db import transaction
 from django.http import FileResponse, Http404
 import io
 import zipfile
@@ -12,7 +13,7 @@ from securedrive.frontend_redirects import redirect_to_frontend
 
 from files.models import File
 from folders.models import Folder
-from .services import get_receiver_share_for_file, get_receiver_share_for_folder
+from .services import get_receiver_share_for_file, get_receiver_share_for_folder, upsert_direct_share
 from logs.models import ActivityLog
 from logs.services import log_action
 from security.aes_service import build_file_aad, decrypt_bytes, get_master_key, unwrap_dek
@@ -57,15 +58,29 @@ def share_file(request, file_id):
     receiver = form.cleaned_data["username"]
     permission = form.cleaned_data["permission"]
 
-    Share.objects.update_or_create(
-        file=drive_file,
-        receiver=receiver,
-        defaults={
-            "tenant": drive_file.tenant,
-            "owner": request.user,
-            "permission": permission,
-        },
-    )
+    with transaction.atomic():
+        operation, previous_permission = upsert_direct_share(
+            resource=drive_file, receiver=receiver, owner=request.user, permission=permission,
+        )
+        if operation != "unchanged":
+            log_action(
+                request.user, ActivityLog.Action.SHARE,
+                f"{operation} file {drive_file.file_name} for {receiver.get_username()}",
+                obj=drive_file,
+                metadata={
+                    "operation": operation,
+                    "recipient_username": receiver.get_username(),
+                    "recipient_email": receiver.email,
+                    "permission": permission,
+                    "previous_permission": previous_permission if operation == "permission_changed" else None,
+                    "resource_names": [drive_file.file_name],
+                    "resource_kinds": ["file"],
+                    "resource_changes": [{"name": drive_file.file_name, "kind": "file",
+                        "operation": operation, "permission": permission,
+                        "previous_permission": previous_permission if operation == "permission_changed" else None}],
+                    "shared_count": 1,
+                },
+            )
 
     permission_label = dict(
         Share.Permission.choices
@@ -74,23 +89,9 @@ def share_file(request, file_id):
         "Viewer",
     )
 
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        (
-            f"Shared file {drive_file.file_name} "
-            f"with {receiver.username} "
-            f"as {permission_label}"
-        ),
-    )
 
-    messages.success(
-        request,
-        (
-            f"File shared with {receiver.username} "
-            f"as {permission_label}."
-        ),
-    )
+    notify = messages.info if operation == "unchanged" else messages.success
+    notify(request, f"{'Already shared with' if operation == 'unchanged' else 'Updated access for' if operation == 'permission_changed' else 'Shared with'} {receiver.username} as {permission_label}.")
 
     return redirect(
         request.META.get(
@@ -135,15 +136,29 @@ def share_folder(request, folder_id):
     receiver = form.cleaned_data["username"]
     permission = form.cleaned_data["permission"]
 
-    Share.objects.update_or_create(
-        folder=folder,
-        receiver=receiver,
-        defaults={
-            "tenant": folder.tenant,
-            "owner": request.user,
-            "permission": permission,
-        },
-    )
+    with transaction.atomic():
+        operation, previous_permission = upsert_direct_share(
+            resource=folder, receiver=receiver, owner=request.user, permission=permission,
+        )
+        if operation != "unchanged":
+            log_action(
+                request.user, ActivityLog.Action.SHARE,
+                f"{operation} folder {folder.folder_name} for {receiver.get_username()}",
+                obj=folder,
+                metadata={
+                    "operation": operation,
+                    "recipient_username": receiver.get_username(),
+                    "recipient_email": receiver.email,
+                    "permission": permission,
+                    "previous_permission": previous_permission if operation == "permission_changed" else None,
+                    "resource_names": [folder.folder_name],
+                    "resource_kinds": ["folder"],
+                    "resource_changes": [{"name": folder.folder_name, "kind": "folder",
+                        "operation": operation, "permission": permission,
+                        "previous_permission": previous_permission if operation == "permission_changed" else None}],
+                    "shared_count": 1,
+                },
+            )
 
     permission_label = dict(
         Share.Permission.choices
@@ -152,23 +167,9 @@ def share_folder(request, folder_id):
         "Viewer",
     )
 
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        (
-            f"Shared folder {folder.folder_name} "
-            f"with {receiver.username} "
-            f"as {permission_label}"
-        ),
-    )
 
-    messages.success(
-        request,
-        (
-            f"Folder shared with {receiver.username} "
-            f"as {permission_label}."
-        ),
-    )
+    notify = messages.info if operation == "unchanged" else messages.success
+    notify(request, f"{'Already shared with' if operation == 'unchanged' else 'Updated access for' if operation == 'permission_changed' else 'Shared with'} {receiver.username} as {permission_label}.")
 
     return redirect(
         request.META.get(
@@ -231,6 +232,14 @@ def change_share_permission(request, share_id):
             f"{share.receiver.username} from "
             f"{old_permission_label} to {permission_label}"
         ),
+        obj=share.file if share.file_id else share.folder,
+        metadata={"operation": "permission_changed", "recipient_username": share.receiver.get_username(),
+                  "recipient_email": share.receiver.email, "permission": permission,
+                  "previous_permission": old_permission, "shared_count": 1,
+                  "resource_names": [item_name], "resource_kinds": [share.item_type],
+                  "resource_changes": [{"name": item_name, "kind": share.item_type,
+                      "operation": "permission_changed", "permission": permission,
+                      "previous_permission": old_permission}]},
     )
 
     messages.success(
@@ -260,14 +269,26 @@ def revoke_share(request, share_id):
     )
 
     receiver_name = share.receiver.username
-    item_name = share.file.file_name if share.file_id else share.folder.folder_name
-    share.delete()
+    recipient_email = share.receiver.email
+    previous_permission = share.permission
+    resource = share.file if share.file_id else share.folder
+    item_name = resource.file_name if share.file_id else resource.folder_name
+    resource_kind = share.item_type
+    with transaction.atomic():
+        share.delete()
+        log_action(
+            request.user, ActivityLog.Action.REVOKE_SHARE,
+            f"Revoked access to {item_name} for {receiver_name}",
+            obj=resource,
+            metadata={"operation": "revoked", "recipient_username": receiver_name,
+                      "recipient_email": recipient_email, "permission": previous_permission,
+                      "shared_count": 1, "resource_names": [item_name],
+                      "resource_kinds": [resource_kind],
+                      "resource_changes": [{"name": item_name, "kind": resource_kind,
+                          "operation": "revoked", "permission": previous_permission}]},
+        )
 
-    log_action(
-        request.user,
-        ActivityLog.Action.REVOKE_SHARE,
-        f"Revoked access to {item_name} for {receiver_name}",
-    )
+
 
     messages.success(request, f"Access revoked for {receiver_name}.")
     return redirect("shared_with_me")

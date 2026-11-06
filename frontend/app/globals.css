@@ -187,3 +187,29 @@ a {
   width: 0;
   height: 0;
 }
+
+
+/* Admin composite search fields: focus the full control, not its nested input.
+   This overrides the general input focus shadow without hiding keyboard focus. */
+[data-admin-search-shell] {
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+[data-admin-search-shell]:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
+[data-admin-search-shell] input:focus,
+[data-admin-search-shell] input:focus-visible {
+  outline: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+@media (forced-colors: active) {
+  [data-admin-search-shell]:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}

@@ -7,7 +7,7 @@ from django.db import IntegrityError, transaction
 from django.http import HttpResponseForbidden
 
 from .models import (
-    Membership, Tenant, Workspace, WorkspaceGroupAccess,
+    Membership, Tenant, Workspace,
     WorkspaceMembership,
 )
 
@@ -148,12 +148,11 @@ def get_default_workspace(tenant):
 
 
 def workspace_role_for_user(user, workspace):
-    """Resolve the strongest active workspace role for a tenant member.
+    """Resolve a direct Workspace role; group-based grants are not supported.
 
-    Tenant owners/admins can administer all active workspaces in their tenant.
-    Other users need a direct workspace membership or a grant through a group.
-    This function resolves workspace membership; resource visibility and mutations
-    must also apply the existing file-owner/share checks.
+    Active tenant owners/admins administer active workspaces. Other users
+    must hold an active, direct WorkspaceMembership. File and folder actions
+    still require their resource-level permission checks.
     """
     membership = active_membership(user, workspace.tenant_id)
     if membership is None or workspace.status != Workspace.Status.ACTIVE:
@@ -161,25 +160,15 @@ def workspace_role_for_user(user, workspace):
     if membership.role in (Membership.Role.OWNER, Membership.Role.ADMIN):
         return WorkspaceMembership.Role.ADMIN
 
-    roles = list(
+    return (
         WorkspaceMembership.objects.filter(
             workspace=workspace,
             membership=membership,
             status=WorkspaceMembership.Status.ACTIVE,
-        ).values_list("role", flat=True)
+        )
+        .values_list("role", flat=True)
+        .first()
     )
-    roles.extend(
-        WorkspaceGroupAccess.objects.filter(
-            workspace=workspace,
-            group__tenant_id=workspace.tenant_id,
-            group__status="active",
-            group__member_assignments__membership=membership,
-        ).values_list("role", flat=True)
-    )
-    if not roles:
-        return None
-    return max(roles, key=lambda role: WORKSPACE_ROLE_RANK.get(role, 0))
-
 
 def can_access_workspace(user, workspace):
     return workspace_role_for_user(user, workspace) is not None

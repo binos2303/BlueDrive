@@ -102,12 +102,6 @@ def _shared_drive_items_response(request, query_text=""):
             query=query_text,
             result_count=len(items),
         )
-        ActivityLog.objects.create(
-            user=request.user,
-            action=ActivityLog.Action.SEARCH,
-            description="Searched directly shared Drive items.",
-            metadata={"query_length": len(query_text), "result_count": len(items), "scope": "shared"},
-        )
 
     return JsonResponse({"items": items, "query": query_text or None})
 
@@ -207,14 +201,6 @@ def drive_items_api(request):
             workspace=workspace,
             query=query_text,
             result_count=len(items),
-        )
-        ActivityLog.objects.create(
-            user=request.user,
-            tenant=tenant,
-            workspace=workspace,
-            action=ActivityLog.Action.SEARCH,
-            description="Searched workspace files.",
-            metadata={"query_length": len(query_text), "result_count": len(items)},
         )
     elif view == "starred":
         entries = list(

@@ -2,6 +2,8 @@
 
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useAccount } from "@/components/account/AccountProvider";
 
 import Sidebar from "./Sidebar";
 import SettingsSidebar from "./SettingsSidebar";
@@ -14,6 +16,11 @@ export default function DashboardShell({
   children: ReactNode;
   settingsNavigation?: { active: string; onChange: (section: string) => void };
 }) {
+  const router = useRouter();
+  const { state } = useAccount();
+  useEffect(() => {
+    if (state.status === "loaded" && state.account?.is_platform_admin) router.replace("/admin");
+  }, [state, router]);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const navigationRef = useRef<HTMLElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
@@ -57,6 +64,8 @@ export default function DashboardShell({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [mobileNavigationOpen]);
+
+  if (state.status === "loaded" && state.account?.is_platform_admin) return null;
 
   return (
     <main className="flex h-screen overflow-hidden bg-background">

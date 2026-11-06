@@ -6,6 +6,7 @@ import DashboardShell from "@/components/layout/DashboardShell";
 import CustomScrollArea from "@/components/ui/CustomScrollArea";
 import { readThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
 import Button from "@/components/ui/Button";
+import Dialog from "@/components/ui/Dialog";
 import {
   clearMySearchHistory,
   deleteMyDriveData,
@@ -60,6 +61,13 @@ export default function SettingsPage() {
   const [quota, setQuota] = useState<QuotaSummary | null>(null);
   const [quotaError, setQuotaError] = useState<string | null>(null);
   const [activity, setActivity] = useState<UserActivityEvent[]>([]);
+  const [activityHasMore, setActivityHasMore] = useState(false);
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [activityLoadingMore, setActivityLoadingMore] = useState(false);
+  const [searchLoadingMore, setSearchLoadingMore] = useState(false);
+  const [selectedActivity, setSelectedActivity] = useState<UserActivityEvent | null>(null);
   const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
   const [privacyLoading, setPrivacyLoading] = useState(false);
   const [privacyError, setPrivacyError] = useState<string | null>(null);
@@ -73,16 +81,57 @@ export default function SettingsPage() {
   const loadPrivacyData = useCallback(async () => {
     setPrivacyLoading(true);
     setPrivacyError(null);
-    try {
-      const [events, history] = await Promise.all([getMyActivity(50), getMySearchHistory(50)]);
-      setActivity(events);
-      setSearchHistory(history);
-    } catch (error) {
-      setPrivacyError(error instanceof Error ? error.message : "Could not load privacy data.");
-    } finally {
-      setPrivacyLoading(false);
+    setActivityError(null);
+    setSearchError(null);
+    // Separate failures: an unavailable Activity endpoint must never hide Search History.
+    const [activityResult, searchResult] = await Promise.allSettled([
+      getMyActivity(50),
+      getMySearchHistory(50),
+    ]);
+    if (activityResult.status === "fulfilled") {
+      setActivity(activityResult.value.events);
+      setActivityHasMore(activityResult.value.hasMore);
+    } else {
+      setActivityError(activityResult.reason instanceof Error ? activityResult.reason.message : "Could not load activity history.");
     }
+    if (searchResult.status === "fulfilled") {
+      setSearchHistory(searchResult.value.items);
+      setSearchHasMore(searchResult.value.hasMore);
+    } else {
+      setSearchError(searchResult.reason instanceof Error ? searchResult.reason.message : "Could not load search history.");
+    }
+    setPrivacyLoading(false);
   }, []);
+
+  async function loadOlderActivity() {
+    if (activityLoadingMore || !activityHasMore) return;
+    setActivityLoadingMore(true);
+    setActivityError(null);
+    try {
+      const next = await getMyActivity(50, activity.length);
+      setActivity((previous) => [...previous, ...next.events.filter((event) => !previous.some((existing) => existing.id === event.id))]);
+      setActivityHasMore(next.hasMore);
+    } catch (error) {
+      setActivityError(error instanceof Error ? error.message : "Could not load older activity.");
+    } finally {
+      setActivityLoadingMore(false);
+    }
+  }
+
+  async function loadOlderSearches() {
+    if (searchLoadingMore || !searchHasMore) return;
+    setSearchLoadingMore(true);
+    setSearchError(null);
+    try {
+      const next = await getMySearchHistory(50, searchHistory.length);
+      setSearchHistory((previous) => [...previous, ...next.items.filter((item) => !previous.some((existing) => existing.id === item.id))]);
+      setSearchHasMore(next.hasMore);
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : "Could not load older searches.");
+    } finally {
+      setSearchLoadingMore(false);
+    }
+  }
 
   useEffect(() => {
     if (activeTab !== "privacy") return;
@@ -98,6 +147,8 @@ export default function SettingsPage() {
     try {
       await clearMySearchHistory();
       setSearchHistory([]);
+      setSearchHasMore(false);
+      setSearchError(null);
     } catch (error) {
       setPrivacyError(error instanceof Error ? error.message : "Could not clear search history.");
     } finally {
@@ -182,17 +233,7 @@ export default function SettingsPage() {
             </div>
           ) : activeTab === "privacy" ? (
             <div className="space-y-5">
-              <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-surface p-4">
-                <label className="text-xs text-muted">From
-                  <input type="date" value={dateFrom} onChange={(event) => { const value = event.target.value; setDateFrom(value); if (dateTo && value > dateTo) setDateTo(""); }}
-                    className="mt-1 block h-9 rounded-lg border border-border bg-background px-2 text-foreground" />
-                </label>
-                <label className="text-xs text-muted">To
-                  <input type="date" value={dateTo} onChange={(event) => { const value = event.target.value; setDateTo(value); if (dateFrom && value < dateFrom) setDateFrom(""); }}
-                    className="mt-1 block h-9 rounded-lg border border-border bg-background px-2 text-foreground" />
-                </label>
-                <button type="button" onClick={() => { setDateFrom(""); setDateTo(""); }} className="h-9 rounded-lg border border-border px-3 text-xs text-foreground">Clear filter</button>
-              </div>
+
           {privacyError && <p role="alert" className="rounded-xl border border-danger/30 bg-surface p-3 text-sm text-danger">{privacyError}</p>}
 
           <section className="rounded-2xl border border-border bg-surface p-5 sm:p-6">
@@ -204,19 +245,56 @@ export default function SettingsPage() {
                   
                 </div>
               </div>
-              <Button variant="secondary" size="sm" onClick={() => void loadPrivacyData()} disabled={privacyLoading}>Refresh</Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="secondary" size="sm" onClick={() => void loadPrivacyData()} disabled={privacyLoading}>Refresh</Button>
+              </div>
             </div>
+              <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-background/50 px-3 py-3">
+                <label className="text-xs text-muted">From
+                  <input type="date" value={dateFrom} onChange={(event) => { const value = event.target.value; setDateFrom(value); if (dateTo && value > dateTo) setDateTo(""); }}
+                    className="mt-1 block h-9 rounded-lg border border-border bg-background px-2 text-foreground" />
+                </label>
+                <label className="text-xs text-muted">To
+                  <input type="date" value={dateTo} onChange={(event) => { const value = event.target.value; setDateTo(value); if (dateFrom && value < dateFrom) setDateFrom(""); }}
+                    className="mt-1 block h-9 rounded-lg border border-border bg-background px-2 text-foreground" />
+                </label>
+                <button type="button" onClick={() => { setDateFrom(""); setDateTo(""); }} className="h-9 rounded-lg border border-border px-3 text-xs text-foreground">Clear filter</button>
+              </div>
+            {activityError && <p role="alert" className="mt-3 text-xs text-danger">{activityError}</p>}
             <CustomScrollArea className="mt-4 rounded-xl border border-border" contentClassName="divide-y divide-border">
-              {privacyLoading ? <p className="p-4 text-sm text-muted">Loading activity…</p> : activity.filter((event) => inDateRange(event.createdAt)).length === 0 ? <p className="p-4 text-sm text-muted">No activity recorded yet.</p> : activity.filter((event) => inDateRange(event.createdAt)).map((event) => (
-                <article key={event.id} className="flex flex-col gap-1 p-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+              {privacyLoading ? <p className="p-4 text-sm text-muted">Loading activity…</p> : activity.filter((event) => inDateRange(event.createdAt)).length === 0 ? <p className="p-4 text-sm text-muted">{dateFrom || dateTo ? "No activity in the selected date range. Clear the date filter or load older activity." : "No activity recorded yet."}</p> : activity.filter((event) => inDateRange(event.createdAt)).map((event) => (
+                <div
+                  role="button"
+                  key={event.id}
+                  tabIndex={0}
+                  aria-haspopup="dialog"
+                  aria-label={`${event.actionLabel || event.action}, ${formatDate(event.createdAt)}. Double-click for details; press Enter to open.`}
+                  title="Double-click to view activity details"
+                  onDoubleClick={() => setSelectedActivity(event)}
+                  onKeyDown={(keyboardEvent) => {
+                    if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") {
+                      keyboardEvent.preventDefault();
+                      setSelectedActivity(event);
+                    }
+                  }}
+                  className="flex cursor-pointer flex-col gap-1 p-3 transition-colors hover:bg-background/60 focus-visible:bg-brand-soft focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand sm:flex-row sm:items-start sm:justify-between sm:gap-4"
+                >
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-foreground">{event.actionLabel || event.action}</p>
-                    <p className="mt-0.5 wrap-break-word text-xs leading-5 text-muted">{event.description || event.actionLabel}{event.workspaceName ? ` · ${event.workspaceName}` : event.tenantName ? ` · ${event.tenantName}` : ""}</p>
+                    <p className="mt-0.5 wrap-break-word text-xs leading-5 text-muted">{event.description || event.actionLabel}{event.workspaceName ? ` · ${event.workspaceName}` : event.tenantName ? ` · ${event.tenantName}` : ""}
+                      {(event.action === "SHARE" || event.action === "REVOKE_SHARE") && <span className="block">
+                        Recipient: {(typeof event.metadata.recipient_email === "string" && event.metadata.recipient_email) || "Not recorded (legacy event)"}
+                        {typeof event.metadata.permission === "string" ? ` · ${event.metadata.permission}` : ""}
+                      </span>}</p>
+
                   </div>
                   <time className="shrink-0 text-[11px] text-muted">{formatDate(event.createdAt)}</time>
-                </article>
+                </div>
               ))}
             </CustomScrollArea>
+            {activityHasMore && <div className="mt-3 flex justify-center">
+              <Button variant="secondary" size="sm" loading={activityLoadingMore} disabled={activityLoadingMore || privacyLoading} onClick={() => void loadOlderActivity()}>Load older activity</Button>
+            </div>}
           </section>
 
           <section className="rounded-2xl border border-border bg-surface p-5 sm:p-6">
@@ -230,8 +308,9 @@ export default function SettingsPage() {
               </div>
               <Button variant="secondary" size="sm" loading={historyBusy} disabled={historyBusy || searchHistory.length === 0} onClick={() => void handleClearHistory()}>Clear history</Button>
             </div>
+            {searchError && <p role="alert" className="mt-3 text-xs text-danger">{searchError}</p>}
             <CustomScrollArea className="mt-4 rounded-xl border border-border" contentClassName="divide-y divide-border">
-              {privacyLoading ? <p className="p-4 text-sm text-muted">Loading search history…</p> : searchHistory.filter((item) => inDateRange(item.createdAt)).length === 0 ? <p className="p-4 text-sm text-muted">No search history yet.</p> : searchHistory.filter((item) => inDateRange(item.createdAt)).map((item) => (
+              {privacyLoading ? <p className="p-4 text-sm text-muted">Loading search history…</p> : searchHistory.length === 0 ? <p className="p-4 text-sm text-muted">No search history yet.</p> : searchHistory.map((item) => (
                 <article key={item.id} className="flex flex-col gap-1 p-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                   <div className="min-w-0">
                     <p className="wrap-break-word text-sm font-medium text-foreground">{item.query}</p>
@@ -241,6 +320,9 @@ export default function SettingsPage() {
                 </article>
               ))}
             </CustomScrollArea>
+            {searchHasMore && <div className="mt-3 flex justify-center">
+              <Button variant="secondary" size="sm" loading={searchLoadingMore} disabled={searchLoadingMore || privacyLoading} onClick={() => void loadOlderSearches()}>Load older searches</Button>
+            </div>}
           </section>
 
           <section className="rounded-2xl border border-danger/30 bg-surface p-5 sm:p-6">
@@ -274,6 +356,40 @@ export default function SettingsPage() {
           )}
         </div>
       </section>
+      <Dialog
+        open={selectedActivity !== null}
+        title="Activity details"
+        description={selectedActivity ? `${selectedActivity.actionLabel || selectedActivity.action} · ${formatDate(selectedActivity.createdAt)}` : undefined}
+        onClose={() => setSelectedActivity(null)}
+      >
+        {selectedActivity && (
+          <dl className="grid gap-x-4 gap-y-3 text-[13px] sm:grid-cols-[145px_minmax(0,1fr)]">
+            {([
+              ["Event ID", String(selectedActivity.id)],
+              ["Time", formatDate(selectedActivity.createdAt)],
+              ["Action", selectedActivity.actionLabel || selectedActivity.action],
+              ["Description", selectedActivity.description || "Not recorded"],
+              ["Storage", selectedActivity.workspaceName || selectedActivity.tenantName || "Not recorded"],
+              ...((selectedActivity.action === "UPLOAD" || selectedActivity.action === "DOWNLOAD") ? [
+                ["File", typeof selectedActivity.metadata.resource_name === "string" ? selectedActivity.metadata.resource_name : "Not recorded"],
+                ["File size", typeof selectedActivity.metadata.size_bytes === "number" ? formatBytes(selectedActivity.metadata.size_bytes) : "Not recorded"],
+              ] : []),
+              ...((selectedActivity.action === "SHARE" || selectedActivity.action === "REVOKE_SHARE") ? [
+                ["Change", typeof selectedActivity.metadata.operation === "string" ? selectedActivity.metadata.operation.replaceAll("_", " ") : "Not recorded (legacy event)"],
+                ["Recipient", typeof selectedActivity.metadata.recipient_email === "string" ? selectedActivity.metadata.recipient_email : "Not recorded (legacy event)"],
+                ["Permission", typeof selectedActivity.metadata.permission === "string" ? selectedActivity.metadata.permission : "Not recorded"],
+                ["Previous permission", typeof selectedActivity.metadata.previous_permission === "string" ? selectedActivity.metadata.previous_permission : "Not recorded"],
+                ["Resources", Array.isArray(selectedActivity.metadata.resource_names) ? selectedActivity.metadata.resource_names.filter((name): name is string => typeof name === "string").join(", ") || "Not recorded" : "Not recorded"],
+              ] : []),
+            ] as Array<[string, string]>).map(([label, value]) => (
+              <div className="contents" key={label}>
+                <dt className="font-medium text-muted">{label}</dt>
+                <dd className="min-w-0 break-words text-foreground">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </Dialog>
     </DashboardShell>
   );
 }

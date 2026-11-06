@@ -19,7 +19,7 @@ export default function SettingsSidebar({ navigationRef, mobileOpen, active, onC
 }) {
   return (
     <aside ref={navigationRef} aria-label="Settings navigation"
-      className={`fixed inset-y-0 left-0 z-50 flex w-[250px] flex-col border-r border-border bg-surface p-4 transition-transform lg:static lg:z-auto lg:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
+      className={`fixed inset-y-0 left-0 z-50 flex w-62.5 flex-col border-r border-border bg-surface p-4 transition-transform lg:static lg:z-auto lg:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
       <Link href="/drive" onClick={onNavigate} className="mb-8 flex items-center gap-3 rounded-xl px-2 py-2 text-sm font-semibold text-foreground hover:bg-background">
         <ArrowLeft size={18} /> Settings
       </Link>

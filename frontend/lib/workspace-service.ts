@@ -22,7 +22,6 @@ export type OrganizationWorkspace = {
   createdByInitials: string;
   isOwnedByMe: boolean;
   memberCount: number;
-  groupCount: number;
   createdAt: string;
   updatedAt: string;
 };

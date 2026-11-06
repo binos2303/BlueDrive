@@ -1,7 +1,58 @@
-import { requestAccountApi } from "@/lib/account-service";
+import { accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
 import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
+import { isPreviewSupported, normalizePreviewMimeType } from "@/lib/file-preview-policy";
+import { isExpectedDownloadMimeType } from "@/lib/drive-download-policy";
 
 export type DownloadProgress = { loaded: number; total: number | null };
+
+export type RenameTarget = { kind: "file" | "folder"; id: number; name: string };
+export type RenameResult = RenameTarget & { changed: boolean; detail: string };
+
+export async function renameDriveItem(target: RenameTarget): Promise<RenameResult> {
+  return requestAccountApi<RenameResult>("/drive/api/items/rename/", {
+    method: "POST",
+    headers: await accountCsrfHeaders(),
+    body: JSON.stringify(target),
+  });
+}
+
+export type DriveFileDetails = {
+  type: "file";
+  name: string;
+  size: number;
+  mime_type: string;
+  owner: string;
+  access: string;
+  encrypted: boolean;
+  location: string;
+};
+
+export function getDriveFileDetails(fileId: number): Promise<DriveFileDetails> {
+  return requestAccountApi<DriveFileDetails>(`/drive/files/${fileId}/details/`);
+}
+
+/** Fetch private file content using a session; never expose a MinIO URL. */
+export async function fetchDriveFilePreview(fileId: number, signal: AbortSignal): Promise<Blob> {
+  const headers = new Headers({ Accept: "application/json, image/*, text/plain" });
+  const workspaceId = getActiveWorkspaceIdForRequest();
+  if (workspaceId) headers.set("X-Workspace-ID", workspaceId);
+  const response = await fetch(`${driveApiBase()}/drive/files/${fileId}/view/`, {
+    method: "GET", credentials: "include", headers, signal, cache: "no-store",
+  });
+  if (!response.ok) {
+    let message = `Preview failed (HTTP ${response.status}).`;
+    try {
+      const json = await response.json() as { detail?: string };
+      if (json.detail) message = json.detail;
+    } catch { /* Redirect/HTML errors must not be rendered as preview content. */ }
+    throw new Error(message);
+  }
+  const mime = normalizePreviewMimeType(response.headers.get("Content-Type") ?? "");
+  if (!isPreviewSupported(mime)) throw new Error("This file cannot be previewed. Download it instead.");
+  return response.blob();
+}
+
+
 
 function driveApiBase(): string {
   const base = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
@@ -22,17 +73,19 @@ function filenameFromDisposition(value: string | null, fallback: string): string
   return name.replace(/[\\/\u0000-\u001f\u007f]/g, "_").slice(0, 255) || "download";
 }
 
-export function downloadDriveFile(
-  fileId: number,
+/** One private binary transport for file downloads and folder ZIP archives. */
+function downloadDriveBinary(
+  path: string,
   fallbackName: string,
+  expectedContentType: string,
   onProgress: (progress: DownloadProgress) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("GET", `${driveApiBase()}/drive/files/${fileId}/download/`);
+    xhr.open("GET", `${driveApiBase()}${path}`);
     xhr.withCredentials = true;
     xhr.responseType = "blob";
-    xhr.setRequestHeader("Accept", "application/octet-stream, application/json");
+    xhr.setRequestHeader("Accept", `${expectedContentType}, application/json`);
     const workspaceId = getActiveWorkspaceIdForRequest();
     if (workspaceId) xhr.setRequestHeader("X-Workspace-ID", workspaceId);
     xhr.onprogress = (event) => onProgress({
@@ -53,7 +106,7 @@ export function downloadDriveFile(
         reject(new Error(detail));
         return;
       }
-      if (!xhr.getResponseHeader("Content-Type")?.toLowerCase().startsWith("application/octet-stream")) {
+      if (!isExpectedDownloadMimeType(xhr.getResponseHeader("Content-Type"), expectedContentType)) {
         reject(new Error("The service returned an unexpected response. No file was saved."));
         return;
       }
@@ -62,8 +115,7 @@ export function downloadDriveFile(
         const anchor = document.createElement("a");
         anchor.href = objectUrl;
         anchor.download = filenameFromDisposition(
-          xhr.getResponseHeader("Content-Disposition"),
-          fallbackName,
+          xhr.getResponseHeader("Content-Disposition"), fallbackName,
         );
         anchor.rel = "noreferrer";
         document.body.appendChild(anchor);
@@ -81,6 +133,29 @@ export function downloadDriveFile(
       reject(new Error("Could not start the download. Retry."));
     }
   });
+}
+
+export function downloadDriveFile(
+  fileId: number,
+  fallbackName: string,
+  onProgress: (progress: DownloadProgress) => void,
+): Promise<void> {
+  return downloadDriveBinary(
+    `/drive/files/${fileId}/download/`, fallbackName, "application/octet-stream", onProgress,
+  );
+}
+
+export function downloadDriveFolder(
+  folderId: number,
+  folderName: string,
+  onProgress: (progress: DownloadProgress) => void,
+): Promise<void> {
+  if (!Number.isSafeInteger(folderId) || folderId <= 0) {
+    return Promise.reject(new Error("Invalid folder ID."));
+  }
+  return downloadDriveBinary(
+    `/drive/folder/${folderId}/download/`, `${folderName}.zip`, "application/zip", onProgress,
+  );
 }
 
 type DriveApiItem = {

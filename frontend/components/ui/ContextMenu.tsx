@@ -15,6 +15,8 @@ type ContextMenuProps = {
   trigger: ReactNode;
   actions: ContextMenuAction[];
   triggerClassName?: string;
+  /** Optional account identity block above menu actions. */
+  header?: ReactNode;
 };
 
 type MenuPosition = {
@@ -27,6 +29,7 @@ export default function ContextMenu({
   trigger,
   actions,
   triggerClassName,
+  header,
 }: ContextMenuProps) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<MenuPosition>({ top: 0, left: 0 });
@@ -131,6 +134,7 @@ export default function ContextMenu({
           style={{ top: position.top, left: position.left }}
           className="fixed z-[70] max-h-[min(70vh,24rem)] min-w-48 overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-[var(--shadow-popover)]"
         >
+          {header && <li role="none" className="border-b border-border p-2.5">{header}</li>}
           {actions.map((action) => (
             <li key={action.label} role="none">
               <button

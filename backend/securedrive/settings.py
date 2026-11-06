@@ -69,6 +69,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "accounts.platform_admin_middleware.DedicatedPlatformAdminMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -263,3 +264,19 @@ LOGGING = {
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Dedicated administrator invitation is deliberately opt-in. Configure a real
+# authenticated EMAIL_BACKEND/SMTP transport before enabling in production.
+ADMIN_INVITES_ENABLED = os.getenv("ADMIN_INVITES_ENABLED", "false").lower() in ("true", "1", "yes")
+ADMIN_INVITE_TIMEOUT_SECONDS = min(7 * 86400, max(3600, int(os.getenv("ADMIN_INVITE_TIMEOUT_SECONDS", "86400"))))
+# Django's token generator consults PASSWORD_RESET_TIMEOUT.
+PASSWORD_RESET_TIMEOUT = ADMIN_INVITE_TIMEOUT_SECONDS
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "")
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "false").lower() in ("true", "1", "yes")
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() in ("true", "1", "yes")

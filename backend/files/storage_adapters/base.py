@@ -90,6 +90,8 @@ class StorageAdapter(Protocol):
         expected_upload_session_id: str | None = None,
     ) -> ObjectStat: ...
 
+    def list_uploaded_parts(self, object_key: str, upload_id: str) -> list[MultipartPart]: ...
+
     def abort_multipart(self, object_key: str, upload_id: str) -> None: ...
 
     def create_download_url(
@@ -98,7 +100,9 @@ class StorageAdapter(Protocol):
 
     def open_object(self, object_key: str) -> BinaryIO: ...
 
-    def download_to(self, object_key: str, destination: BinaryIO) -> ObjectStat: ...
+    def download_to(
+        self, object_key: str, destination: BinaryIO, *, max_bytes: int | None = None
+    ) -> ObjectStat: ...
 
     def put_object(
         self,
@@ -108,6 +112,18 @@ class StorageAdapter(Protocol):
         size_bytes: int,
         sha256_hex: str,
         content_type: str = "application/octet-stream",
+    ) -> ObjectStat: ...
+
+    def publish_verified_object(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        expected_size: int,
+        expected_sha256: str,
+        upload_session_id: str,
+        content_type: str = "application/octet-stream",
+        expected_source_etag: str = "",
     ) -> ObjectStat: ...
 
     def quarantine_object(

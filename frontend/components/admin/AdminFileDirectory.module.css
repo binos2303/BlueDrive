@@ -1,0 +1,51 @@
+/* The panel width, not the viewport, determines filter layout with the admin sidebar. */
+.filterContainer {
+  container-type: inline-size;
+}
+
+.filterGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: end;
+  width: 100%;
+}
+
+.filterGrid > * {
+  min-width: 0;
+}
+
+/* Medium panel: keep search full-width and give each select a usable width. */
+@container (min-width: 600px) {
+  .filterGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .searchField,
+  .sortField {
+    grid-column: 1 / -1;
+  }
+}
+
+@container (min-width: 820px) {
+  .filterGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .searchField {
+    grid-column: 1 / -1;
+  }
+  .sortField {
+    grid-column: auto;
+  }
+}
+
+/* Wide panel: one balanced row with visible gaps between all controls. */
+@container (min-width: 1080px) {
+  .filterGrid {
+    grid-template-columns:
+      minmax(310px, 1.7fr)
+      repeat(3, minmax(165px, 0.65fr));
+  }
+  .searchField {
+    grid-column: auto;
+  }
+}

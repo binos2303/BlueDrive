@@ -3,6 +3,7 @@ import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 export type AccountType = "individual" | "business" | "unclassified";
 
 export type AccountSnapshot = {
+  is_platform_admin?: boolean;
   profile: {
     username: string;
     email: string;

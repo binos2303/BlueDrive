@@ -1,5 +1,3 @@
-import io
-import zipfile
 from datetime import timedelta
 from cryptography.exceptions import InvalidTag
 from django.contrib import messages
@@ -19,6 +17,7 @@ from accounts.access import (
 )
 from securedrive.frontend_redirects import redirect_to_frontend
 
+from files.rename_service import rename_resource, RenameError
 from files.models import File
 from files.models import UploadSession
 from files.quota import (
@@ -123,35 +122,15 @@ def folder_rename(request, folder_id):
         id=folder_id,
         deleted_at__isnull=True,
     )
-    if not can_edit_folder(folder, request.user):
-        messages.error(request, "You do not have permission to rename this folder.")
+    try:
+        changed = rename_resource(
+            resource=folder, actor=request.user,
+            name=request.POST.get("folder_name", ""),
+        )
+        messages.success(request, "Folder renamed successfully." if changed else "Name is unchanged.")
+    except RenameError as exc:
+        messages.error(request, exc.detail)
         return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-
-    folder_name = request.POST.get("folder_name", "").strip()
-    if not folder_name:
-        messages.error(request, "Folder name cannot be empty.")
-        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-    if len(folder_name) > 255:
-        messages.error(request, "Folder name is too long.")
-        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-
-    duplicate = Folder.objects.filter(
-        owner=folder.owner,
-        tenant=folder.tenant,
-        workspace=folder.workspace,
-        parent=folder.parent,
-        folder_name__iexact=folder_name,
-        deleted_at__isnull=True,
-    ).exclude(id=folder.id).exists()
-    if duplicate:
-        messages.error(request, "A folder with this name already exists here.")
-        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-
-    old_name = folder.folder_name
-    folder.folder_name = folder_name
-    folder.save(update_fields=["folder_name", "updated_at"])
-    log_action(request.user, ActivityLog.Action.RENAME, f"Renamed folder from {old_name} to {folder.folder_name}", obj=folder)
-    messages.success(request, "Folder renamed successfully.")
     return redirect("folder_open", folder_id=folder.parent_id) if folder.parent_id else redirect("shared_with_me" if folder.owner_id != request.user.id else "dashboard")
 
 
@@ -696,70 +675,45 @@ def folder_create_api(request):
 
 @login_required
 def folder_download(request, folder_id):
-    """Download a shared folder as a ZIP. Owner and shared recipients are allowed."""
-    folder = get_object_or_404(Folder, id=folder_id)
-    is_owner = folder.owner_id == request.user.id
+    """Download accessible live folder contents as a private ZIP attachment."""
+    from .archive_service import FolderArchiveError, build_folder_archive
+
+    folder = get_object_or_404(Folder, id=folder_id, deleted_at__isnull=True)
     if not can_view_folder(folder, request.user):
         raise Http404
 
-    if not is_owner and get_receiver_share_for_folder(folder, request.user) is None:
-        raise Http404
+    try:
+        archive, file_count, size_bytes = build_folder_archive(folder, request.user)
+    except FolderArchiveError as exc:
+        response = JsonResponse({"detail": exc.detail}, status=exc.status)
+        response["Cache-Control"] = "private, no-store"
+        response["Referrer-Policy"] = "no-referrer"
+        return response
+    except Exception:
+        response = JsonResponse(
+            {"detail": "Folder ZIP could not be prepared. Retry later."}, status=503,
+        )
+        response["Cache-Control"] = "private, no-store"
+        response["Referrer-Policy"] = "no-referrer"
+        return response
 
-    tree = _subtree(folder, include_deleted=False)
-    folder_ids = [item.id for item in tree]
-
-    files = File.objects.filter(
-        owner=folder.owner,
-        tenant=folder.tenant,
-        workspace=folder.workspace,
-        folder_id__in=folder_ids,
-    ).order_by("folder_id", "file_name")
-
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for drive_file in files:
-            if drive_file.deleted_at is not None:
-                continue
-            if not drive_file.file_path or not drive_file.is_encrypted:
-                continue
-            try:
-                dek = unwrap_dek(
-                    bytes(drive_file.wrapped_dek),
-                    bytes(drive_file.dek_nonce),
-                    get_master_key(),
-                )
-                aad = build_file_aad(
-                    owner_id=drive_file.owner_id,
-                    file_id=drive_file.id,
-                    version=drive_file.encryption_version,
-                )
-                with drive_file.file_path.open("rb") as stored:
-                    plaintext = decrypt_bytes(
-                        stored.read(),
-                        bytes(drive_file.encryption_nonce),
-                        dek,
-                        aad,
-                    )
-                if drive_file.hash_sha256 and not verify_sha256(plaintext, drive_file.hash_sha256):
-                    raise ValueError("integrity")
-                current = drive_file.folder
-                parts = []
-                while current is not None and current.id != folder.id:
-                    parts.insert(0, current.folder_name)
-                    current = current.parent
-                archive_path = "/".join(parts + [drive_file.file_name])
-                archive.writestr(archive_path, plaintext)
-            except Exception:
-                continue
-
-    buffer.seek(0)
-    log_action(request.user, ActivityLog.Action.DOWNLOAD, f"Downloaded folder: {folder.folder_name}", obj=folder)
-    return FileResponse(
-        buffer,
-        as_attachment=True,
-        filename=f"{folder.folder_name}.zip",
-        content_type="application/zip",
-    )
+    try:
+        log_action(
+            request.user, ActivityLog.Action.DOWNLOAD,
+            f"Downloaded folder: {folder.folder_name}", obj=folder,
+            metadata={"file_count": file_count, "size_bytes": size_bytes},
+        )
+        response = FileResponse(
+            archive, as_attachment=True, filename=f"{folder.folder_name}.zip",
+            content_type="application/zip",
+        )
+    except Exception:
+        archive.close()
+        raise
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Cache-Control"] = "private, no-store"
+    response["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @login_required

@@ -67,6 +67,34 @@ class SelfServiceApiTests(TestCase):
         self.assertFalse(SearchHistory.objects.filter(user=self.user).exists())
         self.assertTrue(SearchHistory.objects.filter(pk=other_history.pk).exists())
 
+    def test_personal_activity_filters_uploads_and_downloads_before_limit(self):
+        ActivityLog.objects.create(
+            user=self.user, tenant=self.tenant, workspace=self.workspace,
+            action=ActivityLog.Action.UPLOAD, description="Uploaded sample.txt",
+        )
+        ActivityLog.objects.create(
+            user=self.user, tenant=self.tenant, workspace=self.workspace,
+            action=ActivityLog.Action.DOWNLOAD, description="Downloaded sample.txt",
+        )
+        ActivityLog.objects.create(
+            user=self.other, tenant=self.other_tenant,
+            action=ActivityLog.Action.DOWNLOAD, description="Other user download",
+        )
+        ActivityLog.objects.create(
+            user=self.user, tenant=self.tenant,
+            action=ActivityLog.Action.LOGIN, description="Latest activity",
+        )
+        uploads = self.client.get(reverse("api-my-activity"), {"action": "UPLOAD", "limit": 1})
+        self.assertEqual(uploads.status_code, 200)
+        self.assertEqual([event["action"] for event in uploads.data["events"]], ["UPLOAD"])
+
+        downloads = self.client.get(reverse("api-my-activity"), {"action": "DOWNLOAD"})
+        self.assertEqual(downloads.status_code, 200)
+        self.assertEqual([event["description"] for event in downloads.data["events"]], ["Downloaded sample.txt"])
+
+        invalid = self.client.get(reverse("api-my-activity"), {"action": "DELETE;DROP"})
+        self.assertEqual(invalid.status_code, 400)
+
     def test_shared_personal_workspace_does_not_disclose_owner_tenant_usage(self):
         shared_workspace = Workspace.objects.create(
             tenant=self.tenant,
@@ -85,10 +113,18 @@ class SelfServiceApiTests(TestCase):
             membership=guest_membership,
             role=WorkspaceMembership.Role.EDITOR,
         )
+        # My Drive and collaboration workspaces have independent quotas.
+        # New non-default workspaces are provisioned with their own quota.
         QuotaAccount.objects.filter(
             tenant=self.tenant,
             scope=QuotaAccount.Scope.TENANT,
         ).update(used_bytes=9000, limit_bytes=10000)
+        updated = QuotaAccount.objects.filter(
+            tenant=self.tenant,
+            workspace=shared_workspace,
+            scope=QuotaAccount.Scope.WORKSPACE,
+        ).update(used_bytes=1300, reserved_bytes=100, limit_bytes=7000)
+        self.assertEqual(updated, 1, "Expected automatic workspace quota provisioning")
 
         self.client.force_authenticate(self.other)
         response = self.client.get(
@@ -97,9 +133,21 @@ class SelfServiceApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.data["configured"])
-        self.assertIsNone(response.data["usedBytes"])
-        self.assertIn("Individual usage is not currently tracked", response.data["message"])
+        self.assertTrue(response.data["configured"])
+        self.assertEqual(response.data["scope"], QuotaAccount.Scope.WORKSPACE)
+        self.assertEqual(response.data["workspaceId"], str(shared_workspace.pk))
+        self.assertEqual(response.data["limitBytes"], 7000)
+        self.assertEqual(response.data["usedBytes"], 1300)
+        self.assertEqual(response.data["reservedBytes"], 100)
+        self.assertEqual(response.data["remainingBytes"], 5600)
+        self.assertNotIn("organizationCap", response.data)
+        self.assertNotIn("tenantQuota", response.data)
+        # A guest cannot select the owner's default My Drive workspace.
+        private_response = self.client.get(
+            reverse("api-my-quota"),
+            HTTP_X_WORKSPACE_ID=str(self.workspace.pk),
+        )
+        self.assertEqual(private_response.status_code, 404)
 
     def test_business_quota_requires_member_allocation_before_uploads_allowed(self):
         business = Tenant.objects.create(
