@@ -488,20 +488,21 @@ Fresh logs chỉ giữ local: `%TEMP%/bluedrive-p1-closure-{guards,check,migrati
 
 | Trường bàn giao | Giá trị hiện tại |
 | --- | --- |
-| Acceptance | **PENDING ACCEPTANCE** |
-| Current branch | `feature/storage-control-center-s4-20261109` |
-| Current/base HEAD | `d968ebffa0d17f4fce81c2b2f56af5021e60e070` |
-| Acceptance branch / new commit SHA | **NOT CREATED** — serving/signing-key acceptance gate chưa đạt |
-| Draft PR URL | **NOT CREATED**, không merge/deploy |
-| GitHub Actions run URL | **NOT RUN**, không có SHA mới đủ điều kiện publish |
-| repository-safety / backend / frontend remote results | **NOT RUN / NOT RUN / NOT RUN** |
+| Acceptance | **FINAL ACCEPTED — development baseline**, 17/11/2026; giới hạn tại §12.8 |
+| Current branch | `refactor/p1-baseline-acceptance` |
+| Integration base HEAD | `d968ebffa0d17f4fce81c2b2f56af5021e60e070` |
+| Validated implementation commit SHA | `40d05a5593b84e20858f04562e878178208af621` |
+| Draft PR URL | [PR #1](https://github.com/binos2303/BlueDrive/pull/1), không merge/deploy |
+| GitHub Actions run URL | [Push run 43942204201](https://github.com/binos2303/BlueDrive/actions/runs/43942204201), [PR run 43942215088](https://github.com/binos2303/BlueDrive/actions/runs/43942215088) |
+| repository-safety / backend / frontend remote results | **PASS / PASS / PASS** trên cùng SHA implementation nêu trên |
 | Demo password | **VERIFIED NOT CURRENTLY USED** trong runtime local đã xác nhận |
 | Django signing key | **RETIRED — VERIFIED LOCAL RUNTIME**, xem §12.7 |
 | Runtime configuration | **VERIFIED** trong process phục vụ loopback: key/fallback/signature, PID/listener và old-session HTTP denial |
 | `.bak` | **INFORMATIONAL / NO SECRET REMEDIATION** |
-| P2 readiness | **NOT READY**, không bắt đầu P2 |
+| Serving positive login/logout | **NOT VERIFIED — accepted development limitation**, không dùng account thật |
+| P2 readiness | **READY FOR DEVELOPMENT** theo quyền mới; không tự migrate serving hoặc provision storage |
 
-Operator đã duyệt rotation/session impact và Docker/Platform recovery; không hỏi lại quyền đó. Runtime retirement đã được xác minh (§12.7), nhưng serving login/logout bằng account được phép còn BLOCKED, operator **giữ publish BLOCKED để review history thêm**. Không suy approval history từ rotation. Chỉ khi operator mở gate và các kiểm chứng/candidate review đạt mới tiếp tục branch/stage/commit/push/Draft PR; ba remote jobs phải PASS trên cùng SHA trước FINAL ACCEPTED. Không rewrite/force-push/merge/deploy/P2.
+Quyền tự chủ mới và disposition tại §12.8 thay gate chờ operator của lượt trước. Runtime retirement được xác minh, candidate đã tích hợp, ba remote jobs PASS trên cùng implementation SHA. Positive serving login/logout được chấp nhận là giới hạn development có ghi nhận, không đổi thành PASS. P1 đủ điều kiện bắt đầu P2 development; tiếp tục cấm rewrite/force-push shared history, dữ liệu/migration serving chưa duyệt, merge và deploy.
 
 Kết thúc lượt closure **trước rotation**: kiểm thử ở §12.4 đã **PASS**; full Django **595 PASS / 19 SKIP**, frontend **159 PASS**, guards **30 PASS**, enabled fixtures **72 PASS**, no-DB lifecycle **2 PASS**. Đã xác nhận đúng marker/role/port và **0 test DB UUID còn lại**, rồi dừng riêng test service; không xóa volumes hoặc cleanup dữ liệu thật. Source closure khi đó chỉ sửa **3 files hiện có**: báo cáo này và hai derived manifest/patch; **664 public files còn lại giữ nguyên hash**. Đây là evidence lịch sử của lượt closure, không phải kết quả chạy lại sau rotation; kết quả mới ở §12.6. HEAD/branch/index giữ nguyên, seed fix staged được bảo toàn; chưa có branch/commit/PR/push hoặc remote CI mới. Chưa đủ điều kiện P2.
 
@@ -626,8 +627,17 @@ Nhóm verification có thêm blank line dư tại EOF của `backend/securedrive
 
 Nhóm tài liệu có một trailing space đơn ở roadmap Windows, đã bỏ đúng ký tự đó. Hai patch evidence giữ nguyên context/removed-line whitespace để không làm hỏng patch; kiểm tính đúng bằng apply-check trên các review copies, không trim nội dung patch như source. Source/index security vẫn kiểm toàn bộ artifacts, không miễn trừ credential scanner.
 
-**Current acceptance: PENDING REMOTE CI.** Tái sử dụng local evidence §12.7 (595 PASS/19 SKIP full, 72 enabled, 6 auth fixtures, 30 guards, 2 no-DB; frontend §12.4). Chạy source/index security phù hợp trước publish; không lặp lại regression đã đạt cho thay đổi tài liệu. Chưa có remote PASS/SHA/PR evidence ở thời điểm quyết định này. Chỉ chuyển FINAL ACCEPTED khi repository-safety, backend và frontend PASS trên cùng SHA thực tế. P2 chỉ triển khai sau gate đó; không bắt đầu migration serving hoặc provisioning storage.
+**Current acceptance: FINAL ACCEPTED — development baseline**, ngày **17/11/2026**, trên implementation SHA `40d05a5593b84e20858f04562e878178208af621`. Giữ local evidence §12.7 và bổ sung remote proof bên dưới. Đây là nghiệm thu baseline development/local, không phải production, real-provider write/browser/restore acceptance hoặc serving positive-login PASS. Commit ghi nhận evidence sau đó chỉ cập nhật tài liệu/artifacts; implementation SHA được nghiệm thu và run URLs được giữ cố định để tra cứu, current branch checks theo Draft PR.
 
 **Remote CI lần đầu đã chạy:** bốn commits theo nhóm đã push lên `refactor/p1-baseline-acceptance`, tip `d86987086fe3000e9cdc54cd59a34417480b14d1`, [Draft PR #1](https://github.com/binos2303/BlueDrive/pull/1). [Run 43899445763](https://github.com/binos2303/BlueDrive/actions/runs/43899445763) FAIL có log thực tế: safety/backend dừng ở setup-python vì Ubuntu 26.04 không có binary 3.12.10; frontend lint/typegen/TypeScript đã qua, unit discovery dừng với `rg: command not found`, chưa thực thi tests/build. Đây không phải application assertion failure và skipped downstream steps không tính PASS.
 
-Fix CI tối thiểu: pin hai Python jobs vào `ubuntu-24.04`, giữ Python 3.12.10/dependencies và mọi security/test gate; frontend dùng `find` + NUL-delimited Bash array thay dependency `rg` không có trên runner. Giữ zero-discovery failure và cùng toàn bộ test files; không thêm apt/npm dependency hoặc tắt test. Đối chiếu [manifest binary Python chính thức](https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json) xác nhận build linux-x64 24.04 có sẵn. Sau fix phải chờ ba jobs PASS trên SHA mới; P1 vẫn PENDING trước evidence đó.
+Fix CI tối thiểu: pin hai Python jobs vào `ubuntu-24.04`, giữ Python 3.12.10/dependencies và mọi security/test gate; frontend dùng `find` + NUL-delimited Bash array thay dependency `rg` không có trên runner. Giữ zero-discovery failure và cùng 39 test files; không thêm apt/npm dependency hoặc tắt test. Đối chiếu [manifest binary Python chính thức](https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json) xác nhận build linux-x64 24.04 có sẵn. Commit fix `40d05a5593b84e20858f04562e878178208af621` đã vượt cả push/PR workflows; không lấy run FAIL của SHA cũ làm bằng chứng PASS.
+
+| Remote gate trên SHA `40d05a5593b84e20858f04562e878178208af621` | Evidence |
+| --- | --- |
+| Repository safety | [PASS job 133562392770](https://github.com/binos2303/BlueDrive/actions/runs/43942204201/job/133562392770), source/index scan và guard tests giữ nguyên |
+| Backend | [PASS job 133562392349](https://github.com/binos2303/BlueDrive/actions/runs/43942204201/job/133562392349), checkout log khớp exact SHA; system/migrations/pip check PASS, guards 30/30 (1.633s), full 614 total = **595 executed / 19 SKIP**, 0 failures/errors (236.918s); no-DB 2/2 (0.003s), enabled 72/72 (18.584s) |
+| Frontend | [PASS job 133562393122](https://github.com/binos2303/BlueDrive/actions/runs/43942204201/job/133562393122), clean npm install/lint/typegen/TypeScript, **159 PASS / 0 fail / 0 skip**, production build **40/40** pages |
+| PR workflow | [PASS run 43942215088](https://github.com/binos2303/BlueDrive/actions/runs/43942215088), ba jobs cùng head SHA; PR #1 vẫn Draft |
+
+Manifest 674 rows/20 EXCLUDE và toàn bộ source dependencies được giữ; local editor/evidence/private config không publish. Không reset/stash/force-push/history rewrite hoặc sửa dữ liệu/credential phục vụ. GitHub connector tạo PR bị thiếu permission 403; dùng credential helper Git sẵn có cho GitHub REST fallback, token chỉ trong memory, không log/persist. Không merge/deploy. P2 triển khai trong checkout tách biệt để không tự reload runtime P1 hoặc apply schema mới lên serving database.
