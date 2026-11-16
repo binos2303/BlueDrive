@@ -19,8 +19,6 @@ from .services import (
 )
 from logs.models import ActivityLog
 from logs.services import log_action
-from security.aes_service import build_file_aad, decrypt_bytes, get_master_key, unwrap_dek
-from security.hash_service import verify_sha256
 
 from .forms import FileShareForm
 from .models import Share
@@ -268,6 +266,8 @@ def bulk_download_shared(request):
         messages.error(request, "One or more selected files are unavailable or in Trash.")
         return redirect("shared_with_me")
 
+    from files.views import _decrypt_file, _download_block_reason
+
     payloads = []
     for drive_file in files:
         from .services import get_receiver_share_for_file
@@ -276,12 +276,9 @@ def bulk_download_shared(request):
             messages.error(request, f'You do not have access to "{drive_file.file_name}".')
             return redirect("shared_with_me")
         try:
-            dek = unwrap_dek(bytes(drive_file.wrapped_dek), bytes(drive_file.dek_nonce), get_master_key())
-            aad = build_file_aad(owner_id=drive_file.owner_id, file_id=drive_file.id, version=drive_file.encryption_version)
-            with drive_file.file_path.open("rb") as stored_file:
-                plaintext = decrypt_bytes(stored_file.read(), bytes(drive_file.encryption_nonce), dek, aad)
-            if drive_file.hash_sha256 and not verify_sha256(plaintext, drive_file.hash_sha256):
-                raise ValueError("integrity")
+            if _download_block_reason(drive_file):
+                raise ValueError("File is not available for download.")
+            plaintext = _decrypt_file(drive_file)
             payloads.append((drive_file.file_name, plaintext))
         except Exception:
             messages.error(request, f'Could not prepare "{drive_file.file_name}" for download.')

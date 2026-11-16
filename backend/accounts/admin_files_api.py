@@ -1,7 +1,7 @@
 """Read-only platform file inventory.
 
 This API intentionally returns metadata only. It must never expose file bytes,
-MinIO object references, presigned URLs, encryption material, or storage secrets.
+S3 object references, presigned URLs, encryption material, or storage secrets.
 """
 from uuid import UUID
 

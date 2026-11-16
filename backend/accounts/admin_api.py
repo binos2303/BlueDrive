@@ -3,10 +3,10 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Count, F, Min, Q, Sum
 from django.db.models.functions import Lower
 from accounts.models import Tenant, Workspace, WorkspaceMembership, Membership, TrackedAccountSession, PlatformAdminAuditEvent
-from files.models import File
+from files.models import File, UploadFinalizationJob, UploadSession
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import BasePermission
@@ -119,7 +119,7 @@ def admin_overview_view(request):
     """Read-only platform metrics from PostgreSQL; no infrastructure telemetry claims.
 
     Active accounts are enabled for login, NOT necessarily online sessions.
-    File bytes reflect current, non-trashed metadata, NOT MinIO disk consumption.
+    File bytes reflect current, non-trashed metadata, NOT physical SeaweedFS capacity.
     """
     User = get_user_model()
     admin_filter = Q(is_staff=True) & (Q(is_superuser=True) | Q(platform_admin_identity__isnull=False))
@@ -129,6 +129,24 @@ def admin_overview_view(request):
     workspaces = active_collaboration_workspaces()
     live_files = File.objects.filter(deleted_at__isnull=True)
     file_stats = live_files.aggregate(bytes=Sum("file_size"), count=Count("id"))
+    now = timezone.now()
+    jobs = UploadFinalizationJob.objects.aggregate(
+        pending_jobs=Count("pk", filter=Q(state=UploadFinalizationJob.State.PENDING)),
+        processing_jobs=Count("pk", filter=Q(state=UploadFinalizationJob.State.PROCESSING)),
+        failed_jobs=Count("pk", filter=Q(state=UploadFinalizationJob.State.FAILED)),
+        stale_processing_jobs=Count("pk", filter=Q(
+            state=UploadFinalizationJob.State.PROCESSING, updated_at__lt=now - UploadFinalizationJob.STALE_AFTER,
+        )),
+        oldest_active_job_at=Min("updated_at", filter=Q(state__in=[
+            UploadFinalizationJob.State.PENDING, UploadFinalizationJob.State.PROCESSING,
+        ])),
+    )
+    oldest = jobs["oldest_active_job_at"]
+    jobs["oldest_active_job_at"] = oldest.isoformat() if oldest else None
+    uploads = UploadSession.objects.aggregate(
+        verifying_uploads=Count("pk", filter=Q(state=UploadSession.State.VERIFYING)),
+        scanning_uploads=Count("pk", filter=Q(state=UploadSession.State.SCANNING)),
+    )
     return Response({
         "users": {
             "total": normal_users.count(),
@@ -156,7 +174,8 @@ def admin_overview_view(request):
             "metadata_bytes": file_stats["bytes"] or 0,
             "in_trash": File.objects.filter(deleted_at__isnull=False).count(),
         },
-        "health": {"api": "responding", "database": "responding", "minio": "not_monitored"},
+        "health": {"api": "responding", "database": "responding", "storage": "not_monitored"},
+        "uploads": {**jobs, **uploads},
     })
 
 
@@ -200,9 +219,8 @@ def admin_organizations_view(request):
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsPlatformAdmin])
 def admin_workspaces_view(request):
-    """Active collaboration directory shared by Workspaces and Teams UI.
+    """Active collaboration workspaces and their explicit membership counts.
 
-    A Team is an existing Workspace, not a second authority for membership.
     Counts refer to active *explicit* assignments, excluding revoked/suspended
     tenant memberships and disabled users. Tenant owner/admin inherited rights
     and per-resource Direct Shares are intentionally not counted.
@@ -371,11 +389,13 @@ def admin_sessions_view(request):
     if scope not in ("users", "admins", "all") or presence not in ("all", "recent"):
         return Response({"detail": "Invalid session filters."}, status=400)
     now = timezone.now()
-    queryset = TrackedAccountSession.objects.select_related("user", "session").filter(session__expire_date__gt=now)
+    queryset = TrackedAccountSession.objects.select_related("user", "user__platform_admin_identity", "session").filter(session__expire_date__gt=now)
     if scope == "users":
-        queryset = queryset.exclude(user__is_staff=True, user__is_superuser=True)
+        queryset = queryset.filter(user__is_staff=False, user__is_superuser=False)
     elif scope == "admins":
-        queryset = queryset.filter(user__is_staff=True, user__is_superuser=True)
+        queryset = queryset.filter(user__is_staff=True).filter(
+            Q(user__is_superuser=True) | Q(user__platform_admin_identity__isnull=False),
+        )
     if presence == "recent":
         queryset = queryset.filter(last_seen_at__gte=now - ONLINE_WINDOW)
     user_id = str(request.query_params.get("user_id", "")).strip()
@@ -392,7 +412,7 @@ def admin_sessions_view(request):
         "results": [{
             "id": str(row.pk), "user_id": row.user_id,
             "username": row.user.get_username(),
-            "account_type": ("admin" if row.user.is_staff and row.user.is_superuser
+            "account_type": ("admin" if row.user.is_staff and (row.user.is_superuser or hasattr(row.user, "platform_admin_identity"))
                              else "staff" if row.user.is_staff or row.user.is_superuser else "user"),
             "started_at": row.started_at.isoformat(),
             "last_seen_at": row.last_seen_at.isoformat(),
@@ -429,30 +449,3 @@ def admin_revoke_session_view(request, session_id):
             reason=reason, metadata={"session_inventory_id": str(session_id)},
         )
     return Response({"revoked": True})
-
-
-@api_view(["GET"])
-@authentication_classes([SessionAuthentication])
-@permission_classes([IsPlatformAdmin])
-def admin_audit_view(request):
-    action = str(request.query_params.get("action", "all"))
-    allowed = {"all", *PlatformAdminAuditEvent.Action.values}
-    if action not in allowed:
-        return Response({"detail": "Invalid audit filter."}, status=400)
-    queryset = PlatformAdminAuditEvent.objects.select_related("actor", "target_user")
-    if action != "all":
-        queryset = queryset.filter(action=action)
-    query = str(request.query_params.get("q", "")).strip()[:100]
-    if query:
-        queryset = queryset.filter(
-            Q(actor__username__icontains=query) | Q(target_user__username__icontains=query)
-        )
-    count = queryset.count()
-    page = _requested_page(request)
-    rows = queryset.order_by("-created_at", "-pk")[(page - 1) * 20:page * 20]
-    return Response({"count": count, "page": page, "page_size": 20, "results": [{
-        "id": str(row.pk), "action": row.action,
-        "actor": row.actor.get_username(), "target": row.target_user.get_username(),
-        "target_id": row.target_user_id, "reason": row.reason,
-        "created_at": row.created_at.isoformat(), "metadata": row.metadata,
-    } for row in rows]})

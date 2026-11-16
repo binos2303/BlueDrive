@@ -217,12 +217,16 @@ def admin_audit_history_view(request):
     if action != "all":
         events = events.filter(action=action)
     if query:
-        events = events.filter(
+        matches = (
             Q(actor__username__icontains=query)
             | Q(target_user__username__icontains=query)
             | Q(actor__email__icontains=query)
             | Q(target_user__email__icontains=query)
+            | Q(reason__icontains=query)
         )
+        if query.isdecimal() and len(query) <= 18:
+            matches |= Q(metadata__file_id=int(query), action__startswith="file.")
+        events = events.filter(matches)
     events = _apply_range(events, bounds)
 
     def serialize(row):

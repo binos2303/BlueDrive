@@ -3,10 +3,12 @@ import uuid
 import re
 import unicodedata
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidTag
 from securedrive.frontend_redirects import redirect_to_frontend
 from django.contrib import messages
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.http import FileResponse, Http404, JsonResponse
@@ -14,12 +16,18 @@ from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
 from django.utils.http import content_disposition_header
 from django.views.decorators.http import require_POST
+from django.views.decorators.cache import never_cache
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from accounts.access import (
     active_tenant_ids,
     active_tenant_required as login_required,
     can_edit_workspace_content,
     get_default_tenant,
+    has_active_membership,
     resolve_request_workspace,
 )
 from folders.models import Folder
@@ -62,6 +70,8 @@ from .quota import (
 
 @login_required
 def file_upload(request):
+    if settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED:
+        return JsonResponse({'detail':'Upload from Drive to use the selected storage destination.','code':'resumable_upload_required'},status=409)
     if request.method != "POST":
         return redirect("dashboard")
 
@@ -302,10 +312,11 @@ def _current_primary_storage_location(drive_file, version=None):
         StorageLocation.objects.filter(
             tenant_id=drive_file.tenant_id,
             file_version=version,
+            storage_config__tenant_id=drive_file.tenant_id,
             state=StorageLocation.State.AVAILABLE,
             object_ref__startswith="primary/",
         )
-        .select_related("storage_config")
+        .select_related("storage_config", "storage_connection__cluster", "tenant")
         .order_by("-created_at")
         .first()
     )
@@ -321,6 +332,8 @@ def _download_block_reason(drive_file):
     version = versions.filter(is_current=True).first()
     if version is None:
         return "This file is still being prepared. Try again later."
+    if version.tenant_id != drive_file.tenant_id or version.deleted_at is not None:
+        return "File storage is unavailable. Retry later."
     if version.state == "scanning":
         return "This file is being security-scanned and cannot be downloaded yet."
     if version.state == "quarantined":
@@ -334,7 +347,7 @@ def _download_block_reason(drive_file):
     if location is None:
         # Do not make a STAGING, QUARANTINE, or legacy FINAL object downloadable.
         return "This file has not been published to primary storage yet. Contact support if the problem persists."
-    if location.storage_config is None or location.storage_config.status != "active":
+    if location.storage_config is None or location.storage_config.status not in ("active", "read_only"):
         return "This file's storage is temporarily unavailable. Retry later."
     return None
 
@@ -409,12 +422,14 @@ def _decrypt_file(drive_file):
             if (
                 location is None
                 or location.storage_config is None
-                or location.storage_config.status != "active"
+                or location.storage_config.status not in ("active", "read_only")
             ):
                 raise Http404
             from .storage_adapters import get_storage_adapter
+            from .storage_routing import adapter_for_location
 
-            with get_storage_adapter().open_object(location.object_ref) as stored_file:
+            version_args = {"version_id": location.provider_version_id} if location.provider_version_id else {}
+            with adapter_for_location(location,fallback=get_storage_adapter).open_object(location.object_ref, **version_args) as stored_file:
                 stored_bytes = stored_file.read()
             expected_sha256 = current_version.sha256 or drive_file.hash_sha256
             encryption_nonce = current_version.encryption_nonce or drive_file.encryption_nonce
@@ -575,6 +590,108 @@ def _file_location(drive_file, *, user, share=None):
         current = current.parent
     location_root = "My Drive" if is_owner else (drive_file.workspace.name if workspace_role else "Shared with me")
     return location_root + (" / " + " / ".join(parts) if parts else "")
+
+
+def _download_endpoint_is_cookie_isolated(request, public_endpoint=None):
+    """Điều hướng native phải tách khỏi phạm vi cookie ứng dụng, kể cả khác port."""
+    hostname = urlsplit(public_endpoint if public_endpoint is not None else settings.SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL).hostname
+    app_hosts = {urlsplit(request.build_absolute_uri("/")).hostname}
+    app_hosts.update(urlsplit(origin).hostname for origin in settings.CORS_ALLOWED_ORIGINS)
+    if not hostname or hostname in app_hosts:
+        return False
+    for domain in (settings.SESSION_COOKIE_DOMAIN, settings.CSRF_COOKIE_DOMAIN):
+        if domain:
+            domain = domain.lstrip(".").lower()
+            if hostname == domain or hostname.endswith("." + domain):
+                return False
+    return True
+
+
+@never_cache
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def file_download_url(request, file_id):
+    """Cấp quyền GET ngắn hạn; file cần giải mã vẫn dùng endpoint cũ."""
+    if not has_active_membership(request.user):
+        return Response({"detail": "An active workspace membership is required."}, status=403)
+    drive_file, is_owner, _share = _get_accessible_file(file_id, request.user)
+    if request.headers.get("X-Workspace-ID") or "workspace_id" in request.query_params:
+        workspace = resolve_request_workspace(request, drive_file.tenant)
+        if workspace is None or workspace.pk != drive_file.workspace_id:
+            raise Http404
+    reason = _download_block_reason(drive_file)
+    if reason:
+        return Response({"detail": reason}, status=409)
+
+    version = drive_file.versions.filter(is_current=True).first()
+    # Không cấp URL cho ciphertext, kể cả khi cờ mã hóa không khớp metadata cũ.
+    needs_decryption = bool(
+        drive_file.is_encrypted or drive_file.encryption_nonce or drive_file.wrapped_dek or drive_file.dek_nonce
+        or (version and (
+            version.is_encrypted or version.encryption_scheme or version.encryption_nonce
+            or version.wrapped_dek or version.dek_nonce
+        ))
+    )
+    if (
+        not settings.SECUREDRIVE_DIRECT_DOWNLOAD_ENABLED
+        or version is None or needs_decryption
+    ):
+        return Response({"mode": "backend"})
+    location = _current_primary_storage_location(drive_file, version)
+    if location is None or location.storage_config.status not in ("active", "read_only"):
+        return Response({"detail": "File storage is temporarily unavailable. Retry later."}, status=409)
+    if settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED and not location.storage_connection_id:
+        return Response({"detail": "File storage connection is unavailable."}, status=503)
+    public_endpoint = location.storage_connection.public_endpoint_url if location.storage_connection_id else settings.SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL
+    if not public_endpoint or not _download_endpoint_is_cookie_isolated(request,public_endpoint):
+        return Response({'mode':'backend'})
+    if location.storage_config.provider != "s3":
+        return Response({"mode": "backend"})
+    if (
+        not location.provider_version_id or location.provider_version_id == "null"
+        or not version.verified_at or not location.verified_at
+        or not re.fullmatch(r"[0-9a-f]{64}", version.sha256 or "")
+        or location.checksum != version.sha256 or location.size_bytes != version.size_bytes
+    ):
+        # Metadata cũ chưa chứng minh finalization hợp lệ thì giữ bước kiểm tra nội dung của Django.
+        return Response({"mode": "backend"})
+    if (
+        not location.storage_connection_id and location.storage_config.endpoint
+        and location.storage_config.endpoint.rstrip("/") != settings.SECUREDRIVE_STORAGE_ENDPOINT_URL.rstrip("/")
+    ):
+        return Response({"detail": "File storage configuration is unavailable."}, status=503)
+
+    from .storage_adapters import get_storage_adapter
+    from .storage_routing import adapter_for_location
+    from .storage_adapters.base import StorageNotFoundError
+    filename = _safe_download_filename(drive_file.file_name)
+    expires_in = settings.SECUREDRIVE_DOWNLOAD_URL_SECONDS
+    try:
+        adapter = adapter_for_location(location,fallback=get_storage_adapter)
+        # Chỉ HEAD để phát hiện object thiếu hoặc sai kích thước, không đọc nội dung vào Django.
+        stat = adapter.stat_object(location.object_ref, version_id=location.provider_version_id)
+        if stat.size_bytes != version.size_bytes or stat.version_id != location.provider_version_id:
+            return Response({"detail": "Stored file does not match its verified version."}, status=422)
+        signed = adapter.create_download_url(location.object_ref, expires_in=expires_in, download_name=filename, version_id=location.provider_version_id)
+    except StorageNotFoundError:
+        return Response({"detail": "The stored file is unavailable."}, status=404)
+    except Exception:
+        # Không đưa exception SDK hay URL chứa chữ ký vào log/response lỗi.
+        return Response({"detail": "Download authorization is temporarily unavailable. Retry later."}, status=503)
+
+    if is_owner:
+        File.objects.filter(pk=drive_file.pk).update(last_accessed_at=timezone.now())
+    log_action(
+        request.user, ActivityLog.Action.DOWNLOAD,
+        f"Authorized download of {drive_file.file_name}", obj=drive_file,
+        metadata={"size_bytes": version.size_bytes, "version_id": str(version.pk),
+                  "transport": "presigned", "event": "authorization_issued", "expires_in": expires_in},
+    )
+    response = Response({"mode": "presigned", "url": signed.url, "filename": filename,
+                         "size_bytes": version.size_bytes, "expires_in": expires_in})
+    response["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @login_required

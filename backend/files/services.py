@@ -23,6 +23,12 @@ from security.aes_service import (
 
 
 
+def _bounded_name(stem, marker, suffix="", limit=255):
+    """Chừa chỗ cho hậu tố để tên tự sinh không vượt giới hạn cột dữ liệu."""
+    suffix = suffix[:max(0, limit - len(marker) - 1)]
+    return f"{stem[:limit - len(marker) - len(suffix)]}{marker}{suffix}"
+
+
 def unique_copy_name(model, field_name, original_name, *, folder=None, owner=None, exclude_id=None, workspace=None):
     """Return a collision-free copy name in the target folder."""
     if "." in original_name:
@@ -31,11 +37,13 @@ def unique_copy_name(model, field_name, original_name, *, folder=None, owner=Non
     else:
         stem, suffix = original_name, ""
 
-    candidate = f"{stem} (copy){suffix}"
+    limit = model._meta.get_field(field_name).max_length or 255
+    candidate = _bounded_name(stem, " (copy)", suffix, limit)
     number = 2
 
-    filters = {field_name: candidate}
-    if owner is not None:
+    filters = {f"{field_name}__iexact": candidate, "deleted_at__isnull": True}
+    workspace = workspace or (folder.workspace if folder is not None else None)
+    if owner is not None and workspace is None:
         filters["owner"] = owner
     if folder is not None:
         filters["folder"] = folder
@@ -50,8 +58,8 @@ def unique_copy_name(model, field_name, original_name, *, folder=None, owner=Non
         queryset = model.objects.filter(**filters)
 
     while queryset.exists():
-        candidate = f"{stem} (copy {number}){suffix}"
-        filters[field_name] = candidate
+        candidate = _bounded_name(stem, f" (copy {number})", suffix, limit)
+        filters[f"{field_name}__iexact"] = candidate
         if exclude_id is not None:
             queryset = model.objects.filter(**filters).exclude(id=exclude_id)
         else:
@@ -230,11 +238,13 @@ def unique_upload_name(model, field_name, original_name, *, folder=None, owner=N
     stem = original_name[:-len(suffix)] if suffix else original_name
     candidate = original_name
     number = 1
+    workspace = workspace or (folder.workspace if folder is not None else None)
+    limit = model._meta.get_field(field_name).max_length or 255
 
     while True:
         # Match File's case-insensitive live sibling-name constraint.
         filters = {f"{field_name}__iexact": candidate, "deleted_at__isnull": True}
-        if owner is not None:
+        if owner is not None and workspace is None:
             filters["owner"] = owner
         if folder is not None:
             filters["folder"] = folder
@@ -245,4 +255,4 @@ def unique_upload_name(model, field_name, original_name, *, folder=None, owner=N
         if not model.objects.filter(**filters).exists():
             return candidate
         number += 1
-        candidate = f"{stem} ({number}){suffix}"
+        candidate = _bounded_name(stem, f" ({number})", suffix, limit)

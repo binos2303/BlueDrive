@@ -33,6 +33,7 @@ class ObjectStat:
     checksum_sha256: str = ""
     checksum_type: str = ""
     metadata: dict[str, str] = field(default_factory=dict, repr=False)
+    version_id: str = ""
 
 
 @dataclass(frozen=True, repr=False)
@@ -60,7 +61,7 @@ class StorageAdapter(Protocol):
 
     def create_object_key(self, purpose: str) -> str: ...
 
-    def stat_object(self, object_key: str) -> ObjectStat: ...
+    def stat_object(self, object_key: str, *, version_id: str = "") -> ObjectStat: ...
 
     def verify_object(
         self,
@@ -68,6 +69,7 @@ class StorageAdapter(Protocol):
         *,
         expected_size: int,
         expected_sha256: str | None = None,
+        version_id: str = "",
     ) -> ObjectStat: ...
 
     def initiate_multipart(
@@ -95,10 +97,10 @@ class StorageAdapter(Protocol):
     def abort_multipart(self, object_key: str, upload_id: str) -> None: ...
 
     def create_download_url(
-        self, object_key: str, *, expires_in: int, download_name: str | None = None
+        self, object_key: str, *, expires_in: int, download_name: str | None = None, version_id: str = ""
     ) -> PresignedRequest: ...
 
-    def open_object(self, object_key: str) -> BinaryIO: ...
+    def open_object(self, object_key: str, *, version_id: str = "") -> BinaryIO: ...
 
     def download_to(
         self, object_key: str, destination: BinaryIO, *, max_bytes: int | None = None
@@ -112,6 +114,7 @@ class StorageAdapter(Protocol):
         size_bytes: int,
         sha256_hex: str,
         content_type: str = "application/octet-stream",
+        metadata: dict[str, str] | None = None,
     ) -> ObjectStat: ...
 
     def publish_verified_object(

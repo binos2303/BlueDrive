@@ -1,4 +1,4 @@
-"""Verify PostgreSQL and MinIO/S3 API connectivity without touching user objects."""
+"""Kiểm tra PostgreSQL và S3 bằng object probe riêng, không chạm dữ liệu người dùng."""
 import hashlib
 import io
 import uuid
@@ -10,7 +10,7 @@ from files.storage_adapters import get_storage_adapter
 
 
 class Command(BaseCommand):
-    help = "Test the PostgreSQL connection and perform a temporary MinIO write/read/delete probe."
+    help = "Test the PostgreSQL connection and perform a temporary S3 write/read/delete probe."
 
     def handle(self, *args, **options):
         try:
@@ -28,6 +28,7 @@ class Command(BaseCommand):
 
         adapter = None
         object_key = None
+        cleanup_failed = False
         probe = f"SecureDrive connectivity probe {uuid.uuid4()}".encode("utf-8")
         digest = hashlib.sha256(probe).hexdigest()
         try:
@@ -52,7 +53,7 @@ class Command(BaseCommand):
             if isinstance(error, CommandError):
                 raise
             raise CommandError(
-                f"MinIO/S3 API check failed ({type(error).__name__}). "
+                f"S3 API check failed ({type(error).__name__}). "
                 "Check SECUREDRIVE_STORAGE_ENDPOINT_URL, bucket, credentials, network access and bucket permissions."
             ) from None
         finally:
@@ -60,12 +61,15 @@ class Command(BaseCommand):
                 try:
                     adapter.delete_object(object_key)
                 except Exception:
+                    cleanup_failed = True
                     self.stderr.write(self.style.WARNING(
-                        "Warning: the temporary MinIO probe object could not be deleted. "
+                        "Warning: the temporary S3 probe object could not be deleted. "
                         "Check bucket permissions and remove the probe object if it remains."
                     ))
 
+        if cleanup_failed:
+            raise CommandError("S3 probe cleanup failed; connection qualification is incomplete.")
         self.stdout.write(self.style.SUCCESS(
-            "MinIO/S3: connected; temporary object write/read verified and cleanup attempted."
+            "S3: connected; temporary object write/read and cleanup verified."
         ))
         self.stdout.write(self.style.SUCCESS("All connection probes passed."))

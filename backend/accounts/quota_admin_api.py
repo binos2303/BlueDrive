@@ -86,7 +86,7 @@ def quota_directory_view(request):
             "editable": True,
         } for tenant in rows]
     else:
-        ws = active_collaboration_workspaces().select_related("tenant")
+        ws = active_collaboration_workspaces().filter(tenant__kind=Tenant.Kind.PERSONAL).select_related("tenant")
         if query:
             ws = ws.filter(Q(name__icontains=query) | Q(tenant__name__icontains=query))
         ordering = {"name_asc": ("name", "pk"), "name_desc": ("-name", "pk"),
@@ -101,9 +101,7 @@ def quota_directory_view(request):
             "detail": workspace.tenant.name, "tenant_status": workspace.tenant.status,
             "tenant_kind": workspace.tenant.kind,
             "quota": _summary(quotas.get(workspace.pk), warning, critical),
-            # Business-owned storage is view-only on the platform. Enterprise
-            # allocation must use separate tenant-scoped authorization.
-            "editable": workspace.tenant.kind == Tenant.Kind.PERSONAL,
+            "editable": True,
         } for workspace in rows]
     return Response({"count": count, "page": page, "page_size": PAGE_SIZE, "results": results})
 
@@ -135,18 +133,16 @@ def quota_update_view(request, quota_id):
     if not is_platform_super_admin(request.user):
         return Response({"detail": "Super Admin permission is required."}, status=403)
     data = request.data
-    if not isinstance(data, dict) or set(data) != {"reason", "plan_code", "limit_bytes"}:
-        return Response({"detail": "Provide reason, plan_code and limit_bytes."}, status=400)
+    if not isinstance(data, dict) or set(data) != {"reason", "plan_code"}:
+        return Response({"detail": "Provide reason and plan_code. Custom quota limits are not supported."}, status=400)
     reason = data.get("reason")
     if not isinstance(reason, str) or not 8 <= len(reason.strip()) <= 500:
         return Response({"detail": "Reason must contain 8–500 characters."}, status=400)
     reason = reason.strip()
     plan_code = data.get("plan_code")
-    limit = data.get("limit_bytes")
-    if plan_code is not None and (not isinstance(plan_code, str) or not plan_code.strip()):
+    if not isinstance(plan_code, str) or not plan_code.strip():
         return Response({"detail": "Invalid plan code."}, status=400)
-    if plan_code is None and not _valid_limit(limit):
-        return Response({"detail": "Invalid quota limit."}, status=400)
+    plan_code = plan_code.strip()
     with transaction.atomic():
         row = (
             QuotaAccount.objects
@@ -160,19 +156,17 @@ def quota_update_view(request, quota_id):
             return Response({"detail": "Organization allocations must be managed by the organization administrator."}, status=403)
         if row.scope == QuotaAccount.Scope.WORKSPACE and (row.workspace is None or row.workspace.is_default):
             return Response({"detail": "Invalid quota scope."}, status=400)
-        plan = None
-        if plan_code is not None:
-            plan = StoragePlan.objects.filter(code=plan_code, is_active=True).first()
-            if plan is None:
-                return Response({"detail": "Plan unavailable."}, status=400)
-            required = StoragePlan.Scope.PERSONAL if row.scope == QuotaAccount.Scope.TENANT else StoragePlan.Scope.WORKSPACE
-            if plan.scope != required:
-                return Response({"detail": "Plan scope mismatch."}, status=400)
-            limit = plan.limit_bytes
+        plan = StoragePlan.objects.select_for_update().filter(code=plan_code, is_active=True).first()
+        if plan is None:
+            return Response({"detail": "Plan unavailable."}, status=400)
+        required = StoragePlan.Scope.PERSONAL if row.scope == QuotaAccount.Scope.TENANT else StoragePlan.Scope.WORKSPACE
+        if plan.scope != required:
+            return Response({"detail": "Plan scope mismatch."}, status=400)
+        limit = plan.limit_bytes
         policy = StoragePolicy.objects.filter(pk=1).first()
         warning = policy.warning_percent if policy else 80
         critical = policy.critical_percent if policy else 95
-        if row.limit_bytes == limit and row.plan_id == (plan.code if plan else None):
+        if row.limit_bytes == limit and row.plan_id == plan.code:
             return Response({"quota": _summary(row, warning, critical), "unchanged": True})
         old_limit, old_plan = row.limit_bytes, row.plan_id or ""
         row.limit_bytes = limit
@@ -181,7 +175,7 @@ def quota_update_view(request, quota_id):
         QuotaAuditEvent.objects.create(
             actor=request.user, quota_account=row,
             old_limit_bytes=old_limit, new_limit_bytes=limit,
-            old_plan_code=old_plan, new_plan_code=plan.code if plan else "",
+            old_plan_code=old_plan, new_plan_code=plan.code,
             reason=reason,
         )
         return Response({"quota": _summary(row, warning, critical)})
@@ -194,7 +188,9 @@ def quota_history_view(request):
     page = _page(request)
     if page is None:
         return Response({"detail": "Invalid page."}, status=400)
-    qs = QuotaAuditEvent.objects.select_related("actor", "quota_account").order_by("-created_at", "-id")
+    qs = QuotaAuditEvent.objects.filter(
+        quota_account__tenant__kind=Tenant.Kind.PERSONAL,
+    ).select_related("actor", "quota_account").order_by("-created_at", "-id")
     count = qs.count()
     rows = qs[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]
     return Response({"page": page, "page_size": PAGE_SIZE, "count": count, "results": [

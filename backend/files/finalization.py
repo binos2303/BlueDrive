@@ -5,28 +5,87 @@ validated without materializing the entire file in RAM, then published with an
 S3-side conditional copy. Legacy callers that supply raw bytes still use
 PutObject, preserving their existing behavior.
 """
-import hashlib
 import hmac
 import io
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files import File as DjangoFile
 from django.db import transaction
 from django.utils import timezone
 from django.utils.module_loading import import_string
 
-from files.models import File, FileVersion, StorageConfig, StorageLocation, UploadSession
+from accounts.access import can_edit_workspace_content
+from accounts.models import Membership, Tenant, Workspace, WorkspaceMembership
+from files.models import File, FileVersion, StorageConfig, StorageLocation, UploadFinalizationJob, UploadSession
 from files.quota import finalize_upload_quota
 from files.services import unique_upload_name
 from files.storage_adapters import get_storage_adapter
+from files.storage_routing import adapter_for_upload
 from files.validators import MAX_UPLOAD_SIZE, calculate_sha256, detect_mime_type, validate_filename
+from folders.models import Folder
 from logs.models import ActivityLog
 from logs.services import log_action
+from sharing.services import can_edit_folder
+
+
+class UploadDestinationUnavailable(ValidationError):
+    """The upload's write permission was revoked before publication committed."""
+
+
+class FinalizationClaimLost(Exception):
+    """A newer worker owns this job; this attempt may not change its results."""
+
+
+def lock_finalizing_upload(upload_id, job_attempt=None):
+    """Lock session then job consistently; renew the claim at DB milestones."""
+    session = UploadSession.objects.select_related("tenant", "target_folder").select_for_update(
+        of=("self",),
+    ).get(pk=upload_id)
+    if job_attempt is not None:
+        job = UploadFinalizationJob.objects.select_for_update().get(upload_session=session)
+        if job.state != UploadFinalizationJob.State.PROCESSING or job.attempts != job_attempt:
+            raise FinalizationClaimLost()
+        job.save(update_fields=["updated_at"])
+    return session
+
+
+def _lock_writable_destination(session, actor):
+    """Called with the session locked, only inside short database transactions."""
+    workspace = Workspace.objects.select_for_update(no_key=True).get(pk=session.workspace_id)
+    tenant = Tenant.objects.select_for_update(no_key=True).get(pk=session.tenant_id)
+    # Lock the actual authorization rows so updates/revocation serialize with
+    # publication. Never trust related objects cached before S3 I/O.
+    membership = Membership.objects.select_for_update(no_key=True).filter(
+        tenant=tenant, user_id=session.initiated_by_id,
+    ).first()
+    current_actor = get_user_model().objects.select_for_update(no_key=True).get(pk=session.initiated_by_id)
+    if membership is not None:
+        list(WorkspaceMembership.objects.select_for_update(no_key=True).filter(
+            workspace=workspace, membership=membership,
+        ))
+    workspace.tenant = tenant
+    session.workspace = workspace
+    session.tenant = tenant
+    if (
+        getattr(actor, "pk", None) != current_actor.pk
+        or workspace.tenant_id != tenant.pk
+        or not can_edit_workspace_content(current_actor, workspace)
+    ):
+        raise UploadDestinationUnavailable("Upload destination is no longer writable.")
+    if session.target_folder_id:
+        # Refresh folder scope too; the selected destination may have moved or
+        # entered Trash since this session was created.
+        folder = Folder.objects.get(pk=session.target_folder_id)
+        if (folder.tenant_id != tenant.pk or folder.workspace_id != workspace.pk
+                or not can_edit_folder(folder, current_actor)):
+            raise UploadDestinationUnavailable("Upload destination is no longer writable.")
+        session.target_folder = folder
 
 
 def finalize_verified_upload(
-    session, plaintext, actor, *, verified_sha256=None, verified_etag=""
+    session, plaintext, actor, *, verified_sha256=None, verified_etag="", job_attempt=None
 ):
     """Publish a verified upload. `verified_sha256` is trusted only from the worker.
 
@@ -63,8 +122,12 @@ def finalize_verified_upload(
     mime_type = detect_mime_type(DjangoFile(content, name=session.client_name), extension)
     scanner_path = getattr(settings, "SECUREDRIVE_UPLOAD_SCANNER", "")
     if scanner_path:
-        session.state = UploadSession.State.SCANNING
-        session.save(update_fields=["state", "updated_at"])
+        with transaction.atomic():
+            session = lock_finalizing_upload(session.pk, job_attempt)
+            if session.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+                raise ValueError("Upload state changed before scanning.")
+            session.state = UploadSession.State.SCANNING
+            session.save(update_fields=["state", "updated_at"])
         # Existing scanner hook accepts bytes. Its 100-MiB buffer is retained
         # only when configured; replace with a stream-based scanner interface
         # when the malware scanning stage is implemented.
@@ -74,22 +137,27 @@ def finalize_verified_upload(
         if len(scanner_payload) != actual_size or import_string(scanner_path)(
             scanner_payload, session.client_name
         ) is not True:
-            session.state = UploadSession.State.FAILED
-            session.failure_code = "security_scan_rejected"
-            session.save(update_fields=["state", "failure_code", "updated_at"])
-            finalize_upload_quota(session.pk, completed=False, actor=actor)
+            with transaction.atomic():
+                session = lock_finalizing_upload(session.pk, job_attempt)
+                if session.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+                    raise ValueError("Upload state changed during scanning.")
+                session.state = UploadSession.State.FAILED
+                session.failure_code = "security_scan_rejected"
+                session.save(update_fields=["state", "failure_code", "updated_at"])
+                finalize_upload_quota(session.pk, completed=False)
             raise ValidationError("File did not pass the configured security scan.")
 
-    storage = get_storage_adapter()
+    storage = adapter_for_upload(session, fallback=get_storage_adapter)
     # Persist the destination key *before* performing network I/O. If Django
     # terminates after CopyObject but before the DB commit, the retry will use
     # the same key. Never hold a DB transaction open during the S3 operation.
     with transaction.atomic():
-        locked_session = UploadSession.objects.select_for_update().get(pk=session.pk)
+        locked_session = lock_finalizing_upload(session.pk, job_attempt)
         if locked_session.state in (UploadSession.State.AVAILABLE, UploadSession.State.COMPLETED):
             return {"upload_id": str(locked_session.pk), "state": locked_session.state, "file_id": locked_session.file_id}
         if locked_session.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
             raise ValueError("Upload state changed during finalization.")
+        _lock_writable_destination(locked_session, actor)
         final_key = locked_session.final_object_key or storage.create_object_key("primary")
         if not locked_session.final_object_key:
             locked_session.final_object_key = final_key
@@ -99,7 +167,7 @@ def finalize_verified_upload(
     if verified_sha256 is not None and session.object_key and actual_size > 0:
         # The worker read and SHA-256-verified the staged bytes. Copy within
         # storage without downloading/uploading them a second time.
-        storage.publish_verified_object(
+        published = storage.publish_verified_object(
             session.object_key, final_key,
             expected_size=actual_size, expected_sha256=actual_sha256,
             upload_session_id=str(session.pk), content_type=mime_type,
@@ -109,26 +177,22 @@ def finalize_verified_upload(
         # Legacy duplication has no staged object. Keep its verified PutObject
         # path but perform the network write outside this function's DB atomic.
         content.seek(0)
-        storage.put_object(
+        published = storage.put_object(
             final_key, content, size_bytes=actual_size,
             sha256_hex=actual_sha256,
             content_type=mime_type or "application/octet-stream",
         )
 
-    tenant = session.tenant
-    folder = session.target_folder
-    owner = folder.owner if folder else actor
     with transaction.atomic():
-        locked = (
-            UploadSession.objects
-            .select_related("tenant", "target_folder")
-            .select_for_update(of=("self",))
-            .get(pk=session.pk)
-        )
+        locked = lock_finalizing_upload(session.pk, job_attempt)
         if locked.state in (UploadSession.State.AVAILABLE, UploadSession.State.COMPLETED):
             return {"upload_id": str(locked.pk), "state": locked.state, "file_id": locked.file_id}
         if locked.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
             raise ValueError("Upload state changed during finalization.")
+        _lock_writable_destination(locked, actor)
+        tenant = locked.tenant
+        folder = locked.target_folder
+        owner = folder.owner if folder else actor
         visible_name = unique_upload_name(
             File, "file_name", locked.client_name,
             folder=folder, owner=owner, workspace=locked.workspace,
@@ -139,13 +203,12 @@ def finalize_verified_upload(
             hash_sha256=actual_sha256, is_encrypted=False,
             encryption_version=1, file_path="",
         )
-        cfg, _ = StorageConfig.objects.get_or_create(
-            tenant=tenant, provider=StorageConfig.Provider.MINIO,
-            defaults={
-                "endpoint": settings.SECUREDRIVE_STORAGE_ENDPOINT_URL,
-                "status": StorageConfig.Status.ACTIVE,
-            },
-        )
+        if locked.storage_config_id:
+            cfg = locked.storage_config
+        else:
+            cfg, _ = StorageConfig.objects.get_or_create(
+                tenant=tenant, provider=StorageConfig.Provider.S3,
+                defaults={'endpoint':settings.SECUREDRIVE_STORAGE_ENDPOINT_URL,'status':StorageConfig.Status.ACTIVE})
         version = FileVersion.objects.create(
             tenant=tenant, file=drive_file, version_number=1,
             state=FileVersion.State.AVAILABLE, size_bytes=actual_size,
@@ -155,7 +218,9 @@ def finalize_verified_upload(
         )
         StorageLocation.objects.create(
             tenant=tenant, file_version=version, storage_config=cfg,
+            storage_connection_id=locked.storage_connection_id,
             object_ref=final_key, state=StorageLocation.State.AVAILABLE,
+            provider_version_id=published.version_id,
             size_bytes=actual_size, checksum=actual_sha256,
             verified_at=timezone.now(),
         )

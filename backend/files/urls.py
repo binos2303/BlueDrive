@@ -14,6 +14,7 @@ urlpatterns = [
     path("drive/files/<int:file_id>/view/", views.file_view, name="file_view"),
     path("drive/files/<int:file_id>/details/", views.file_details, name="file_details"),
     path("drive/files/<int:file_id>/download/", views.file_download, name="file_download"),
+    path("drive/files/<int:file_id>/download-url/", views.file_download_url, name="file_download_url"),
     path("drive/files/<int:file_id>/trash/", views.file_move_to_trash, name="file_move_to_trash"),
     path("drive/trash/", views.trash, name="trash"),
     path("drive/trash/bulk-action/", views.trash_bulk_action, name="trash_bulk_action"),

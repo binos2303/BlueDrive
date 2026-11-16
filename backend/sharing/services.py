@@ -324,7 +324,7 @@ def can_edit_folder_tree(folder, user):
     Return True when the user can edit the complete live subtree
     rooted at `folder`.
 
-    The owner can always edit the tree while the root is live.
+    Workspace Editors/Admins can edit the live tree regardless of its creator.
 
     For a shared tree, every live folder in the subtree must resolve
     to an Editor permission. This deliberately respects direct child
@@ -335,13 +335,11 @@ def can_edit_folder_tree(folder, user):
     if folder is None:
         return False
 
-    if folder.owner_id == user.id:
-        return (
-            not _folder_has_deleted_ancestor(folder)
-            and _owner_can_edit_workspace_resource(folder, user)
-        )
-
     if _folder_has_deleted_ancestor(folder):
+        return False
+    if _owner_can_edit_workspace_resource(folder, user):
+        return True
+    if folder.owner_id == user.id:
         return False
 
     root_share = get_receiver_share_for_folder(

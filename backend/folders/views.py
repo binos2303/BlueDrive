@@ -1,6 +1,7 @@
 from datetime import timedelta
 from cryptography.exceptions import InvalidTag
 from django.contrib import messages
+from django.conf import settings
 from django.db import transaction
 from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -51,6 +52,7 @@ from sharing.services import (
 
 from .forms import FolderCreateForm
 from .models import Folder
+from .tree_service import folder_subtree
 from logs.models import ActivityLog
 from logs.services import get_last_activity, log_action
 
@@ -149,16 +151,15 @@ def folder_delete(request, folder_id):
         messages.error(request, "Editor access to this workspace is required.")
         return redirect(request.META.get("HTTP_REFERER", "dashboard"))
     deleted_time = timezone.now()
-    subtree = _subtree(folder, include_deleted=False)
+    subtree = folder_subtree(folder)
     folder_ids = [item.id for item in subtree]
 
     with transaction.atomic():
         Folder.objects.filter(
-            id__in=folder_ids, owner=request.user, tenant=folder.tenant,
+            id__in=folder_ids, tenant=folder.tenant,
             workspace=folder.workspace,
         ).update(deleted_at=deleted_time)
         File.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             folder_id__in=folder_ids,
@@ -189,14 +190,13 @@ def folder_restore(request, folder_id):
         messages.warning(request, "Restore the parent folder first.")
         return redirect("trash")
 
-    subtree = _subtree(folder, include_deleted=True)
+    subtree = folder_subtree(folder, include_deleted=True)
     folder_ids = [item.id for item in subtree]
 
     # Check every restored folder/file for live-name conflicts.
     restored_folder_ids = {item.id for item in subtree}
     for restored_folder in subtree:
         if Folder.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             parent=restored_folder.parent,
@@ -207,14 +207,12 @@ def folder_restore(request, folder_id):
             return redirect("trash")
 
     for restored_file in File.objects.filter(
-        owner=request.user,
         tenant=folder.tenant,
         workspace=folder.workspace,
         folder_id__in=restored_folder_ids,
         deleted_at__isnull=False,
     ):
         if File.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             folder=restored_file.folder,
@@ -226,11 +224,10 @@ def folder_restore(request, folder_id):
 
     with transaction.atomic():
         Folder.objects.filter(
-            id__in=folder_ids, owner=request.user, tenant=folder.tenant,
+            id__in=folder_ids, tenant=folder.tenant,
             workspace=folder.workspace,
         ).update(deleted_at=None)
         File.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             folder_id__in=folder_ids,
@@ -256,19 +253,9 @@ def folder_delete_permanently(request, folder_id):
         messages.error(request, "Editor access to this workspace is required.")
         return redirect("trash")
 
-    subtree = [folder]
-    index = 0
-    while index < len(subtree):
-        subtree.extend(Folder.objects.filter(
-            owner=request.user,
-            tenant=folder.tenant,
-            workspace=folder.workspace,
-            parent=subtree[index],
-        ))
-        index += 1
+    subtree = folder_subtree(folder, include_deleted=True)
     folder_ids = [item.id for item in subtree]
     nested_files = list(File.objects.filter(
-        owner=request.user,
         tenant=folder.tenant,
         workspace=folder.workspace,
         folder_id__in=folder_ids,
@@ -286,7 +273,6 @@ def folder_delete_permanently(request, folder_id):
         ).update(target_folder=None)
         Folder.objects.filter(
             id__in=folder_ids,
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
         ).delete()
@@ -303,6 +289,8 @@ def folder_delete_permanently(request, folder_id):
 @require_POST
 def folder_upload(request):
     """Upload a complete browser-selected directory tree (webkitdirectory)."""
+    if settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED:
+        return JsonResponse({'detail':'Upload from Drive to use the selected storage destination.','code':'resumable_upload_required'},status=409)
     uploaded_files = request.FILES.getlist("files")
     relative_paths = request.POST.getlist("relative_paths")
     parent_id = request.POST.get("parent") or None
@@ -748,11 +736,11 @@ def folder_details(request, folder_id):
 
     access = describe_resource_access(folder, request.user, share=share)
     activity = get_last_activity(folder)
-    descendants = _subtree(folder, include_deleted=False)
+    # Authorization above covers the shared workspace tree, irrespective of creator.
+    descendants = folder_subtree(folder)
     descendant_ids = [item.id for item in descendants]
     folder_count = max(len(descendants) - 1, 0)
     file_count = File.objects.filter(
-        owner=folder.owner,
         tenant=folder.tenant,
         workspace=folder.workspace,
         folder_id__in=descendant_ids,

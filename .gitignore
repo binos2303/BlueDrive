@@ -1,5 +1,6 @@
 # BlueDrive: local-only Python environments and generated files
 /.venv/
+/.python/
 venv/
 __pycache__/
 *.py[cod]
@@ -33,3 +34,36 @@ Thumbs.db
 
 # Historical manually-created archive
 /frontend.zip
+
+# Runtime tạm phục vụ kiểm thử Task 01; không đưa binary và cấu hình riêng vào Git.
+/.task01-runtime/
+/infra/seaweedfs/.local/
+
+# Khóa, secret cục bộ và bản sao dữ liệu không phải source để commit.
+/.aws/
+/secrets/
+/backups/
+/backend/backups/
+*.dump
+*.pgdump
+*.backup
+*.bak
+*.sql.gz
+*.dump.gz
+backup*.sql
+dump*.sql
+*_backup.sql
+*-backup.sql
+*_dump.sql
+*-dump.sql
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+id_rsa
+id_ed25519
+
+# Local enterprise simulation secrets and metadata bootstrap.
+/infra/enterprise-lab/.local/

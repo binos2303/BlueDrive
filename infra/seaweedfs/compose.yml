@@ -1,0 +1,129 @@
+name: bluedrive-seaweedfs
+
+x-weed: &weed
+  image: chrislusf/seaweedfs:4.53
+  restart: unless-stopped
+  networks: [storage]
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?Generate independent Platform credentials first}
+    networks: [storage]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./.local/bootstrap.sql:/docker-entrypoint-initdb.d/01-bootstrap.sql:ro
+    healthcheck:
+      # TCP chỉ sẵn sàng sau khi entrypoint hoàn tất bootstrap qua Unix socket.
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U postgres -d postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  master:
+    <<: *weed
+    command: [master, -ip=master, -ip.bind=0.0.0.0, -port=9333, -mdir=/data, -volumeSizeLimitMB=1024]
+    volumes: [master_data:/data]
+    # Chỉ truy cập Master từ máy phát triển; không công khai API quản trị ra Internet.
+    ports: [127.0.0.1:9333:9333]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:9333/cluster/healthz]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  volume:
+    <<: *weed
+    command: [volume, -ip=volume, -ip.bind=0.0.0.0, -port=8080, -master=master:9333, -dir=/data, -max=32, -dataCenter=platform, -rack=lab]
+    volumes: [volume_data:/data]
+    depends_on:
+      master: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/status]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Mỗi Volume Server tương đương một storage node trong lab. Container không phải VM.
+  # Không đụng tới volume_data hiện có; mỗi node mới có named volume độc lập.
+  volume2:
+    <<: *weed
+    command: [volume, -ip=volume2, -ip.bind=0.0.0.0, -port=8080, -master=master:9333, -dir=/data, -max=32, -dataCenter=platform, -rack=lab]
+    volumes: [volume2_data:/data]
+    depends_on:
+      master: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/status]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  volume3:
+    <<: *weed
+    command: [volume, -ip=volume3, -ip.bind=0.0.0.0, -port=8080, -master=master:9333, -dir=/data, -max=32, -dataCenter=platform, -rack=lab]
+    volumes: [volume3_data:/data]
+    depends_on:
+      master: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/status]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  filer:
+    <<: *weed
+    command: [filer, -ip=filer, -ip.bind=0.0.0.0, -port=8888, -master=master:9333]
+    volumes:
+      - filer_data:/data
+      - ./.local/filer.toml:/etc/seaweedfs/filer.toml:ro
+    depends_on:
+      volume: {condition: service_healthy}
+      volume2: {condition: service_healthy}
+      volume3: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8888/]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  s3:
+    <<: *weed
+    command:
+      - s3
+      - -filer=filer:8888
+      - -ip.bind=0.0.0.0
+      - -port=8333
+      - -config=/etc/seaweedfs/s3.json
+      - -iam=false
+      - -port.iceberg=0
+      - -port.lance=0
+      - -autoCreateBucket=false
+      - -allowedOrigins=${FRONTEND_ORIGINS:?Configure exact frontend origins}
+    ports: [127.0.0.1:8333:8333]
+    volumes: [./.local/s3.json:/etc/seaweedfs/s3.json:ro]
+    depends_on:
+      filer: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, 'test "$$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8333/)" = 403']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+networks:
+  storage:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  master_data:
+  volume_data:
+  volume2_data:
+  volume3_data:
+  filer_data:

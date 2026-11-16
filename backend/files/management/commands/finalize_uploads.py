@@ -1,19 +1,19 @@
 import hashlib
 import tempfile
 
-from files.validators import calculate_sha256
-from datetime import timedelta
-
-from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.db import IntegrityError
 from django.utils import timezone
 
-from files.finalization import finalize_verified_upload
+from files.finalization import (
+    FinalizationClaimLost, UploadDestinationUnavailable,
+    finalize_verified_upload, lock_finalizing_upload,
+)
 from files.models import UploadFinalizationJob, UploadSession
-from files.quota import finalize_upload_quota
+from files.quota import QuotaStateError, finalize_upload_quota
 from files.storage_adapters import get_storage_adapter
+from files.storage_routing import adapter_for_upload
 from files.storage_adapters.base import (
     MultipartPart,
     StorageError,
@@ -21,7 +21,7 @@ from files.storage_adapters.base import (
     StorageNotFoundError,
     StorageRetryableError,
 )
-from files.validators import MAX_UPLOAD_SIZE
+from files.validators import MAX_UPLOAD_SIZE, calculate_sha256
 import logging
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ def _quarantine_failed_upload(upload_id):
     if session.object_key.startswith("quarantine/"):
         return True
 
-    storage = get_storage_adapter()
+    storage = adapter_for_upload(session, fallback=get_storage_adapter, cleanup=True)
     quarantine_key = f"quarantine/{session.pk.hex}"
 
     # If finalization wrote PRIMARY but the database transaction did not commit,
@@ -114,26 +114,40 @@ class Command(BaseCommand):
             state__in=[UploadSession.State.VERIFYING, UploadSession.State.SCANNING]
         ).values_list("pk", flat=True).iterator():
             UploadFinalizationJob.objects.get_or_create(upload_session_id=upload_id)
-        stale_before = timezone.now() - timedelta(minutes=10)
+        stale_before = timezone.now() - UploadFinalizationJob.STALE_AFTER
         UploadFinalizationJob.objects.filter(
             state=UploadFinalizationJob.State.PROCESSING, updated_at__lt=stale_before
         ).update(state=UploadFinalizationJob.State.PENDING)
         done = failed = retrying = 0
-        for job_id in UploadFinalizationJob.objects.filter(
+        for job_id, upload_id in UploadFinalizationJob.objects.filter(
             state=UploadFinalizationJob.State.PENDING
-        ).values_list("pk", flat=True)[:100]:
+        ).order_by("pk").values_list("pk", "upload_session_id")[:100]:
             with transaction.atomic():
-                job = UploadFinalizationJob.objects.select_for_update().select_related(
-                    "upload_session__initiated_by"
-                ).get(pk=job_id)
+                # Session -> job is also the publication/failure lock order.
+                upload = UploadSession.objects.select_for_update().get(pk=upload_id)
+                job = UploadFinalizationJob.objects.select_for_update().get(pk=job_id)
                 if job.state != UploadFinalizationJob.State.PENDING:
+                    continue
+                if upload.state in (UploadSession.State.AVAILABLE, UploadSession.State.COMPLETED):
+                    job.state = UploadFinalizationJob.State.DONE
+                    job.save(update_fields=["state", "updated_at"])
+                    done += 1
+                    continue
+                if upload.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+                    if upload.state in (UploadSession.State.FAILED, UploadSession.State.CANCELED, UploadSession.State.EXPIRED):
+                        try:
+                            finalize_upload_quota(upload.pk, completed=False)
+                        except QuotaStateError:
+                            logger.warning("Terminal upload quota requires reconciliation: upload_id=%s", upload.pk, exc_info=True)
+                    job.state = UploadFinalizationJob.State.FAILED
+                    job.save(update_fields=["state", "updated_at"])
+                    failed += 1
                     continue
                 job.state = UploadFinalizationJob.State.PROCESSING
                 job.attempts += 1
                 job.save(update_fields=["state", "attempts", "updated_at"])
-                upload = job.upload_session
             try:
-                storage = get_storage_adapter()
+                storage = adapter_for_upload(upload, fallback=get_storage_adapter)
                 if upload.expected_size_bytes:
                     parts = [MultipartPart(part_number=int(part["part_number"]), etag=str(part["etag"])) for part in upload.part_manifest]
                     stat = storage.complete_multipart(
@@ -172,20 +186,48 @@ class Command(BaseCommand):
                     digest = calculate_sha256(verified)
                     if upload.expected_sha256 and digest != upload.expected_sha256:
                         raise StorageIntegrityError("Verified object checksum changed during finalization.")
-                    UploadSession.objects.filter(
-                        pk=upload.pk, state=UploadSession.State.VERIFYING
-                    ).update(received_bytes=actual_size, actual_size_bytes=actual_size)
-                    if settings.SECUREDRIVE_UPLOAD_SCANNER:
-                        UploadSession.objects.filter(
-                            pk=upload.pk, state=UploadSession.State.VERIFYING
-                        ).update(state=UploadSession.State.SCANNING)
+                    with transaction.atomic():
+                        current = lock_finalizing_upload(upload.pk, job.attempts)
+                        if current.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+                            raise ValueError("Upload state changed during verification.")
+                        current.received_bytes = current.actual_size_bytes = actual_size
+                        current.save(update_fields=["received_bytes", "actual_size_bytes", "updated_at"])
                     finalize_verified_upload(
                         upload, verified, upload.initiated_by,
-                        verified_sha256=digest, verified_etag=retrieved.etag,
+                        verified_sha256=digest, verified_etag=retrieved.etag, job_attempt=job.attempts,
                     )
-                UploadFinalizationJob.objects.filter(pk=job.pk).update(state=UploadFinalizationJob.State.DONE)
-                done += 1
+                done += UploadFinalizationJob.objects.filter(
+                    pk=job.pk, state=UploadFinalizationJob.State.PROCESSING, attempts=job.attempts,
+                ).update(state=UploadFinalizationJob.State.DONE, updated_at=timezone.now())
+            except FinalizationClaimLost:
+                logger.info("Upload finalization claim superseded: upload_id=%s, attempt=%s", upload.pk, job.attempts)
             except Exception as error:
+                with transaction.atomic():
+                    current = UploadSession.objects.select_for_update().get(pk=upload.pk)
+                    current_job = UploadFinalizationJob.objects.select_for_update().get(pk=job.pk)
+                    if current_job.state != UploadFinalizationJob.State.PROCESSING or current_job.attempts != job.attempts:
+                        continue
+                    if current.state in (UploadSession.State.AVAILABLE, UploadSession.State.COMPLETED):
+                        current_job.state = UploadFinalizationJob.State.DONE
+                        current_job.save(update_fields=["state", "updated_at"])
+                        done += 1
+                        continue
+                    transient = isinstance(error, (StorageRetryableError, IntegrityError))
+                    if transient and job.attempts < 3 and current.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+                        current_job.state = UploadFinalizationJob.State.PENDING
+                        retrying += 1
+                    else:
+                        if current.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+                            current.state = UploadSession.State.FAILED
+                            current.failure_code = "destination_not_writable" if isinstance(error, UploadDestinationUnavailable) else "finalization_failed"
+                            current.save(update_fields=["state", "failure_code", "updated_at"])
+                        try:
+                            finalize_upload_quota(upload.pk, completed=False)
+                        except Exception:
+                            logger.exception("Unable to release failed upload quota: upload_id=%s", upload.pk)
+                        current_job.state = UploadFinalizationJob.State.FAILED
+                        failed += 1
+                    current_job.save(update_fields=["state", "updated_at"])
                 logger.exception(
                     "Upload finalization failed: upload_id=%s, job_id=%s, "
                     "attempt=%s, error_type=%s, error=%s",
@@ -195,18 +237,7 @@ class Command(BaseCommand):
                     type(error).__name__,
                     error,
                 )
-                # A live-name uniqueness race is resolved on a bounded retry;
-                # the next transaction observes the winner and picks (2), (3), … .
-                transient = isinstance(error, (StorageRetryableError, IntegrityError))
-                if transient and job.attempts < 3:
-                    UploadFinalizationJob.objects.filter(pk=job.pk).update(state=UploadFinalizationJob.State.PENDING)
-                    retrying += 1
-                else:
-                    UploadSession.objects.filter(pk=upload.pk, state__in=[UploadSession.State.VERIFYING, UploadSession.State.SCANNING]).update(state=UploadSession.State.FAILED, failure_code="finalization_failed")
-                    try:
-                        finalize_upload_quota(upload.pk, completed=False)
-                    except Exception:
-                        pass
+                if current_job.state == UploadFinalizationJob.State.FAILED:
                     try:
                         quarantined = _quarantine_failed_upload(upload.pk)
                         if not quarantined:
@@ -221,6 +252,4 @@ class Command(BaseCommand):
                             "Could not quarantine failed upload object: upload_id=%s",
                             upload.pk,
                         )
-                    UploadFinalizationJob.objects.filter(pk=job.pk).update(state=UploadFinalizationJob.State.FAILED)
-                    failed += 1
         self.stdout.write(f"Finalized: {done}; retrying: {retrying}; failed: {failed}")

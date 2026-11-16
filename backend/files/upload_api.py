@@ -27,6 +27,7 @@ from files.quota import QuotaExceeded, QuotaStateError, finalize_upload_quota, r
 from files.services import unique_upload_name
 from files.storage_adapters import get_storage_adapter
 from files.storage_adapters.base import StorageError
+from files.storage_routing import adapter_for_upload, upload_target
 from folders.models import Folder
 from sharing.services import can_edit_folder
 from .validators import MAX_UPLOAD_SIZE, validate_filename
@@ -38,7 +39,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 def _owned_session(request, upload_id):
     session = get_object_or_404(
-        UploadSession.objects.select_related("tenant", "target_folder", "workspace"),
+        UploadSession.objects.select_related("tenant", "target_folder", "workspace", "storage_config", "storage_connection__cluster"),
         pk=upload_id,
         initiated_by=request.user,
         tenant_id__in=[m.tenant_id for m in active_membership_list(request.user)],
@@ -56,18 +57,20 @@ def active_membership_list(user):
 
 
 def _initialize_upload_session(session, user, adapter):
-    if session.state != UploadSession.State.INITIATED:
-        return
-    reserve_upload_quota(session.pk, user)
-    if session.expected_size_bytes == 0:
-        adapter.put_object(session.object_key, io.BytesIO(b""), size_bytes=0, sha256_hex=hashlib.sha256(b"").hexdigest())
-    elif not session.provider_upload_id:
-        multipart = adapter.initiate_multipart(
-            session.object_key, upload_session_id=str(session.pk), content_type="application/octet-stream"
-        )
-        session.provider_upload_id = multipart.upload_id
-    session.state = UploadSession.State.UPLOADING
-    session.save(update_fields=["provider_upload_id", "state", "updated_at"])
+    # Serialize một lần khởi tạo; không tin snapshot INITIATED của request trước.
+    with transaction.atomic():
+        current = UploadSession.objects.select_for_update().get(pk=session.pk)
+        if current.state != UploadSession.State.INITIATED:
+            session.state, session.provider_upload_id = current.state, current.provider_upload_id
+            return
+        reserve_upload_quota(current.pk, user)
+        if current.expected_size_bytes == 0:
+            adapter.put_object(current.object_key, io.BytesIO(b""), size_bytes=0, sha256_hex=hashlib.sha256(b"").hexdigest())
+        elif not current.provider_upload_id:
+            multipart = adapter.initiate_multipart(current.object_key, upload_session_id=str(current.pk), content_type='application/octet-stream')
+            current.provider_upload_id = session.provider_upload_id = multipart.upload_id
+        current.state = session.state = UploadSession.State.UPLOADING
+        current.save(update_fields=['provider_upload_id','state','updated_at'])
 
 
 def _release_reserved_quota_after_setup_failure(upload_session_id, actor):
@@ -285,7 +288,7 @@ def create_upload(request):
         ).first()
         if existing is not None:
             try:
-                adapter = get_storage_adapter()
+                adapter = adapter_for_upload(existing, fallback=get_storage_adapter)
             except Exception:
                 logger.exception("Storage adapter unavailable for user_id=%s", request.user.pk)
                 return Response(
@@ -296,7 +299,8 @@ def create_upload(request):
 
     # Create the object key through the configured adapter; do not invent a key format.
     try:
-        adapter = get_storage_adapter()
+        target_fields = upload_target(tenant, workspace)
+        adapter = get_storage_adapter(connection=target_fields['storage_connection']) if target_fields else get_storage_adapter()
         object_key = adapter.create_object_key("staging")
     except StorageError:
         logger.exception("Object storage unavailable for user_id=%s", request.user.pk)
@@ -323,6 +327,7 @@ def create_upload(request):
             expires_at=timezone.now() + timedelta(hours=1),
             idempotency_key=idempotency_key,
             object_key=object_key,
+            **target_fields,
         )
     except IntegrityError:
         # A concurrent request may have won the idempotency-key race.
@@ -346,6 +351,10 @@ def create_upload(request):
                 {"detail": "Unable to create upload session."},
                 status=status.HTTP_409_CONFLICT,
             )
+        try:
+            adapter = adapter_for_upload(existing, fallback=get_storage_adapter)
+        except StorageError:
+            return Response({'detail':'Object storage is not available.'},status=503)
         return existing_session_response(existing)
 
     try:
@@ -434,7 +443,7 @@ def authorize_part(request, upload_id, part_number):
     if part_number < 1 or part_number > part_count:
         return Response({"detail": "Part number is outside the session bounds."}, status=400)
     try:
-        signed = get_storage_adapter().create_part_upload_url(session.object_key, session.provider_upload_id, part_number, expires_in=PRESIGN_SECONDS)
+        signed = adapter_for_upload(session, fallback=get_storage_adapter).create_part_upload_url(session.object_key, session.provider_upload_id, part_number, expires_in=PRESIGN_SECONDS)
     except StorageError:
         return Response({"detail": "Could not authorize this upload part."}, status=503)
     # Do not log or persist this response: the URL is a short-lived bearer credential.
@@ -469,7 +478,7 @@ def authorize_parts(request, upload_id):
         return Response({"detail": "A part number is outside the upload session bounds."}, status=400)
 
     try:
-        adapter = get_storage_adapter()
+        adapter = adapter_for_upload(session, fallback=get_storage_adapter)
         signed_parts = []
         for part_number in sorted(raw_parts):
             signed = adapter.create_part_upload_url(
@@ -509,7 +518,7 @@ def list_uploaded_parts(request, upload_id):
     if not session.provider_upload_id:
         return Response({"parts": []})  # Empty files do not use multipart.
     try:
-        parts = get_storage_adapter().list_uploaded_parts(session.object_key, session.provider_upload_id)
+        parts = adapter_for_upload(session, fallback=get_storage_adapter).list_uploaded_parts(session.object_key, session.provider_upload_id)
     except StorageError:
         return Response({"detail": "Unable to reconcile multipart upload."}, status=503)
     return Response({"parts": [
@@ -523,23 +532,11 @@ def list_uploaded_parts(request, upload_id):
 @permission_classes([IsAuthenticated])
 def upload_status(request, upload_id):
     session = _owned_session(request, upload_id)
-    if session.state in (UploadSession.State.INITIATED, UploadSession.State.UPLOADING) and session.expires_at <= timezone.now():
-        session.state = UploadSession.State.EXPIRED
-        session.failure_code = "expired"
-        session.save(update_fields=["state", "failure_code", "updated_at"])
-        try:
-            adapter = get_storage_adapter()
-            if session.provider_upload_id:
-                adapter.abort_multipart(session.object_key, session.provider_upload_id)
-            if session.object_key:
-                adapter.delete_object(session.object_key)
-        except StorageError:
-            pass
-        try:
-            finalize_upload_quota(session.pk, completed=False, actor=request.user)
-        except QuotaStateError:
-            pass
-    return Response({"upload_id": str(session.pk), "state": session.state, "expected_size_bytes": session.expected_size_bytes, "expected_sha256": session.expected_sha256, "actual_size_bytes": session.actual_size_bytes, "failure_code": session.failure_code or None})
+    expired = session.state in (UploadSession.State.INITIATED, UploadSession.State.UPLOADING) and session.expires_at <= timezone.now()
+    return Response({'upload_id':str(session.pk), 'state':'expired' if expired else session.state,
+                     'expected_size_bytes':session.expected_size_bytes, 'expected_sha256':session.expected_sha256,
+                     'actual_size_bytes':session.actual_size_bytes, 'failure_code':'expired' if expired else session.failure_code or None,
+                     'cleanup_pending':expired})
 
 
 @api_view(["POST"])
@@ -561,13 +558,14 @@ def abort_upload(request, upload_id):
         session.save(update_fields=["state", "updated_at"])
     cleanup_pending = False
     try:
-        storage = get_storage_adapter()
+        storage = adapter_for_upload(session, fallback=get_storage_adapter, cleanup=True)
         if session.provider_upload_id:
             storage.abort_multipart(session.object_key, session.provider_upload_id)
         storage.delete_object(session.object_key)
     except StorageError:
         cleanup_pending = True
-    finalize_upload_quota(session.pk, completed=False, actor=request.user)
+    if QuotaReservation.objects.filter(upload_session=session).exists():
+        finalize_upload_quota(session.pk, completed=False, actor=request.user)
     if cleanup_pending:
         return Response({"state": session.state, "cleanup_pending": True}, status=202)
     return Response({"state": session.state})
@@ -599,6 +597,10 @@ def complete_upload(request, upload_id):
         return Response({"detail": "Invalid multipart manifest."}, status=400)
     with transaction.atomic():
         locked = UploadSession.objects.select_for_update().get(pk=session.pk)
+        if locked.state in (UploadSession.State.COMPLETED, UploadSession.State.AVAILABLE):
+            return Response({'upload_id':str(locked.pk),'state':locked.state,'file_id':locked.file_id})
+        if locked.state not in (UploadSession.State.UPLOADING, UploadSession.State.VERIFYING, UploadSession.State.SCANNING) or (locked.state == UploadSession.State.UPLOADING and locked.expires_at <= timezone.now()):
+            return Response({'detail':'Upload session is not completable.'},status=409)
         if locked.state == UploadSession.State.UPLOADING:
             locked.part_manifest = [{"part_number": part.part_number, "etag": part.etag} for part in parts]
             locked.state = UploadSession.State.VERIFYING

@@ -1,4 +1,5 @@
 import uuid
+from datetime import timedelta
 
 from django.db import models
 from django.contrib.auth.models import User
@@ -278,9 +279,7 @@ class FileVersion(models.Model):
 
 class StorageConfig(models.Model):
     class Provider(models.TextChoices):
-        LOCAL = "local", "Local filesystem"
-        S3 = "s3", "S3"
-        MINIO = "minio", "MinIO"
+        S3 = "s3", "SeaweedFS (S3 API)"
 
     class Status(models.TextChoices):
         ACTIVE = "active", "Active"
@@ -315,7 +314,7 @@ class StorageConfig(models.Model):
                 name="storage_tenant_id_uniq",
             ),
             models.CheckConstraint(
-                condition=Q(provider__in=["local", "s3", "minio"]),
+                condition=Q(provider="s3"),
                 name="storage_provider_valid_check",
             ),
             models.CheckConstraint(
@@ -353,6 +352,9 @@ class StorageLocation(models.Model):
         related_name="locations",
     )
     object_ref = models.CharField(max_length=512)
+    # Ghim phiên bản đã xác minh; để trống cho dữ liệu cũ, không suy đoán từ HEAD.
+    provider_version_id = models.CharField(max_length=1024, blank=True, default="")
+    storage_connection = models.ForeignKey('infrastructure.StorageConnectionRevision', on_delete=models.PROTECT, null=True, blank=True, related_name='locations')
     state = models.CharField(max_length=20, choices=State.choices)
     size_bytes = models.PositiveBigIntegerField(null=True, blank=True)
     checksum = models.CharField(max_length=128, blank=True)
@@ -412,6 +414,9 @@ class UploadSession(models.Model):
         EXPIRED = "expired", "Expired"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    storage_config = models.ForeignKey(StorageConfig, on_delete=models.PROTECT, null=True, blank=True, related_name='uploads')
+    storage_connection = models.ForeignKey('infrastructure.StorageConnectionRevision', on_delete=models.PROTECT, null=True, blank=True, related_name='uploads')
+    endpoint_config_version = models.PositiveBigIntegerField(null=True, blank=True)
     tenant = models.ForeignKey(
         "accounts.Tenant",
         on_delete=models.PROTECT,
@@ -529,6 +534,8 @@ class UploadSession(models.Model):
 
 
 class UploadFinalizationJob(models.Model):
+    STALE_AFTER = timedelta(minutes=10)
+
     class State(models.TextChoices):
         PENDING = "pending", "Pending"
         PROCESSING = "processing", "Processing"

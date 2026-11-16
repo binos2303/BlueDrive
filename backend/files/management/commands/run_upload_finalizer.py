@@ -30,6 +30,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS("SecureDrive upload finalizer is running; press Ctrl+C to stop."))
         try:
+            cleanup_at = 0
             while True:
                 try:
                     output = StringIO()
@@ -37,6 +38,10 @@ class Command(BaseCommand):
                     result = output.getvalue().strip()
                     if result and "Finalized: 0; retrying: 0; failed: 0" not in result:
                         self.stdout.write(result)
+                    if time.monotonic() >= cleanup_at:
+                        call_command('cleanup_uploads',stdout=StringIO(),stderr=self.stderr)
+                        call_command('cleanup_storage_probes',stdout=StringIO(),stderr=self.stderr)
+                        cleanup_at = time.monotonic() + 60
                 except KeyboardInterrupt:
                     raise
                 except Exception as error:

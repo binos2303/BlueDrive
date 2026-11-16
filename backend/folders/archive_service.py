@@ -1,7 +1,6 @@
-"""Permission-scoped folder ZIPs for both MinIO versions and legacy local files.
+"""Tạo ZIP đúng quyền từ phiên bản S3 và file local legacy.
 
-Build the archive before sending any bytes so a failed or quarantined object
-cannot produce a misleadingly successful partial download.
+Hoàn tất archive trước khi gửi để object lỗi hoặc cách ly không tạo download dở dang.
 """
 from __future__ import annotations
 
