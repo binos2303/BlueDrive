@@ -1,0 +1,28 @@
+Sprint,Task,Status,Evidence_or_dependency
+S0,Read guide and verify source map,PASS,STORAGE_CONTROL_CENTER_S0_2026-11-08.md
+S0,Backend baseline,PASS_439_SKIP_9,backend-baseline.txt
+S0,Frontend Node TS lint build and scoped Chrome baseline,PASS,152 Node and 8 Chrome; frontend-build.txt
+S0,Feature flags default OFF,IMPLEMENTED_VERIFIED,settings.py and .env.example; feature-flags.json
+S0,Export content security review,FINDINGS_REQUIRE_OWNER_REVIEW,s0-inventory.json; auth state matches local
+S0,Confirm isolated MinIO lab edition license topology,BLOCKED,minio-readonly-inventory.json
+G0,Owner gate review,APPROVED_S1_CODE_ONLY,User request to begin implementation; infrastructure lab remains unverified
+S1,Inventory domain and scoped RBAC API,IMPLEMENTED_TESTED,STORAGE_CONTROL_CENTER_S1_2026-11-08.md; ADR-0002
+S1,Owner delegated access audit and concurrency,IMPLEMENTED_TESTED,49 S1 tests; 497 full backend with 9 MinIO skips
+S1,Migration on running local application DB,APPLIED_WITH_BACKUP_2026_11_09,local-migration-evidence.json; no backfill
+G1,Owner review before Connect Existing,APPROVED_CODE_SCOPE,User continued S2 implementation; real lab gate remains open
+S2,Connect existing and pinned storage routing,IMPLEMENTED_TESTED_FLAGS_OFF,STORAGE_CONTROL_CENTER_S2_2026-11-09.md; ADR-0003
+S2,Read check LAB fixture recovery and scoped UI,IMPLEMENTED_TESTED,PostgreSQL and isolated TLS plus mocked S3/browser evidence
+S2,Local additive migration and source publication,PASS,Backup archive verified; schema before model publication; .env unchanged
+S2,Release regression,PASS_523_SKIP_9,532 full backend; A01 A02 five repetitions each; Chrome 44 regression plus 10 S2; TS lint build PASS
+G2,Real MinIO LAB and operator acceptance,PENDING,Edition/license identity endpoint policies and real browser/storage proof required
+S3,Shared React Flow topology canvas,IMPLEMENTED_CODE_FLAG_OFF,ADR-0004; shared Platform and Organization manager; no physical operations
+S3,Layout preference authorization and concurrency,PASS,9 new backend tests; personal and shared revisions; two-window conflict
+S3,Release verification,PASS_532_SKIP_9,541 backend; 72 Chrome; 5 Node; TS lint build39 pages; all storage rollout flags kept OFF
+G3,Topology runtime owner review,PENDING,Code verification in S3 report; real MinIO G2 remains open; no S4 collector enabled
+S4,Monitoring collector snapshots alerts and scoped SSE,IMPLEMENTED_CODE_FLAG_OFF,ADR-0005; operator reviewed source timestamp queries; default OFF; no real collector started
+S4,Release verification,PASS_549_SKIP_9,558 backend; 82 Chrome; 7 Node; TS lint build39 pages; local additive migration0005 with private backup
+G4,Real telemetry and ASGI proxy acceptance,PENDING,Requires G2 provider and raw quorum host source proof; approved query profiles; collector supervision and ASGI load verification
+S5,Enterprise agent enrollment mTLS and allowlist,NOT_STARTED,Requires S4 and dev VM identity setup
+S6,Provisioning wizard and LAB deployment,NOT_STARTED,Requires G4 edition/license and explicit lab operation approval
+S7,Maintenance and pool lifecycle,NOT_STARTED,Requires S6 and version-specific quorum preflight
+S8,Restore drill and production rollout,NOT_STARTED,Requires verified fault handling and canary approval

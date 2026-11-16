@@ -1,12 +1,14 @@
 # SecureDrive MVP API Contract — v1 proposal
 
+> Đối chiếu P0 16/11/2026: kiến trúc đích tại [ADR-0010](ADR-0010-seaweedfs-enterprise-and-client-encryption-target.md), route/permission matrix hiện có tại [P0 baseline](REFACTOR_P0_BASELINE_2026-11-16.md). SeaweedFS-only, Enterprise My Drive và CSE/recovery không tự biến các contract đề xuất dưới đây thành API đã triển khai. Không đổi route hoặc crypto trong P0.
+
 > Historical baseline note: the contract below describes the pre-tenant API review. The B upload endpoints currently implemented by the repository are unversioned Django routes and are documented in the implementation addendum at the end; this file's proposed `/api/v1` namespace is not an implemented route prefix.
 
 **Status:** v1 remains a contract proposal. The unversioned account-authentication routes listed in §4 have been implemented; they are not yet the versioned v1 endpoints.
 
 **Versioned namespace:** `/api/v1`. Existing Django routes remain legacy routes until a separately reviewed migration/compatibility plan is approved.
 
-**Current implementation basis:** Django session authentication, Tenant/Membership/Quota ORM metadata, local `MEDIA_ROOT` ciphertext storage, server-side AES-GCM encryption. There is no S3/MinIO adapter, presigned upload, upload-session protocol, or custom JSON admin/audit API in the inspected repository.
+**Historical review basis:** local `MEDIA_ROOT` ciphertext and server-side AES-GCM. The repository implements a shared S3 adapter, session-authorized multipart uploads, quota reservations, Workspace and admin/audit JSON APIs, and optional presigned downloads. Current multipart objects are published without application AES encryption. See [current architecture](../README.md) and [download implementation](./PRESIGNED_DOWNLOAD_2026-11-07.md); the proposed `/api/v1` endpoints below are not a current route inventory.
 
 ## 1. Evidence and scope
 
@@ -293,3 +295,111 @@ These routes are currently mounted without `/api/v1` and use Django session auth
 | `POST /files/api/uploads/{upload_id}/abort/` | Aborts and deletes quarantine data when possible and releases the reservation idempotently. |
 
 The finalizer polls the database job table through `python manage.py finalize_uploads`. Quarantine validation computes trusted SHA-256 in the worker; multipart ETags are treated only as provider part tokens. A configured scanner must return exactly `True` for a clean result. Empty files use a server-side zero-byte PutObject because multipart upload requires at least one part. The API currently caps files at 100 MiB; deployment must configure bucket CORS to expose `ETag` to the exact frontend origin. `python manage.py cleanup_uploads` is the scheduled expiry/reconciliation command.
+
+### Publication authorization and recovery (2026-11-08)
+
+Write permission must remain valid until publication commits. The finalizer rechecks the initiating account, tenant membership, Workspace role/status and destination folder before writing PRIMARY and again before committing file metadata. Workspace/tenant/account/membership authorization rows are locked during the short database checks, outside storage I/O. An upload rejected because its destination is no longer writable ends with `state: "failed"` and `failure_code: "destination_not_writable"`; its reservation is released. The client should suggest another destination or restoration of write access, rather than changing the file's contents. A revocation committed after publication does not undo an already published file; subsequent access is governed by the normal resource checks.
+
+Finalization job recovery treats an already `available`/`completed` session as `done` without reading or completing the removed staging object. A reclaimed worker's attempt number fences its metadata, quota and job-state updates. The ten-minute stale timeout remains, with claim timestamps refreshed at database milestones; a slow external operation may still overlap a retry. This does not provide provider-side fencing of an in-flight S3 request or continuous heartbeats during network calls.
+
+### Recent files and Workspace timeline (2026-11-08)
+
+`GET /drive/api/items/?view=recent` returns authorized, live files whose latest `updated_at` or `last_accessed_at` falls within the trailing seven days, including the exact lower boundary. It excludes folders and future activity timestamps, sorts newest first, and retains the existing 100-item response cap. The same window applies when `q` is supplied. This also applies to Workspace Recent through the usual Workspace selector.
+
+The Workspace Activity log chart uses `view=timeline`, a separate manager-only query retaining its 14-day file/folder activity window. This is not an additional user navigation view; `DriveListView` remains unchanged. The audit-event endpoint and its retention are unchanged.
+
+### Platform storage plans and organization boundaries (2026-11-08)
+
+Platform storage management opens the plan catalog. Administrators create personal Drive or personal Workspace presets, then assign an active preset through `PATCH /accounts/api/admin/quotas/{quota_id}/` with exactly `{"plan_code":"...","reason":"8–500 characters"}`. Super Admin permission and CSRF remain required. A null/empty plan code, inactive/unknown plan, wrong scope, or any `limit_bytes` request field is rejected with `400`. The server locks the allocation and selected preset and derives the limit from that preset; usage and reservations remain unchanged. Identical assignment is a no-op without another audit event. Responses still include the effective limit for capacity display.
+
+The platform directory, search totals and allocation history exclude business-organization quota. Attempts to assign a platform plan to a business quota account return `403`. Organization administrators retain their independent, tenant-scoped quota API; platform membership alone does not authorize it. Organization records and audit events are retained in the database.
+
+Existing allocations are not automatically rewritten. A legacy allocation without a plan is shown as not assigned and keeps its effective limit until an administrator selects a plan. Editing a preset preserves previously assigned limits; reassigning a plan applies its current definition. This is storage allocation, not a billing or payment implementation.
+
+### Admin operations review (2026-11-08)
+
+`GET /accounts/api/admin/sessions/?scope=users` includes only non-staff, non-superuser accounts. `scope=admins` includes staff superusers and dedicated PlatformAdminIdentity accounts, matching the administrator directory; unregistered staff are not treated as ordinary users. Dedicated platform administrators serialize as `account_type: "admin"`. Staff/superuser sessions remain protected from the ordinary-user revoke endpoint.
+
+`GET /accounts/api/admin/overview/` also returns `uploads` with `pending_jobs`, `processing_jobs`, `failed_jobs`, `stale_processing_jobs`, `verifying_uploads`, `scanning_uploads` and `oldest_active_job_at` (ISO timestamp or null). Counts are database records, not worker liveness or provider health. Failed jobs are retained totals. Stale processing uses the same ten-minute threshold as worker reclamation, defined by `UploadFinalizationJob.STALE_AFTER`. No object references or storage credentials are returned.
+
+Admin audit search now matches an actor/account, recorded reason, or an exact positive numeric file ID on file actions. It does not search arbitrary metadata. The registered audit implementation remains `admin_logs_api.admin_audit_history_view`, which projects permitted fields; the unused legacy raw-metadata serializer has been removed. Storage-plan/allocation audit remains in its dedicated endpoint and is linked from Admin Audit Logs.
+
+The primary admin menu no longer promotes Security Alerts, Storage Topology or Backups while their services are disconnected. Existing URLs retain honest unavailable states for bookmarks. Dashboard/System Health share one typed overview client, expose upload processing records and support refreshing after failure. This does not implement backup execution, security detection, physical telemetry or file-content access for platform administrators.
+# Storage Control Center S1 addendum — 2026-11-08
+
+The implemented S1 endpoints use the existing session-authenticated accounts API convention. These are inventory APIs, not the proposed `/api/v1/storage` provider-control routes. All are gated by `SECUREDRIVE_STORAGE_CONTROL_CENTER_ENABLED` (default false). With the gate disabled, authorized GETs return 404 before inventory queries. No provider requests are made by these handlers.
+
+Prefixes:
+
+- Platform: `/accounts/api/admin/storage/`, active Platform Admin, Platform-owned clusters only.
+- Organization: `/accounts/api/tenants/{tenant_uuid}/storage/`, active business membership with explicit `storage.view` grant. Platform administrators cannot enter this scope by virtue of their Platform role.
+
+Shared GET resources: `capabilities/`, `clusters/`, `clusters/{id}/`, `clusters/{id}/topology/`, `clusters/{id}/nodes/`, `clusters/{id}/nodes/{node_id}/`, `clusters/{id}/disks/`, `clusters/{id}/events/`, `clusters/{id}/operations/`, `clusters/{id}/operations/{job_id}/`.
+
+List envelope: `{count, page, page_size, has_more, results}`. Defaults page=1/page_size=50; bounds page 1..100000, page_size 1..100; malformed values return400. Clusters/nodes support bounded `q`. Ordering uses stable ID tie-breakers. This paging format follows existing admin APIs; it is not the proposed v1 cursor contract.
+
+Topology returns scoped `cluster`, `cluster_id`, `revision`, pools/nodes/disks, health and viewer-specific or shared `layout`. Snapshot bounds are500 nodes,500 pools,2000 disks; exceeding a bound returns422 `topology_snapshot_too_large`, directing callers to paginated lists. It never silently truncates a successful snapshot. Layout is projected to current cluster node IDs and finite coordinates. Reading does not create/update layout or inventory.
+
+Health in S1 is `{status: "unknown", observed_at: null, source: "not_collected", last_success_at: null, stale: true, reason_code: "telemetry_not_configured"}`. Declared capacity is labeled `capacity_source: "inventory"`. A verified connection or registered agent UUID does not certify runtime health. Capabilities report `operations_enabled:false`, `routing_enabled:false`, `stage:"inventory_only"` regardless of future rollout switches.
+
+Organization Owner access administration is the sole S1 metadata mutation, using the Organization prefix only:
+
+- `GET access/{membership_uuid}/` returns `{membership_id, permissions}`; active owner may bootstrap without a prior storage grant.
+- `PATCH access/{membership_uuid}/` requires session CSRF and the exact JSON body `{permissions:[...], expected_permissions:[...], reason:"8–500 characters"}`. Supported capabilities: storage.view/configure/operate/approve/monitor. Only an active Organization Owner can delegate; Platform Admin, Org Admin or a storage.configure grant alone cannot delegate. The target must belong to the route tenant. New nonempty grants require an active ordinary target; removal remains allowed for suspended/inactive targets.
+- Response200 `{membership_id, permissions, unchanged}`. Identical desired access is an idempotent no-op, including a retry with the old expected set; no duplicate audit. A different stale expected set returns409 `storage_access_conflict` without overwriting newer permissions. Invalid fields/capabilities/duplicates return400; unavailable targets/owners return404. No client tenant/scope selectors accepted in PATCH body.
+- `GET access/events/` is Owner-only, paginated access audit; includes before/after capability lists, actor, target resource UUID, reason/time. No mutation/delete audit API exists.
+
+Cross-scope cluster/node/job UUIDs return404 without looking up the other tenant's resource. Denied inventory access is logged with actor/scope/requested UUID only. No credential_ref, endpoint credential, idempotency key, raw SDK error or opaque metadata is serialized. Inventory POST/PATCH/DELETE is unsupported (405 or CSRF403); access PATCH only changes grants/audit and never calls storage.
+
+# Storage Control Center S2 addendum — 2026-11-09
+
+This section supersedes the S1-only capability/mutation description above. Prefixes and session/CSRF/tenant boundaries are unchanged. Capability responses now use `stage:"connect_existing"`, `operations_enabled:false`, actual `routing_enabled` and `lab_probes_enabled` switches. Platform Super Admin has storage.configure; dedicated Platform operators remain read-only. Organization configuration requires explicit view+configure grants.
+
+| Method/resource within either prefix | Contract |
+|---|---|
+| GET `profiles/` | Approved profiles for this scope; no credentials or credential environment names |
+| POST `clusters/connect/` | Exact body `{display_name,slug,profile_id,reason}` and Idempotency-Key; register immutable draft revision; no S3 call |
+| GET/POST `clusters/{cluster}/connections/` | Paginated revisions; POST exact `{profile_id,reason}` + Idempotency-Key |
+| GET `clusters/{cluster}/connections/{connection}/` | Safe revision metadata and verification state |
+| POST `.../{connection}/verify/` | Exact `{reason}`; read-only HEAD/versioning/CORS; read_verified does not authorize binding |
+| GET `.../{connection}/probe/` | Latest 20 probe receipts for reload/recovery, no expected digest/authorization |
+| POST `.../{connection}/probe/` | Exact `{reason,confirm_lab_fixture:true}`; LAB switch/profile required; new isolated bucket/sample only |
+| GET `.../{connection}/probes/{probe}/` | Receipt/checks; `?authorization=1` may issue fresh short-lived GET only while awaiting browser and unexpired |
+| POST `.../probes/{probe}/complete/` | Exact `{sha256}`; verify browser digest, clean fixture, then qualify LAB ready |
+| POST `.../probes/{probe}/cleanup/` | Empty body; retry/cancel only the server-owned fixture |
+| GET/PATCH `binding/` | GET current binding+generation; PATCH `{connection_id,expected_generation,reason,workspace_id?}`; ready connection with completed probe required |
+
+Registration key is scoped to tenant/cluster/action; replay with identical payload returns existing revision, differing payload conflicts409. Reason length8–500. Browser-supplied URL, bucket, network or secret fields are rejected400. Binding identical-target replay is a no-op; a different stale generation returns409. Binding never changes rollout flags. Organization workspace selectors are validated in the same tenant; Platform does not accept a workspace selector.
+
+TLS, credentials, timeout and profile failures are sanitized, with stored codes such as tls_validation_failed/storage_identity_rejected/storage_unreachable/profile_unavailable. HEAD failure returns503 plus safe connection/check state. Probe cleanup failure returns503 and durable cleanup_pending, recoverable through GET receipts/cleanup. Digest mismatch400; expired/busy probe409. Secrets, expected digest and raw SDK errors are never serialized. Presigned authorization is no-store/no-referrer, short-lived, not stored in browser persistence/logs by this UI.
+
+New routed uploads pin their destination once. Existing upload IDs, locations and legacy data do not resolve the latest binding. `GET /files/api/uploads/{id}/` is now read-only: an expired active session reports derived state expired/cleanup_pending without changing DB, quota or storage. The cleanup worker claims expiry and releases quota. Abort handles a session interrupted before its first reservation. The legacy HTML file-upload endpoint returns409 resumable_upload_required while multi-cluster routing is on, avoiding an unpinned bypass; the current multipart browser flow remains supported.
+
+See ADR-0003 and STORAGE_CONTROL_CENTER_S2_RUNBOOK.md for transport assumptions, local rollout, remaining real-LAB gate and rollback restrictions. No arbitrary provisioning/node operation is introduced.
+
+# Storage Control Center S3 addendum — 2026-11-09
+
+Capability adds `topology_enabled`, default false; stage becomes topology only when this flag is on. Control center remains the outer access gate. This does not enable provider/node operations or claim G2 LAB acceptance.
+
+`PATCH clusters/{cluster_uuid}/layout/` accepts exactly `{scope:"personal"|"shared",expected_revision:int,positions:{node_uuid:{x:number,y:number}},viewport:{x:number,y:number,zoom:number}}`. At most500 node coordinates, finite x/y in±1000000, zoom0.1..4, same-cluster node IDs only. Unexpected fields/invalid selectors return400. Layout endpoint returns404 when disabled or cluster/scope unavailable. Personal uses the current principal; browser cannot choose an owner. Shared needs explicit storage.configure or Platform Super Admin policy. Session CSRF remains required.
+
+Success200 returns `{layout,unchanged}`. Same-content replay does not increment revision/audit. Different content with a stale expected revision returns409 layout_revision_conflict and leaves the existing layout intact. Cluster topology revision, node membership, disks, jobs and connections never change through this endpoint. Shared saves append an allowlisted audit event.
+
+Topology snapshot adds `layout_revisions:{personal,shared}` and retains the effective layout (personal then shared fallback). Live/health updates do not use the preference revision. `disks/` and `events/` optionally accept `node_id`; the node must exist inside the selected cluster, otherwise404, malformed UUID400. Event filtering uses the node resource_ref, not arbitrary opaque JSON. Both remain paginated and read-only.
+
+# Storage Control Center S4 addendum — 2026-11-09
+
+Capabilities add `monitoring_enabled` (default false). Both the outer control-center switch and monitoring switch must be on. All endpoints below additionally require storage.monitor, with the existing storage.view/scope boundary. Configure does not imply monitor. Platform identities remain confined to Platform clusters. Disabled/unavailable scope404, inventory-only viewer403, unauthenticated403. Responses are no-store; no scrape occurs in a GET.
+
+| Method/resource within either storage prefix | Contract |
+|---|---|
+| GET `clusters/{cluster}/telemetry/` | `{cluster_id,configured,revision,event_id,health,expires_at,cluster_metrics,nodes,alerts,sse_available,poll_seconds:30}` |
+| GET `clusters/{cluster}/telemetry/stream/` | Session SSE on ASGI + DB/cached-DB sessions; WSGI503 stream_requires_asgi |
+| GET `clusters/{cluster}/alerts/` | Paginated incident history including acknowledged/resolved incidents |
+| POST `clusters/{cluster}/alerts/{alert}/acknowledge/` | Exact `{expected_revision:int,reason:"8–500 characters"}`; CSRF, fresh active authorization, audit |
+
+Telemetry metrics are allowlisted numbers in bytes/seconds/percent/bytes-per-second as named in the S4 runbook. Missing fields remain missing, never fabricated zero. `nodes` is keyed by scoped inventory UUID and each entry contains `{health,metrics}`. Health is `{status,observed_at,source,last_success_at,stale,reason_code}`. Unconfigured or failed/stale sources report unknown while retaining last known values with provenance. A source identifier is a safe profile ID, not a URL; profiles, PromQL, credentials and raw errors are not exposed. TTL45–900s and capacity thresholds are server-reviewed profile configuration. Inventory endpoints retain inventory-only health; monitoring consumers overlay telemetry explicitly.
+
+SSE sends `event: resync`, `data: {}` and `id: {cluster_uuid}:{revision}:{0|1 stale}`; the client refetches one scoped snapshot. No per-node fetch loop. Last-Event-ID must have the same cluster UUID, bounded numeric revision and stale bit, otherwise400. Initial cursor mismatch triggers resync; matching cursor waits for a change. Heartbeat5s, finite stream~60s, native reconnect/cursor, no URL token, no-transform and X-Accel-Buffering=no. Session, password hash and grants are checked each tick; `event: access_revoked` closes access. Browser keeps30s snapshot reconciliation and client-side expiry even during SSE failure. This behavior is code/fixture verified; reverse-proxy deployment remains G4.
+
+ACK200 returns `{alert,unchanged}`. Acknowledging an already acknowledged incident is idempotent. A different active version or resolved unacknowledged incident409 alert_revision_conflict; malformed body400; foreign alert404. ACK does not resolve an incident or restore health. Fresh verified samples resolve conditions; source failure preserves existing critical incidents. Generation/profile revision fencing and row locks prevent late collector results replacing newer state. Raw metric history remains upstream TSDB. See ADR-0005 and the S4 runbook.

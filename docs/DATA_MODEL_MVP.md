@@ -1,8 +1,10 @@
 # SecureDrive PostgreSQL data model — MVP design
 
+> Đối chiếu P0 16/11/2026: [ADR-0010](ADR-0010-seaweedfs-enterprise-and-client-encryption-target.md) xác định Enterprise My Drive thuộc Organization và CSE/recovery là đích. [P0 schema/storage inventory](REFACTOR_P0_BASELINE_2026-11-16.md) phân biệt model/migration hiện tại, dữ liệu local chỉ đọc và gap. Không suy rằng personal-first provisioning hoặc server AES trong thiết kế MVP bên dưới vẫn là đích tương lai; P0 không tạo migration.
+
 **Status:** approved MVP model implemented additively; migrations and tests are in the repository. PostgreSQL deployment remains gated on review and validation against a disposable database.
 
-**Repository baseline:** Django's built-in `auth.User` is currently used. `Folder` and `File` have `owner` FKs, folders have self-parent, files have optional folder, and both have `deleted_at`. `File` stores a `FileField` path, plaintext size/MIME/hash, and AES-GCM metadata (`wrapped_dek`, nonces, encryption version). `Share` grants viewer/editor to a receiver user and targets exactly one file or folder. `ActivityLog` is user/action/free-text description plus optional generic content-type/object ID. PostgreSQL is configured, but the current file bytes are stored under Django `MEDIA_ROOT`; there are no Tenant, Membership, quota, upload session, file version, storage adapter, scan, or backup-job models.
+**Historical repository baseline:** the original review covered `auth.User`, owner-based files/folders, `Share`, `ActivityLog` and local AES-GCM media. As of 2026-11-08, Tenant/Membership/Workspace, quota accounts/reservations, UploadSession, FileVersion, StorageLocation (including provider version ID), finalization jobs and an S3 adapter are implemented. Current multipart publication uses private S3 objects without application AES encryption; legacy encrypted media remains readable. This design document is not a complete current schema inventory; inspect the ORM models and migrations for that inventory. Backup execution and malware scanning must not be inferred from the existence of metadata models.
 
 Sources: [Django settings](../backend/securedrive/settings.py), [Folder](../backend/folders/models.py), [File](../backend/files/models.py), [Share](../backend/sharing/models.py), [ActivityLog](../backend/logs/models.py), [API contract](./API_CONTRACT_V1.md).
 
@@ -462,3 +464,41 @@ Test migrations against a disposable PostgreSQL database matching production maj
 22. Querying/listing, cursor pagination and unique constraints never leak another tenant's IDs, names, counts or existence.
 23. `updated_at`, lifecycle timestamps and retention cutoffs are timezone-aware UTC; naive datetimes are rejected at service boundaries.
 24. All uniqueness/FK/check constraints are enforced in PostgreSQL and covered by migration tests, not only model validation.
+# Storage Control Center S1 extension — 2026-11-08
+
+The `infrastructure` app adds StorageCluster, ServerPool, StorageNode, NodeDisk, StorageBinding, TopologyLayout, ClusterOperationJob, ClusterAuditEvent and StorageAccessGrant. No existing Tenant kind, StorageConfig/Location or UploadSession columns are changed. Ownership is specified in ADR-0002: platform kind requires NULL tenant; enterprise requires a business tenant, and ownership cannot change after insert.
+
+Migration0001 creates additive tables/constraints; migration0002 adds PostgreSQL composite FKs and ownership/binding/grant triggers. Node pool must share cluster; binding workspace/config must share tenant. Business bindings require a same-organization enterprise cluster; personal bindings require a Platform cluster. Activating a binding requires verified cluster/config. A tenant row lock prevents two transactions activating different business clusters, even for different workspace scopes. Partial uniques enforce one active binding per tenant/workspace target.
+
+Active operation uniqueness, per-cluster/kind idempotency, unique global agent UUID, per-node stable disk ID and shared/personal layout uniqueness are enforced in PostgreSQL. All operation jobs remain dry_run=True in S1. There is no execution dispatcher and no object deletion side effect. PROTECT FKs retain referenced inventory/config; tenant deletion does not trigger provider cleanup.
+
+StorageAccessGrant is an explicit Membership capability, delegated by an active organization owner. ClusterAuditEvent has exactly one audit scope: a cluster FK, or a business tenant FK for access changes before cluster creation. APIs expose immutable audit views with allowlisted metadata; they do not expose generic JSON/config data. Revocation is audited atomically with grant changes. Permission API serializes on tenant/member/user rows and uses the expected permission set for optimistic concurrency.
+
+S1 schema migrations do not backfill cluster mappings or switch routing. Existing data continues through the legacy factory until the separately gated S2 resolver/pinning work. Migration up/down was tested against disposable legacy StorageConfig/Location and retained provider_version_id; no migration has been applied to the running application database by this implementation step.
+
+# Storage Control Center S2 extension — 2026-11-09
+
+The S1 paragraph above records its historical delivery state. Local schema expansion for S1/S2 has now been applied after a verified backup archive; no mappings or legacy object references were backfilled.
+
+- StorageConnectionRevision is an immutable physical target and versioned credential-reference/network policy snapshot. Verification state, timestamps, generation and sanitized error may change; target fields cannot. Same cluster+revision is unique, and ready/read_verified states require their timestamps.
+- StorageConnectionProbe records a UUID-owned temporary LAB bucket/key, random-sample digest, exact provider version, browser origin, checks, expiry and cleanup generation. Only one pending probe per connection is allowed. Identity/ownership fields are immutable and cleanup generation cannot decrease. It is not a generic bucket-delete job.
+- StorageBinding optionally points to the verified revision. PlatformStorageBinding is a singleton Platform default. Business bindings retain the S1 single-active-cluster and same-owner rules.
+- UploadSession gains nullable storage_config, storage_connection and endpoint_config_version. All three are NULL for legacy or form a complete immutable pin. Config belongs to the same tenant; connection revision and cluster ownership must match.
+- StorageLocation gains nullable storage_connection. A pinned published object's connection, config, object_ref and provider_version_id are immutable. A pinned session cannot publish available/completed unless it has an available location/version on the same connection/config. Tenant kind cannot change while pinned data references its ownership semantics.
+
+Migration infrastructure0003 creates connection/probe/default models; files0017 adds file pins; infrastructure0004 adds PostgreSQL integrity triggers/FKs. Model code was published only after local additive migration completed. Toggling routing never rewrites legacy or pinned rows. Physical topology/monitoring/agent models remain separate future gates.
+
+Schema reversal was checked on disposable legacy data, not offered as a safe rollback for a database with new pinned data. Keep revision-aware readers during operational rollback; see ADR-0003.
+
+# Storage Control Center S3 — 2026-11-09
+
+No schema change or backfill. Existing TopologyLayout personal/shared uniqueness is reused. Layout revision increments independently of StorageCluster.revision; nodes remain in their recorded pool. The layout write transaction serializes on cluster and rechecks active user/view grants under the same tenant/user lock order as delegation. Shared updates require configure and append a ClusterAuditEvent. Provider operations, quota, upload/location pinning and operation-job dry-run constraints remain outside layout writes. See ADR-0004.
+
+# Storage Control Center S4 — 2026-11-09
+
+Migration `infrastructure.0005_telemetry_snapshots_and_alerts` adds two tables without changing existing file/quota/binding rows:
+
+- StorageTelemetrySnapshot: one row per protected StorageCluster, current safe payload, approved profile identity/revision/fingerprint, source_profile_id of the last successful sample, generation/revision counters, TTL45–900s, observed_at/last_success_at/last_attempted_at and sanitized error code. An attempted profile change cannot relabel previous source data as new. Claim locks cluster then snapshot; publication locks snapshot and compares generation/profile fingerprint/revision. The DB stores only current summary, not a row per raw time-series sample.
+- StorageAlert: protected cluster, allowlisted code/severity, incident revision and first/last observation, resolved/acknowledged times and nullable acknowledged actor. Partial unique(cluster,code) while resolved_at is null deduplicates active incidents. User deletion may null the actor while preserving acknowledgment time. ACK records reason in existing ClusterAuditEvent and bumps snapshot revision for SSE. Resolution is driven by verified fresh collection; source errors preserve critical incidents.
+
+Cluster ownership defines tenant scope; API accepts no client-supplied owner/tenant/endpoint/PromQL. Raw time-series retention belongs to the external TSDB; incident retention and real source/deployment proof require operator approval before G4 rollout. Rollback by disabling monitoring and stopping its supervised collector; keep additive tables/history intact. See ADR-0005 and S4 runbook.
