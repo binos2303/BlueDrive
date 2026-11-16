@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { RefreshCw, Search, ScrollText } from "lucide-react";
 import AdminPageHeader from "@/components/admin/AdminPageHeader";
 import Button from "@/components/ui/Button";
 import Dialog from "@/components/ui/Dialog";
 import styles from "./AdminLogDirectory.module.css";
+import directoryStyles from "./AdminDirectory.module.css";
 
 type Mode = "activity" | "audit";
 type Filters = { q: string; action: string; scope: string; from: string; to: string };
@@ -226,7 +228,7 @@ export default function AdminLogDirectory({ mode }: { mode: Mode }) {
           </Button>
         }
       />
-
+      {!activity && <p className="text-sm"><Link href="/admin/infrastructure/quotas/capacity" className="font-medium text-brand-contrast underline">Storage plans and allocation audit</Link></p>}
       <section className={`${styles.filterContainer} overflow-hidden rounded-[20px] border border-border bg-surface`}>
         <form onSubmit={applyFilters} className={`${styles.filterForm} ${activity ? styles.activity : styles.audit} border-b border-border p-4 lg:p-5`}>
           <label className={`${styles.searchField} flex min-w-0 flex-col gap-1 text-[12px] text-muted`}>
@@ -237,7 +239,7 @@ export default function AdminLogDirectory({ mode }: { mode: Mode }) {
                 type="search"
                 value={draft.q}
                 onChange={(event) => setDraft((current) => ({ ...current, q: event.target.value }))}
-                placeholder={activity ? "Username, email, organization…" : "Administrator or account…"}
+                placeholder={activity ? "Username, email, organization…" : "Administrator, account, reason or file ID…"}
                 className="min-w-0 w-full bg-transparent text-[13px] text-foreground outline-none"
                 maxLength={100}
               />
@@ -291,8 +293,8 @@ export default function AdminLogDirectory({ mode }: { mode: Mode }) {
         {loading && <div role="status" className="p-10 text-center text-[13px] text-muted">Loading {activity ? "user activity" : "audit events"}…</div>}
         {!loading && !error && (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-212.5 text-left text-[13px]">
-              <thead className="bg-background text-[11px] font-semibold uppercase tracking-wide text-muted">
+            <table className={`${directoryStyles.table} min-w-[1120px]`}><colgroup><col className="w-[19%]" /><col className="w-[16%]" /><col className="w-[17%]" /><col className="w-[19%]" /><col className="w-[29%]" /></colgroup>
+              <thead className="bg-background text-[13px] font-semibold text-muted">
                 {activity ? (
                   <tr>
                     <th scope="col" className="px-5 py-3">Time</th>
@@ -315,31 +317,20 @@ export default function AdminLogDirectory({ mode }: { mode: Mode }) {
                 {data?.results.map((row) => (
                   <tr
                     key={row.id}
-                    tabIndex={0}
-                    aria-haspopup="dialog"
-                    aria-label={`Event ${row.action_label || row.action}, ${localTime(row.created_at)}. Double-click for details; press Enter to open.`}
-                    title="Double-click to view event details"
-                    onDoubleClick={() => setSelectedRow(row)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setSelectedRow(row);
-                      }
-                    }}
-                    className="cursor-pointer border-t border-border/70 align-top transition-colors hover:bg-background/60 focus-visible:bg-brand-soft focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand"
+                    className="border-t border-border/70 align-top transition-colors hover:bg-background/60 focus-visible:bg-brand-soft focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand"
                   >
-                    <td className="whitespace-nowrap px-5 py-3 text-[12px] text-muted">{localTime(row.created_at)}</td>
+                    <td className="whitespace-nowrap px-5 py-3 text-[12px] text-muted"><p>{localTime(row.created_at)}</p><button type="button" aria-haspopup="dialog" aria-label={`View details for ${row.action_label || row.action}, ${localTime(row.created_at)}`} onClick={() => setSelectedRow(row)} className="ui-control mt-1 inline-flex min-h-10 items-center rounded-lg px-2 text-xs font-semibold text-brand-contrast hover:bg-brand-soft">View details</button></td>
                     <td className="px-5 py-3 font-medium">{activity ? (row.user || "—") : (row.actor || "—")}</td>
                     <td className="px-5 py-3"><span className="inline-flex rounded-lg bg-brand-soft px-2.5 py-1 text-[12px] font-medium text-brand-contrast">{activity && row.share ? shareOperationLabel(row) : row.action_label || row.action}</span></td>
                     {activity ? (
                       <>
                         <td className="px-5 py-3"><p>{scopeLabel(row)}</p>{row.workspace && <p className="mt-1 text-[12px] text-muted">{row.workspace}</p>}</td>
-                        <td className="min-w-75 max-w-120 px-5 py-3 text-muted">
+                        <td className="wrap-break-word px-5 py-3 text-muted">
                           {row.share ? (
                             <>
                               <p className="wrap-break-word text-foreground">{row.share.resources.length ? row.share.resources.join(", ") : "Resource not recorded"}</p>
                               <p className="mt-1 text-[12px]">Recipient: {row.share.recipient || "Not recorded (legacy event)"}</p>
-                              <p className="mt-1 text-[11px]">{row.share.previous_permission ? `${row.share.previous_permission} → ` : ""}{row.share.permission || "Permission not recorded"}{row.share.count !== null ? ` · ${row.share.count} changed` : ""}</p>
+                              <p className="mt-1 text-xs">{row.share.previous_permission ? `${row.share.previous_permission} → ` : ""}{row.share.permission || "Permission not recorded"}{row.share.count !== null ? ` · ${row.share.count} changed` : ""}</p>
                             </>
                           ) : <p>{row.resource_name || (row.resource_type ? `${row.resource_type}${row.resource_id != null ? ` #${row.resource_id}` : ""}` : "Resource not recorded")}</p>}
                         </td>

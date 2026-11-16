@@ -21,6 +21,7 @@ import {
   type AdminFileSort as Sort,
 } from "@/lib/admin-file-service";
 import styles from "./AdminFileDirectory.module.css";
+import directoryStyles from "./AdminDirectory.module.css";
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value < 0) return "—";
@@ -101,12 +102,12 @@ export default function AdminFileDirectory() {
   }
   function closeFile() { setSelectedId(null); setDetail(null); setDetailError(""); }
   function search(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setQuery(input.trim()); setPage(1); setLoading(true);
+    event.preventDefault(); setQuery(input.trim()); setPage(1); setLoading(true); setRevision((current) => current + 1);
     setRevision((r) => r + 1);
   }
-  function changeScope(value: Scope) { setScope(value); setPage(1); setLoading(true); }
-  function changeStatus(value: Lifecycle) { setLifecycle(value); setPage(1); setLoading(true); }
-  function changeSort(value: Sort) { setSort(value); setPage(1); setLoading(true); }
+  function changeScope(value: Scope) { setScope(value); setPage(1); setLoading(true); setRevision((current) => current + 1); }
+  function changeStatus(value: Lifecycle) { setLifecycle(value); setPage(1); setLoading(true); setRevision((current) => current + 1); }
+  function changeSort(value: Sort) { setSort(value); setPage(1); setLoading(true); setRevision((current) => current + 1); }
   function openAction(file: FileRow, action: AdminFileAction) {
     setActionTarget({ file, action });
     setActionReason("");
@@ -157,7 +158,7 @@ export default function AdminFileDirectory() {
         { label: "Active files", value: formatCount(data?.summary.active), description: "Current inventory" },
         { label: "Files in trash", value: formatCount(data?.summary.trash), description: "Soft-deleted metadata" },
         { label: "Active file sizes", value: data ? formatBytes(data.summary.active_metadata_bytes) : "—", description: "Logical size, not disk usage" },
-      ].map((item) => <section key={item.label} className="rounded-[20px] border border-border bg-surface px-5 py-4"><p className="text-[12px] text-muted">{item.label}</p><p className="mt-2 text-[25px] font-semibold tabular-nums tracking-tight">{item.value}</p><p className="mt-1 text-[11px] text-muted">{item.description}</p></section>)}
+      ].map((item) => <section key={item.label} className="rounded-[20px] border border-border bg-surface px-5 py-4"><p className="text-[12px] text-muted">{item.label}</p><p className="mt-2 text-[25px] font-semibold tabular-nums tracking-tight">{item.value}</p><p className="mt-1 text-xs text-muted">{item.description}</p></section>)}
     </div>
 
     {actionNotice && <p role="status" className="rounded-xl border border-border bg-surface px-4 py-3 text-sm">{actionNotice}</p>}
@@ -207,22 +208,22 @@ export default function AdminFileDirectory() {
       {error && <div role="alert" className="m-5 rounded-xl border border-danger/25 px-4 py-3 text-[13px] text-danger"><p className="font-semibold">File inventory unavailable</p><p className="mt-1">{error}</p></div>}
       {loading && <div role="status" className="flex min-h-52 items-center justify-center gap-2 text-[13px] text-muted"><RefreshCw size={16} className="animate-spin" />Loading file metadata…</div>}
       {!loading && !error && <div className="overflow-x-auto">
-        <table className="w-full min-w-235 text-left text-[13px]">
-          <thead className="bg-background text-[11px] font-medium text-muted"><tr><th className="px-5 py-3">File</th><th className="px-4 py-3">Owner</th><th className="px-4 py-3">Location</th><th className="px-4 py-3">Size</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Modified</th><th className="px-5 py-3 text-right">Actions</th></tr></thead>
+        <table className={`${directoryStyles.table} min-w-[1120px]`}><colgroup><col /><col className="w-32" /><col className="w-36" /><col className="w-24" /><col className="w-28" /><col className="w-48" /><col className="w-52" /></colgroup>
+          <thead className="bg-background text-[13px] font-medium text-muted"><tr><th className="px-5 py-3">File</th><th className="px-4 py-3">Owner</th><th className="px-4 py-3">Location</th><th className="px-4 py-3">Size</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Modified</th><th className="px-5 py-3 text-right">Actions</th></tr></thead>
           <tbody>{data?.results.map((file) => {
             const Icon = iconForFile(file);
             return <tr key={file.id} className="border-t border-border/70 transition-colors hover:bg-background/70">
-              <td className="px-5 py-3"><div className="flex min-w-40 max-w-70 items-center gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-contrast"><Icon size={18}/></span><div className="min-w-0"><button type="button" onClick={() => openFile(file.id)} className="block max-w-full truncate text-left font-semibold hover:text-brand-contrast hover:underline" title={file.name}>{file.name}</button><p className="mt-0.5 text-[11px] text-muted">{file.mime_type || "Unknown MIME type"}{file.is_encrypted && <LockKeyhole size={11} className="ml-1 inline align-text-top" aria-label="Encrypted" />}</p></div></div></td>
-              <td className="px-4 py-3"><p className="font-medium">{file.owner.username}</p><p className="text-[11px] text-muted">ID {file.owner.id}</p></td>
-              <td className="px-4 py-3"><p className="max-w-48 truncate font-medium" title={file.workspace.name}>{file.workspace.name}</p><p className="max-w-48 truncate text-[11px] text-muted" title={file.organization?.name || (file.scope === "my_drive" ? "Personal Files" : "Independent Workspace")}>{file.organization?.name || (file.scope === "my_drive" ? "Personal Files" : "Independent Workspace")}</p></td>
+              <td className="px-5 py-3"><div className="flex min-w-0 items-center gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand-contrast"><Icon size={18}/></span><div className="min-w-0 flex-1"><button type="button" onClick={() => openFile(file.id)} className="block max-w-full truncate text-left font-semibold hover:text-brand-contrast hover:underline" title={file.name}>{file.name}</button><p className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted"><span className="truncate" title={file.mime_type || "Unknown MIME type"}>{file.mime_type || "Unknown MIME type"}</span>{file.is_encrypted && <LockKeyhole size={11} className="shrink-0" aria-label="Encrypted" />}</p></div></div></td>
+              <td className="px-4 py-3"><p className="truncate font-medium" title={file.owner.username}>{file.owner.username}</p><p className="text-xs text-muted">ID {file.owner.id}</p></td>
+              <td className="px-4 py-3"><p className="max-w-48 truncate font-medium" title={file.workspace.name}>{file.workspace.name}</p><p className="max-w-48 truncate text-xs text-muted" title={file.organization?.name || (file.scope === "my_drive" ? "Personal Files" : "Independent Workspace")}>{file.organization?.name || (file.scope === "my_drive" ? "Personal Files" : "Independent Workspace")}</p></td>
               <td className="whitespace-nowrap px-4 py-3 tabular-nums">{formatBytes(file.size_bytes)}</td>
-              <td className="px-4 py-3"><span className={`inline-flex rounded-lg px-2.5 py-1 text-[11px] font-semibold ${file.lifecycle === "active" ? "bg-brand-soft text-brand-contrast" : "bg-background text-muted"}`}>{file.lifecycle === "active" ? "Active" : "In trash"}</span><p className="mt-1.5 text-[11px] capitalize text-muted">{formatState(file.version_state)}</p></td>
+              <td className="px-4 py-3"><span className={`inline-flex rounded-lg px-2.5 py-1 text-xs font-semibold ${file.lifecycle === "active" ? "bg-brand-soft text-brand-contrast" : "bg-background text-muted"}`}>{file.lifecycle === "active" ? "Active" : "In trash"}</span><p className="mt-1.5 text-xs capitalize text-muted">{formatState(file.version_state)}</p></td>
               <td className="whitespace-nowrap px-4 py-3 text-[12px] text-muted">{formatDate(file.updated_at)}</td>
-              <td className="px-5 py-3"><div className="flex justify-end gap-2">
-                <button type="button" onClick={() => openFile(file.id)} className="rounded-lg border border-border px-3 py-2 text-[11px] font-semibold transition-colors hover:bg-brand-soft hover:text-brand-contrast" aria-label={`View metadata for ${file.name}`}>View</button>
+              <td className="px-5 py-3"><div className={directoryStyles.rowActions}>
+                <button type="button" onClick={() => openFile(file.id)} className="rounded-lg border border-border px-3 py-2 text-xs font-semibold transition-colors hover:bg-brand-soft hover:text-brand-contrast" aria-label={`View metadata for ${file.name}`}>View</button>
                 {actionsForAdminFile(file.lifecycle, data?.permissions?.can_manage_files ?? false).map((action) =>
                   <button key={action} type="button" onClick={() => openAction(file, action)}
-                    className={`inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-[11px] font-semibold transition-colors hover:bg-brand-soft ${action === "purge" ? "text-danger" : ""}`}
+                    className={`inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-xs font-semibold transition-colors hover:bg-brand-soft ${action === "purge" ? "text-danger" : ""}`}
                     aria-label={`${action === "trash" ? "Move to Trash" : action === "restore" ? "Restore" : "Permanently delete"} ${file.name}`}>
                     {action === "restore" ? <RotateCcw size={13} /> : <Trash2 size={13} />}
                     {action === "trash" ? "Trash" : action === "restore" ? "Restore" : "Delete"}
@@ -271,10 +272,10 @@ export default function AdminFileDirectory() {
       {detailError && <p role="alert" className="text-sm text-danger">{detailError}</p>}
       {detail && <div className="space-y-5">
         <section><h3 className="mb-2 text-[13px] font-semibold">File metadata</h3><dl><DataField label="File ID" value={String(detail.id)} /><DataField label="Owner" value={`${detail.owner.username} (#${detail.owner.id})`} /><DataField label="Scope" value={detail.scope === "my_drive" ? "Personal Files" : detail.scope === "workspace" ? "Independent Workspace" : "Organization"} /><DataField label="Organization" value={detail.organization?.name || "—"} /><DataField label="Workspace" value={detail.workspace.name} /><DataField label="Folder" value={detail.folder?.name || "Root"} /><DataField label="File type" value={detail.mime_type || "Not recorded"}/><DataField label="File size" value={formatBytes(detail.size_bytes)} /><DataField label="Status" value={detail.lifecycle === "active" ? "Active" : "In trash"}/><DataField label="Current version" value={detail.current_version ? `v${detail.current_version} · ${formatState(detail.version_state)}` : "Not recorded"}/><DataField label="Version history" value={`${detail.version_count} recorded`}/><DataField label="Encrypted" value={detail.is_encrypted ? "Yes" : "No"}/><DataField label="Created" value={formatDate(detail.created_at)}/><DataField label="Modified" value={formatDate(detail.updated_at)}/><DataField label="Last accessed" value={formatDate(detail.last_accessed_at)}/>{detail.deleted_at && <DataField label="Moved to trash" value={formatDate(detail.deleted_at)}/>}</dl></section>
-        <section><h3 className="mb-1 flex items-center gap-2 text-[13px] font-semibold"><HardDrive size={16} className="text-brand-contrast"/>Recorded versions & storage</h3><p className="mb-3 text-[11px] text-muted">Latest {detail.versions_limit} versions maximum. Storage entries show logical state only, not physical disk availability.</p>
-          {detail.versions.length === 0 ? <div className="rounded-xl border border-border bg-background p-4 text-[12px] text-muted">No file version records are available.</div> : <div className="space-y-2.5">{detail.versions.map((version) => <article key={version.id} className="rounded-xl border border-border bg-background p-3.5"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-[12px] font-semibold">Version {version.number}{version.is_current && <span className="ml-2 rounded-md bg-brand-soft px-2 py-0.5 text-[10px] text-brand-contrast">Current</span>}</p><p className="mt-1 text-[11px] text-muted">{formatDate(version.created_at)} · {formatBytes(version.size_bytes)}</p></div><span className="rounded-lg border border-border px-2 py-1 text-[11px] capitalize">{formatState(version.state)}</span></div><div className="mt-2.5 space-y-1 border-t border-border pt-2.5">{version.storage.length > 0 ? version.storage.map((location, index) => <div key={`${version.id}-${index}`} className="flex items-center justify-between gap-2 text-[11px]"><span className="font-medium uppercase text-foreground">{location.provider}</span><span className="capitalize text-muted">{formatState(location.state)}</span></div>) : <p className="text-[11px] text-muted">No storage location recorded for this version.</p>}</div></article>)}</div>}
+        <section><h3 className="mb-1 flex items-center gap-2 text-[13px] font-semibold"><HardDrive size={16} className="text-brand-contrast"/>Recorded versions & storage</h3><p className="mb-3 text-xs text-muted">Latest {detail.versions_limit} versions maximum. Storage entries show logical state only, not physical disk availability.</p>
+          {detail.versions.length === 0 ? <div className="rounded-xl border border-border bg-background p-4 text-[12px] text-muted">No file version records are available.</div> : <div className="space-y-2.5">{detail.versions.map((version) => <article key={version.id} className="rounded-xl border border-border bg-background p-3.5"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-[12px] font-semibold">Version {version.number}{version.is_current && <span className="ml-2 rounded-md bg-brand-soft px-2 py-0.5 text-xs text-brand-contrast">Current</span>}</p><p className="mt-1 text-xs text-muted">{formatDate(version.created_at)} · {formatBytes(version.size_bytes)}</p></div><span className="rounded-lg border border-border px-2 py-1 text-xs capitalize">{formatState(version.state)}</span></div><div className="mt-2.5 space-y-1 border-t border-border pt-2.5">{version.storage.length > 0 ? version.storage.map((location, index) => <div key={`${version.id}-${index}`} className="flex items-center justify-between gap-2 text-xs"><span className="font-medium uppercase text-foreground">{location.provider}</span><span className="capitalize text-muted">{formatState(location.state)}</span></div>) : <p className="text-xs text-muted">No storage location recorded for this version.</p>}</div></article>)}</div>}
         </section>
-        <div className="flex items-start gap-2 rounded-xl border border-border bg-background p-3 text-[11px] leading-5 text-muted"><LockKeyhole size={15} className="mt-0.5 shrink-0"/>This console intentionally does not expose file content, encryption keys, storage object identifiers or download links.</div>
+        <div className="flex items-start gap-2 rounded-xl border border-border bg-background p-3 text-xs leading-5 text-muted"><LockKeyhole size={15} className="mt-0.5 shrink-0"/>This console intentionally does not expose file content, encryption keys, storage object identifiers or download links.</div>
       </div>}
     </Dialog>
   </div>;

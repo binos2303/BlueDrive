@@ -2,6 +2,7 @@
 
 import { Folder, FolderOpen } from "lucide-react";
 import Button from "@/components/ui/Button";
+import Dialog from "@/components/ui/Dialog";
 import type { DriveFolderDetails } from "@/lib/drive-service";
 import type { DriveItem } from "./types";
 
@@ -24,24 +25,9 @@ export default function DriveMoveDialog({
   onClose, onLoadDestination, onConfirm,
 }: DriveMoveDialogProps) {
   return (
-    <>
-      {open && (
-        <div
-          className="fixed inset-0 z-100 flex items-center justify-center bg-black/35 p-4"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !moving) onClose();
-          }}
-        >
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="move-items-title"
-            className="flex max-h-[min(80vh,680px)] w-full max-w-155 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl"
-          >
-            <header className="border-b border-border px-5 py-4">
-              <h2 id="move-items-title" className="text-lg font-semibold text-foreground">Move {targetCount} item{targetCount === 1 ? "" : "s"}</h2>
-              <p className="mt-1 text-sm text-muted">Choose a destination folder. You can also drag items onto a folder in Drive.</p>
-            </header>
+    <Dialog open={open} title={`Move ${targetCount} item${targetCount === 1 ? "" : "s"}`}
+      description="Choose a destination folder. You can also drag items onto a folder in Drive."
+      onClose={onClose} closeDisabled={moving} className="w-[min(calc(100%_-_2rem),38.75rem)]">
             <div className="flex flex-wrap items-center gap-1 border-b border-border px-5 py-3 text-sm">
               <button type="button" onClick={() => onLoadDestination(null)} className="rounded-md px-2 py-1 font-medium text-brand-contrast hover:bg-brand-soft">My Drive</button>
               {(details?.ancestors ?? []).map((ancestor) => (
@@ -87,11 +73,6 @@ export default function DriveMoveDialog({
                 </Button>
               </div>
             </footer>
-          </section>
-        </div>
-      )}
-
-
-    </>
+    </Dialog>
   );
 }

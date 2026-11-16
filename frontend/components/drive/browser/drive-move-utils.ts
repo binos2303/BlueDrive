@@ -15,7 +15,7 @@ type BreadcrumbParams = {
 export function getBreadcrumbMoveDestination({
   title, listView, index, ancestorIds, currentFolderId,
 }: BreadcrumbParams): number | null | undefined {
-  if (title !== "My Drive" || listView !== "drive") return undefined;
+  if ((title !== "My Drive" && title !== "Workspace files") || listView !== "drive") return undefined;
   if (index === 0) return null;
   if (index >= 1 && index <= ancestorIds.length) return ancestorIds[index - 1];
   if (index === ancestorIds.length + 1 && currentFolderId !== null) return currentFolderId;

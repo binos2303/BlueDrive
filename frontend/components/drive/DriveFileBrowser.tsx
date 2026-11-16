@@ -1,7 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import Link from "next/link";
+import useActiveWorkspaceId from "@/components/workspaces/useActiveWorkspaceId";
+import { canEditSelectedWorkspace, useSelectedWorkspace } from "@/components/workspaces/SelectedWorkspaceContext";
+import { DRIVE_UPLOAD_FILES_EVENT } from "./DriveNewMenu";
+import { driveFolderIdFromPathname, drivePath } from "@/lib/drive-paths";
 import {
   Grid2x2,
   List,
@@ -19,7 +24,7 @@ import ShareManagementDialog from "@/components/drive/ShareManagementDialog";
 import { type ShareTarget } from "@/lib/share-service";
 import { canOpenShareManagement } from "@/lib/share-policy";
 import FilePreviewDialog, { type PreviewFile } from "@/components/drive/FilePreviewDialog";
-import DriveNewMenu, { DRIVE_CREATE_FOLDER_EVENT } from "@/components/drive/DriveNewMenu";
+import { DRIVE_CREATE_FOLDER_EVENT, driveNewScope } from "@/components/drive/DriveNewMenu";
 import {
   downloadDriveFile,
   downloadDriveFolder,
@@ -43,7 +48,8 @@ import useDriveSelection from "./browser/useDriveSelection";
 import useDriveItemActions from "./browser/useDriveItemActions";
 import useDriveFileOperations from "./browser/useDriveFileOperations";
 import useDriveUploadIntake from "./browser/useDriveUploadIntake";
-import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
+import { DRIVE_SEARCH_CHANGED_EVENT, FOLDER_TREE_REFRESH_EVENT, getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
+import { SharedFolderContext } from "./browser/SharedFolderContext";
 
 type ViewMode = "list" | "grid";
 export type { DriveItem } from "./browser/types";
@@ -73,16 +79,16 @@ export default function DriveFileBrowser({ title, items }: DriveFileBrowserProps
 }
 
 function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
+  const activeWorkspaceId = useActiveWorkspaceId();
+  const selectedWorkspace = useSelectedWorkspace();
+  const locationTitle = title === "My Drive" && activeWorkspaceId ? "Workspace files" : title;
   const listView = listViewForTitle(title);
+  const driveRoot = drivePath(activeWorkspaceId);
   const pathname = usePathname();
   const router = useRouter();
   const currentFolderId = useMemo(() => {
-    if (title !== "My Drive") return null;
-    const match = pathname.match(/^\/drive\/folders\/([1-9]\d*)\/?$/);
-    if (!match) return null;
-    const parsed = Number(match[1]);
-    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-  }, [pathname, title]);
+    return listView === "drive" ? driveFolderIdFromPathname(pathname) : null;
+  }, [pathname, listView]);
   const {
     driveItems, setDriveItems,
     searchQuery, setSearchQuery, searchQueryRef,
@@ -91,6 +97,11 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     sortedItems, folderItems, fileItems,
     loadItems,
   } = useDriveItems(items, listView);
+  const setSharedFolderId = useContext(SharedFolderContext)?.setFolderId;
+  useEffect(() => {
+    setSharedFolderId?.(!activeWorkspaceId && folderDetails?.shared_by ? currentFolderId : null);
+    return () => setSharedFolderId?.(null);
+  }, [activeWorkspaceId, currentFolderId, folderDetails?.shared_by, setSharedFolderId]);
   const [view, setView] = useState<ViewMode>("list");
   const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState("Untitled folder");
@@ -107,6 +118,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   const [shareEmail, setShareEmail] = useState("");
   const [sharePermission, setSharePermission] = useState<"viewer" | "editor">("viewer");
   const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
   const [previewTarget, setPreviewTarget] = useState<PreviewFile | null>(null);
   // Only OS/browser file drags activate the upload overlay. Internal Drive drags
   // must never wash out the whole interface.
@@ -347,32 +359,21 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   }, [currentFolderId, listView, loadItems, clearSelection, searchQueryRef, setSearchQuery, setFolderDetails]);
 
   useEffect(() => {
-    function handleWorkspaceChanged() {
-      setPreviewTarget(null);
-      setRenameTarget(null);
-      setManageShareTarget(null);
-      setShareDialogOpen(false);
-      searchQueryRef.current = "";
-      setSearchQuery("");
-      clearSelection();
-      setFolderDetails(null);
-      if (currentFolderId !== null) {
-        // A folder ID is not portable between workspaces. Return to the selected
-        // workspace root rather than leaving a stale folder route on screen.
-        router.replace("/drive");
-        return;
-      }
-      if (listView) void loadItems(null, listView, "");
+    function handleRootFolderCreated(event: Event) {
+      const detail = (event as CustomEvent<{ workspaceId: string | null }>).detail;
+      if (!detail || detail.workspaceId !== getActiveWorkspaceIdForRequest()) return;
+      if (listView === "drive" && currentFolderId === null) void loadItems(null, "drive");
+      else if (listView === "recent") void loadItems(null, "recent");
     }
-
-    window.addEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
-    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, handleWorkspaceChanged);
-  }, [currentFolderId, listView, loadItems, router, clearSelection, searchQueryRef, setSearchQuery, setFolderDetails, setRenameTarget]);
+    window.addEventListener(FOLDER_TREE_REFRESH_EVENT, handleRootFolderCreated);
+    return () => window.removeEventListener(FOLDER_TREE_REFRESH_EVENT, handleRootFolderCreated);
+  }, [currentFolderId, listView, loadItems]);
 
   const selectedCanManage = selectedItems.length > 0 && selectedItems.every((item) => item.canManage !== false);
   const selectedCanShare = selectedItems.length > 0 && canOpenShareManagement(selectedItems);
 
   async function handleCreateFolder() {
+    const workspaceId = getActiveWorkspaceIdForRequest();
     const trimmedName = newFolderName.trim();
 
     if (!trimmedName) {
@@ -397,6 +398,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         type: "folder";
       }>("/drive/api/folders/", {
         method: "POST",
+        workspaceId,
         headers: await accountCsrfHeaders(),
         body: JSON.stringify({
           name: trimmedName,
@@ -407,6 +409,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       setIsCreateFolderOpen(false);
       setNewFolderName("Untitled folder");
       notifyFolderTreeChanged();
+      if (workspaceId !== getActiveWorkspaceIdForRequest()) return;
 
       // Refresh the list first; hide the progress toast after the folder is shown.
       await loadItems(
@@ -426,7 +429,8 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
 
   // Tạo thư mục thủ công là thao tác nghiệp vụ riêng, không thuộc hàng đợi Upload.
   useEffect(() => {
-    function onCreateFolder() {
+    function onCreateFolder(event: Event) {
+      if (driveNewScope(event) !== "current") return;
       if (title !== "My Drive") {
         setToast("Creating folders is only available in My Drive.");
         return;
@@ -457,7 +461,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       return;
     }
     clearSelectedIds();
-    router.push(`/drive/folders/${item.folderId}`);
+    router.push(drivePath(activeWorkspaceId, `folders/${item.folderId}`));
   }
 
   function actionTargets(item?: DriveItem): DriveItem[] {
@@ -506,6 +510,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       return;
     }
     setShareTargets(targets);
+    setShareError(null);
     setShareEmail("");
     setSharePermission("viewer");
     setShareDialogOpen(true);
@@ -514,6 +519,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
   async function submitShare(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!shareTargets.length || sharing) return;
+    setShareError(null);
     setSharing(true);
     try {
       const result = await postItemAction("/drive/api/items/share/", shareTargets, {
@@ -526,7 +532,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       setToast(result.detail || "Sharing permission updated.");
       if (listView) await loadItems(listView === "drive" ? currentFolderId : null, listView);
     } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not share selected items.");
+      setShareError(error instanceof Error ? error.message : "Could not share selected items.");
     } finally {
       setSharing(false);
     }
@@ -572,8 +578,10 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
       setToast("Select one folder at a time to download its ZIP. Mixed and multiple-folder downloads aren't supported yet.");
       return;
     }
+    let browserDownloads = 0;
+    let receivedDownloads = 0;
     for (const target of targets) {
-      setDownloadStatus({ text: `Preparing ${target.name}`, progress: null });
+      setDownloadStatus({ text: `Preparing download: ${target.name}`, progress: null });
       try {
         let latestProgress: DownloadProgress | null = null;
         const onProgress = ({ loaded, total }: DownloadProgress) => {
@@ -584,12 +592,18 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         if (target.type === "folder") {
           const folderId = target.folderId ?? Math.abs(target.id);
           await downloadDriveFolder(folderId, target.name, onProgress);
+          receivedDownloads++;
         } else {
-          await downloadDriveFile(target.id, target.name, onProgress);
+          setDownloadStatus({ text: `Authorizing download: ${target.name}`, progress: null });
+          const result = await downloadDriveFile(target.id, target.name, onProgress);
+          if (result === "browser-started") browserDownloads++;
+          else receivedDownloads++;
         }
         setDownloadStatus({
-          text: `Completed: ${target.name} received; browser save started.`,
-          progress: latestProgress,
+          text: browserDownloads > 0
+            ? `Requested ${browserDownloads} browser download${browserDownloads === 1 ? "" : "s"}${receivedDownloads ? `; received ${receivedDownloads} file${receivedDownloads === 1 ? "" : "s"}` : ""}. Check browser downloads for progress or errors. Allow downloads if prompted; retry here if a link expires.`
+            : `Completed: ${target.name} received; browser save started.`,
+          progress: browserDownloads > 0 ? null : latestProgress,
         });
       } catch (error) {
         setDownloadStatus({
@@ -652,14 +666,22 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     return actions;
   }
 
+  const isSharedFolder = !activeWorkspaceId && Boolean(folderDetails?.shared_by);
+  const breadcrumbRoot = isSharedFolder ? "/drive/shared" : driveRoot;
+  const breadcrumbTitle = isSharedFolder ? "Shared with me" : locationTitle;
+  const canUploadHere = listView === "drive" && !searchQuery && (activeWorkspaceId
+    ? canEditSelectedWorkspace(selectedWorkspace, activeWorkspaceId)
+    : (
+    currentFolderId === null || folderDetails?.access === "Owner" || folderDetails?.permission === "editor"
+  ));
   const folderPath = [
     {
-      label: title,
-      onSelect: currentFolderId !== null ? () => router.push("/drive") : undefined,
+      label: breadcrumbTitle,
+      onSelect: currentFolderId !== null ? () => router.push(breadcrumbRoot) : undefined,
     },
     ...(folderDetails?.ancestors ?? []).map((ancestor) => ({
       label: ancestor.name,
-      onSelect: () => router.push(`/drive/folders/${ancestor.id}`),
+      onSelect: () => router.push(drivePath(activeWorkspaceId, `folders/${ancestor.id}`)),
     })),
     ...(currentFolderId !== null
       ? [{ label: folderDetails?.name ?? "Loading folder…" }]
@@ -679,7 +701,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
     ? "info"
     : toastTitle === "Upload issue"
       ? "error"
-      : "warning";
+      : "info";
 
   // Event/effect callbacks below capture refs safely; the React Hooks refs rule
   // can falsely attribute those callback reads to the JSX map render.
@@ -702,7 +724,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         }
       `}</style>
       <section
-      className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background p-2 sm:p-3"
+      className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background px-2 py-1 sm:px-4 sm:py-2"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -733,8 +755,9 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           event.currentTarget.value = "";
         }}
       />
-      <div className="sticky top-0 z-40 bg-background pb-1 pt-1">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-1 pt-1 sm:px-2 sm:pt-2">
+      <div className="sticky top-0 z-40 bg-background">
+      <h1 className="sr-only">{locationTitle}</h1>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-1 pt-1">
         <Breadcrumb
           items={folderPath}
           className="min-w-0 [&>ol]:text-lg [&>ol]:font-semibold sm:[&>ol]:text-xl"
@@ -745,12 +768,12 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         />
 
         <div className="flex shrink-0 items-center gap-1.5">
-          <DriveNewMenu />
+          {listView === "shared" && <Link href="/drive/shared-by-me" className="inline-flex min-h-10 items-center rounded-lg px-3 text-[13px] font-medium text-brand-contrast hover:bg-brand-soft">Manage my shares</Link>}
           <div className="flex items-center gap-0.5 rounded-xl border border-border bg-background p-0.5">
             <button
               type="button"
               onClick={() => setView("list")}
-              className={`flex h-9 w-9 items-center justify-center rounded-[9px] border border-transparent transition-colors duration-(--motion-fast) ${view === "list" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
+              className={`ui-control flex h-10 w-10 items-center justify-center rounded-lg transition-colors duration-(--motion-fast) ${view === "list" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
               aria-label="List view"
               aria-pressed={view === "list"}
             >
@@ -759,7 +782,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
             <button
               type="button"
               onClick={() => setView("grid")}
-              className={`flex h-9 w-9 items-center justify-center rounded-[9px] border border-transparent transition-colors duration-(--motion-fast) ${view === "grid" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
+              className={`ui-control flex h-10 w-10 items-center justify-center rounded-lg transition-colors duration-(--motion-fast) ${view === "grid" ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-surface hover:text-foreground"}`}
               aria-label="Grid view"
               aria-pressed={view === "grid"}
             >
@@ -768,6 +791,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           </div>
         </div>
       </div>
+      {isSharedFolder && <p className="px-2 pt-2 text-sm text-muted">Shared by {folderDetails?.shared_by} · {folderDetails?.access} access</p>}
       {searchQuery && listView === "drive" && (
         <div className="mt-2 flex min-w-0 items-center gap-2 px-2 text-xs text-muted">
           <Search size={13} className="shrink-0" />
@@ -775,7 +799,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
           <button
             type="button"
             onClick={() => {
-              router.push("/drive");
+              router.push(driveRoot);
               window.dispatchEvent(new CustomEvent(DRIVE_SEARCH_CHANGED_EVENT, { detail: { query: "" } }));
             }}
             className="ml-auto shrink-0 rounded-md px-2 py-1 font-semibold text-brand-contrast hover:bg-brand-soft"
@@ -830,31 +854,33 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         {loading ? (
           <EmptyState title={`Loading ${title}`} description="Fetching items from your account…" />
         ) : loadError ? (
-          <EmptyState title="Could not load your Drive" description={loadError} action={
+          <EmptyState role="alert" title="Could not load your Drive" description={loadError} action={
             <Button variant="secondary" size="sm" onClick={() => listView && void loadItems(listView === "drive" ? currentFolderId : null, listView)}>Try again</Button>
           } />
         ) : sortedItems.length === 0 ? (
           <EmptyState
-            title={searchQuery && listView === "drive" ? "No matching files or folders" : title === "Starred" ? "No starred items yet" : title === "Trash" ? "Trash is empty" : title === "Recent" ? "No recent items" : "No files here"}
+            title={searchQuery && listView === "drive" ? "No matching files or folders" : title === "Shared with me" ? "No files shared with you yet" : title === "Starred" ? "No starred items yet" : title === "Trash" ? "Trash is empty" : title === "Recent" ? "No recent items" : "No files here"}
             description={
               searchQuery && listView === "drive"
                 ? "Try a different name or clear the search to browse this workspace."
+                : title === "Shared with me"
+                  ? "Files and folders that others share with you appear here. Open a folder to browse its contents."
                 : title === "Starred"
                   ? "Files and folders you star will appear here."
                   : listView
                     ? title === "Recent"
-                      ? "Files and folders you open or change will appear here."
+                      ? "Files opened or updated in the last 7 days appear here."
                       : "Files and folders in this location will appear here."
                     : "Items will appear here when real Drive data is connected."
             }
-            action={currentFolderId !== null ? (
-              <Button variant="secondary" size="sm" onClick={() => router.push("/drive")}>
-                Back to {title}
-              </Button>
-            ) : undefined}
+            action={canUploadHere || currentFolderId !== null ? <div className="flex flex-wrap justify-center gap-2">
+              {canUploadHere && <Button size="sm" onClick={() => window.dispatchEvent(new CustomEvent(DRIVE_UPLOAD_FILES_EVENT, { detail: { scope: "current" } }))}>Upload files</Button>}
+              {currentFolderId !== null && <Button variant="secondary" size="sm" onClick={() => router.push(breadcrumbRoot)}>Back to {breadcrumbTitle}</Button>}
+            </div> : undefined}
           />
         ) : view === "list" ? (
           <DriveListTable
+            onToggleItem={toggleItem}
             items={sortedItems}
             selectedIds={selectedIds}
             sortKey={sortKey}
@@ -918,12 +944,12 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
             onPointerUp={finishScrollbarPointer}
             onPointerCancel={finishScrollbarPointer}
             onKeyDown={handleScrollbarKeyDown}
-            className="absolute right-0 z-30 w-2 touch-none cursor-pointer rounded-full bg-transparent opacity-100 transition-opacity focus-visible:opacity-100 focus-visible:outline-none"
+            className="drive-scrollbar absolute right-0 z-30 w-2 touch-none cursor-pointer rounded-full bg-transparent focus-visible:bg-brand-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-contrast"
             style={{ top: `${scrollMetrics.trackTop}px`, bottom: "8px" }}
           >
             <div
               data-drive-scroll-thumb="true"
-              className="absolute left-0 right-0 top-0 rounded-full bg-gray-400 transition-colors hover:bg-gray-500"
+              className="absolute right-0 top-0 w-2 rounded-full bg-muted transition-colors hover:bg-brand-contrast"
               style={{
                 height: `${scrollbarThumbHeight}px`,
                 transform: `translateY(${scrollbarThumbTop}px)`,
@@ -1007,6 +1033,7 @@ function DriveFileBrowserContent({ title, items }: DriveFileBrowserProps) {
         open={shareDialogOpen}
         targetCount={shareTargets.length}
         sharing={sharing}
+        error={shareError}
         email={shareEmail}
         permission={sharePermission}
         onClose={() => setShareDialogOpen(false)}

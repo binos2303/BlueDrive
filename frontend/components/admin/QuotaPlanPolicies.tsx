@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { Pencil, Plus, ShieldCheck, Trash2, X } from "lucide-react";
+import { Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import Dialog from "@/components/ui/Dialog";
 import { requestAccountApi, accountCsrfHeaders } from "@/lib/account-service";
 
 type Plan = { code: string; name: string; scope: "personal" | "workspace"; limit_bytes: number; is_active: boolean; assignments: number };
@@ -116,7 +117,7 @@ export default function QuotaPlanPolicies({ canEdit }: { canEdit: boolean }) {
 
   return <div className="space-y-4">
     {notice && <p role="status" className="rounded-lg border border-border p-3 text-sm text-foreground">{notice}</p>}
-    {error && <p role="alert" className="rounded-lg border border-danger/50 p-3 text-sm text-danger">{error}</p>}
+    {error && !editing && !deleting && <p role="alert" className="rounded-lg border border-danger/50 p-3 text-sm text-danger">{error}</p>}
     <section className="overflow-hidden rounded-[18px] border border-border bg-surface">
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
         <h2 className="text-[14px] font-semibold">Storage plans</h2>
@@ -126,7 +127,7 @@ export default function QuotaPlanPolicies({ canEdit }: { canEdit: boolean }) {
         </div>
       </div>
       {loading ? <p className="p-5 text-sm text-muted">Loading plans…</p> : <div className="overflow-x-auto"><table className="w-full min-w-150 text-left text-[13px]"><thead className="bg-background text-xs text-muted"><tr><th className="px-4 py-3">Plan</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Limit</th><th className="px-4 py-3">Status</th><th className="px-4 py-3 text-right">Actions</th></tr></thead><tbody>
-        {plans.map((plan) => <tr key={plan.code} className="border-t border-border/70"><td className="px-4 py-3"><strong>{plan.name}</strong><p className="text-[11px] text-muted">{plan.code}</p></td><td className="px-4 py-3 capitalize">{plan.scope}</td><td className="px-4 py-3">{readable(plan.limit_bytes)}</td><td className="px-4 py-3">{plan.is_active ? "Active" : "Inactive"}</td><td className="px-4 py-3 text-right"><div className="flex items-center justify-end gap-2">{canEdit ? <>
+        {plans.map((plan) => <tr key={plan.code} className="border-t border-border/70"><td className="px-4 py-3"><strong>{plan.name}</strong><p className="text-[11px] text-muted">{plan.code}</p></td><td className="px-4 py-3">{plan.scope === "personal" ? "Personal Drive" : "Personal workspace"}</td><td className="px-4 py-3">{readable(plan.limit_bytes)}</td><td className="px-4 py-3">{plan.is_active ? "Active" : "Inactive"}</td><td className="px-4 py-3 text-right"><div className="flex items-center justify-end gap-2">{canEdit ? <>
           <button type="button" onClick={() => openPlan(plan)} className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-xs"><Pencil size={13} />Edit</button>
           {!(["free", "workspace-starter"].includes(plan.code)) && <button type="button" title={plan.assignments ? "Assigned plan: disable it first to hide without changing quotas" : "Delete unused plan"} disabled={plan.assignments > 0} onClick={() => { setDeleting(plan); setDeleteReason(""); setError(""); }} className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-xs text-danger disabled:cursor-not-allowed disabled:opacity-40"><Trash2 size={13} />Delete</button>}
         </> : "View only"}</div></td></tr>)}
@@ -143,31 +144,26 @@ export default function QuotaPlanPolicies({ canEdit }: { canEdit: boolean }) {
         {canEdit && <button type="submit" disabled={saving || !policy || policyReason.trim().length < 8} className="h-10 rounded-xl bg-brand-soft px-4 text-[12px] font-semibold text-brand-contrast disabled:opacity-50">Save thresholds</button>}
       </form>
     </section>
-    {deleting && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setDeleting(null); }}>
-      <section role="dialog" aria-modal="true" aria-label="Delete storage plan" className="w-full max-w-md rounded-[20px] border border-border bg-surface p-5 shadow-xl">
-        <div className="flex justify-between"><h3 className="font-semibold">Delete {deleting.name}?</h3><button type="button" aria-label="Close" onClick={() => setDeleting(null)} disabled={saving}><X size={18}/></button></div>
+    {deleting && <Dialog open title={`Delete ${deleting.name}?`} onClose={() => setDeleting(null)} closeDisabled={saving}>
         <p className="mt-3 text-[12px] text-muted">Only unassigned plans can be permanently deleted. Assigned plans must be disabled instead; existing quota allocations remain unchanged.</p>
         {error && <p role="alert" className="mt-3 text-[12px] text-danger">{error}</p>}
         <form className="mt-4 space-y-3" onSubmit={(event) => void deletePlan(event)}>
           <label className="block text-[12px]">Reason (8–500 characters)<textarea required minLength={8} maxLength={500} value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} className="mt-1 min-h-20 w-full rounded-xl border border-border bg-background p-3" /></label>
           <div className="flex justify-end gap-2"><button type="button" disabled={saving} onClick={() => setDeleting(null)} className="rounded-lg border border-border px-4 py-2">Cancel</button><button type="submit" disabled={saving || deleteReason.trim().length < 8} className="rounded-lg border border-danger/40 px-4 py-2 text-danger">{saving ? "Deleting…" : "Delete plan"}</button></div>
         </form>
-      </section>
-    </div>}
-    {editing && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setEditing(null); }}>
-      <section role="dialog" aria-modal="true" aria-label={editing === "new" ? "Create plan" : "Edit plan"} className="w-full max-w-md rounded-[20px] border border-border bg-surface p-5 shadow-xl">
-        <div className="flex justify-between"><h3 className="font-semibold">{editing === "new" ? "Create plan" : "Edit plan"}</h3><button type="button" aria-label="Close" onClick={() => setEditing(null)} disabled={saving}><X size={18}/></button></div>
+    </Dialog>}
+    {editing && <Dialog open title={editing === "new" ? "Create plan" : "Edit plan"} onClose={() => setEditing(null)} closeDisabled={saving}>
         <form onSubmit={(e) => void savePlan(e)} className="mt-4 space-y-3 text-[12px]">
+          {error && <p role="alert" className="text-sm text-danger">{error}</p>}
           <label className="block">Code<input required disabled={editing !== "new"} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxLength={48} value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3"/></label>
           <label className="block">Name<input required minLength={2} maxLength={80} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3"/></label>
-          <label className="block">Scope<select disabled={editing !== "new"} value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value as FormPlan["scope"] })} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3"><option value="personal">Personal</option><option value="workspace">Workspace</option></select></label>
+          <label className="block">Scope<select disabled={editing !== "new"} value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value as FormPlan["scope"] })} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3"><option value="personal">Personal Drive</option><option value="workspace">Personal workspace</option></select></label>
           <label className="block">Limit (MiB)<input type="number" min={0} step={1} required value={form.limit_mib} onChange={(e) => setForm({ ...form, limit_mib: e.target.value })} className="mt-1 h-10 w-full rounded-xl border border-border bg-background px-3" /></label>
           {editing !== "new" && <label className="flex items-center gap-2"><input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })}/>Active</label>}
           <label className="block">Reason (8–500 characters)<textarea required minLength={8} maxLength={500} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} className="mt-1 min-h-20 w-full rounded-xl border border-border bg-background p-3"/></label>
           <p className="text-[11px] text-muted">Editing a preset does not automatically change existing quota assignments.</p>
           <div className="flex justify-end gap-2"><button type="button" disabled={saving} onClick={() => setEditing(null)} className="rounded-lg border border-border px-4 py-2">Cancel</button><button type="submit" disabled={saving || form.reason.trim().length < 8} className="rounded-lg bg-brand-soft px-4 py-2 font-semibold text-brand-contrast">{saving ? "Saving…" : "Save"}</button></div>
         </form>
-      </section>
-    </div>}
+    </Dialog>}
   </div>;
 }

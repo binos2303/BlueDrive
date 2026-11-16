@@ -2,8 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { ArrowLeft, Clock3, Copy, RefreshCw, Trash2, Users } from "lucide-react";
+import { ArrowLeft, Clock3, Copy, RefreshCw, Trash2 } from "lucide-react";
 import Button from "@/components/ui/Button";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import {
@@ -17,7 +16,8 @@ import {
   type WorkspaceRole,
 } from "@/lib/workspace-service";
 import { canModifyWorkspaceMember, isWorkspaceRole } from "@/lib/workspace-member-policy";
-import { getSavedWorkspaceSelection, WORKSPACE_CHANGED_EVENT, WORKSPACES_UPDATED_EVENT } from "@/lib/workspace-context";
+import { WORKSPACES_UPDATED_EVENT } from "@/lib/workspace-context";
+import { drivePath } from "@/lib/drive-paths";
 
 type PendingAction =
   | { kind: "role"; member: WorkspaceMember; role: WorkspaceRole }
@@ -28,7 +28,6 @@ function displayError(error: unknown): string {
 }
 
 export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
-  const router = useRouter();
   const [result, setResult] = useState<WorkspaceMembersResult | null>(null);
   const [page, setPage] = useState(1);
   const [refreshCount, setRefreshCount] = useState(0);
@@ -53,14 +52,6 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [workspaceId, page, refreshCount]);
 
-  useEffect(() => {
-    function onWorkspaceChanged() {
-      const selection = getSavedWorkspaceSelection();
-      if (selection?.workspaceId !== workspaceId) router.replace("/drive");
-    }
-    window.addEventListener(WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
-    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
-  }, [router, workspaceId]);
 
   async function confirmMutation() {
     if (!pending || saving) return;
@@ -114,16 +105,15 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
 
   return (
     <section className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-      <Link href="/drive" className="inline-flex items-center gap-2 text-sm font-medium text-muted hover:text-foreground"><ArrowLeft size={16} /> Back to Drive</Link>
+      <Link href={drivePath(workspaceId)} className="inline-flex min-h-10 items-center gap-2 rounded-lg text-sm font-medium text-muted hover:text-foreground"><ArrowLeft size={16} /> Back to workspace files</Link>
       <div className="mt-5 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2 text-sm font-medium text-muted"><Users size={16} /> Workspace management</div>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-foreground">Members{visibleResult ? ` · ${visibleResult.workspaceName}` : ""}</h1>
+          <h1 className="wrap-break-word text-2xl font-semibold tracking-tight text-foreground">Members{visibleResult ? ` · ${visibleResult.workspaceName}` : ""}</h1>
           <p className="mt-1 text-sm text-muted">Manage Workspace roles independently from organization and direct file shares.</p>
         </div>
         <div className="flex items-center gap-2">
-          <Link href={`/drive/workspaces/${encodeURIComponent(workspaceId)}/activity`} className="inline-flex h-9 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-xs font-semibold text-foreground hover:bg-background"><Clock3 size={14} /> Timeline</Link>
-          <button type="button" disabled={loading} onClick={() => setRefreshCount((v) => v + 1)} className="inline-flex h-9 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-xs font-semibold text-foreground hover:bg-background disabled:opacity-50"><RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh</button>
+          <Link href={`/drive/workspaces/${encodeURIComponent(workspaceId)}/activity`} className="ui-control inline-flex h-10 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-[13px] font-semibold text-foreground hover:bg-background"><Clock3 size={14} /> Activity log</Link>
+          <button type="button" disabled={loading} onClick={() => setRefreshCount((v) => v + 1)} className="ui-control inline-flex h-10 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-[13px] font-semibold text-foreground hover:bg-background disabled:opacity-50"><RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh</button>
         </div>
       </div>
       {error && <p role="alert" className="mt-4 rounded-xl border border-danger p-3 text-sm text-danger">{error}</p>}
@@ -133,20 +123,21 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
         <div className="border-b border-border px-5 py-4"><h2 className="text-sm font-semibold text-foreground">Workspace members{visibleResult ? ` (${visibleResult.total})` : ""}</h2></div>
         {loading ? <p className="p-8 text-center text-sm text-muted">Loading members…</p> : !visibleResult ? <p className="p-8 text-center text-sm text-muted">Unable to load members.</p> : visibleResult.members.length === 0 ? <p className="p-8 text-center text-sm text-muted">No active members on this page.</p> : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[580px] text-left text-sm">
+            <table className="w-full min-w-160 table-fixed text-left text-sm">
+              <colgroup><col className="w-[50%]" /><col className="w-[32%]" /><col className="w-[18%]" /></colgroup>
               <thead className="border-b border-border bg-background text-xs text-muted"><tr><th className="px-5 py-3 font-medium">Member</th><th className="px-5 py-3 font-medium">Role</th><th className="px-5 py-3 text-right font-medium">Action</th></tr></thead>
               <tbody className="divide-y divide-border">{visibleResult.members.map((member) => {
                 const editable = canModifyWorkspaceMember(member);
                 return (
                   <tr key={member.assignmentId}>
-                    <td className="px-5 py-3"><div className="font-semibold text-foreground">{member.username}{member.isSelf ? " (You)" : ""}</div><div className="text-xs text-muted">{member.email}</div></td>
+                    <td className="px-5 py-3"><div className="truncate font-semibold text-foreground" title={member.username}>{member.username}{member.isSelf ? " (You)" : ""}</div><div className="mt-1 truncate text-xs text-muted" title={member.email}>{member.email}</div></td>
                     <td className="px-5 py-3">
-                      <select aria-label={`Role for ${member.username}`} value={member.workspaceRole} disabled={!editable || saving} onChange={(e) => { const role = e.currentTarget.value; if (isWorkspaceRole(role) && role !== member.workspaceRole) setPending({ kind: "role", member, role }); }} className="h-9 rounded-lg border border-border bg-background px-2 text-xs text-foreground disabled:opacity-60">
+                      <select aria-label={`Role for ${member.username}`} value={member.workspaceRole} disabled={!editable || saving} onChange={(e) => { const role = e.currentTarget.value; if (isWorkspaceRole(role) && role !== member.workspaceRole) setPending({ kind: "role", member, role }); }} className="ui-control h-10 rounded-lg border border-border bg-background px-2 text-xs text-foreground disabled:opacity-60">
                         <option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option>
                       </select>
                       {member.isProtected && <p className="mt-1 text-[11px] text-muted">Managed by organization</p>}
                     </td>
-                    <td className="px-5 py-3 text-right"><button type="button" disabled={!editable || saving} title={editable ? "Revoke workspace membership" : "Cannot modify your own or an organization administrator's membership"} aria-label={`Remove ${member.username}`} onClick={() => setPending({ kind: "revoke", member })} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-background hover:text-danger disabled:opacity-30"><Trash2 size={16} /></button></td>
+                    <td className="px-5 py-3 text-right"><button type="button" disabled={!editable || saving} title={editable ? "Revoke workspace membership" : "Cannot modify your own or an organization administrator's membership"} aria-label={`Remove ${member.username}`} onClick={() => setPending({ kind: "revoke", member })} className="ui-control inline-flex h-10 w-9 items-center justify-center rounded-lg text-muted hover:bg-background hover:text-danger disabled:opacity-30"><Trash2 size={16} /></button></td>
                   </tr>
                 );
               })}</tbody>
@@ -160,11 +151,11 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
         <h2 className="text-sm font-semibold text-foreground">Invite a member</h2>
         <p className="mt-1 text-xs text-muted">Invitations are email-bound, expire after seven days and require an existing or registered account to accept.</p>
         <form onSubmit={(event) => { void createInvite(event); }} className="mt-4 flex flex-wrap items-end gap-3">
-          <label className="min-w-[220px] flex-1 space-y-1.5"><span className="block text-xs font-semibold text-foreground">Email address</span><input required type="email" maxLength={254} value={inviteEmail} onChange={(e) => setInviteEmail(e.currentTarget.value)} className="h-10 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand" placeholder="colleague@example.com" /></label>
+          <label className="min-w-55 flex-1 space-y-1.5"><span className="block text-xs font-semibold text-foreground">Email address</span><input required type="email" maxLength={254} value={inviteEmail} onChange={(e) => setInviteEmail(e.currentTarget.value)} className="h-10 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand" placeholder="colleague@example.com" /></label>
           <label className="space-y-1.5"><span className="block text-xs font-semibold text-foreground">Initial role</span><select value={inviteRole} onChange={(e) => setInviteRole(e.currentTarget.value as InviteRole)} className="h-10 rounded-xl border border-border bg-background px-3 text-sm text-foreground"><option value="viewer">Viewer</option><option value="editor">Editor</option></select></label>
           <Button type="submit" loading={inviting} disabled={inviting || !inviteEmail.trim()}>Create invitation</Button>
         </form>
-        {inviteUrl && <div className="mt-4 flex flex-wrap gap-2"><input aria-label="Invitation link" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} className="h-10 min-w-[200px] flex-1 rounded-lg border border-border bg-background px-3 text-xs text-foreground" /><Button variant="secondary" onClick={() => { void navigator.clipboard.writeText(inviteUrl).catch(() => setError("Copy failed. Select and copy the link manually.")); }}><Copy size={14} /> Copy link</Button></div>}
+        {inviteUrl && <div className="mt-4 flex flex-wrap gap-2"><input aria-label="Invitation link" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} className="h-10 min-w-50 flex-1 rounded-lg border border-border bg-background px-3 text-xs text-foreground" /><Button variant="secondary" onClick={() => { void navigator.clipboard.writeText(inviteUrl).catch(() => setError("Copy failed. Select and copy the link manually.")); }}><Copy size={14} /> Copy link</Button></div>}
       </div>
       <ConfirmDialog open={pending !== null} title={pending?.kind === "role" ? "Confirm role change" : "Remove workspace member"} description={description} confirmLabel={pending?.kind === "role" ? "Change role" : "Remove member"} destructive={pending?.kind === "revoke"} pending={saving} onConfirm={() => { void confirmMutation(); }} onClose={() => { if (!saving) setPending(null); }} />
     </section>

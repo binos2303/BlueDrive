@@ -8,6 +8,7 @@ import { useAccount } from "@/components/account/AccountProvider";
 import Button from "@/components/ui/Button";
 import { setActiveWorkspaceSelection, WORKSPACES_UPDATED_EVENT } from "@/lib/workspace-context";
 import { acceptWorkspaceInvite, previewWorkspaceInvite } from "@/lib/workspace-service";
+import { drivePath } from "@/lib/drive-paths";
 
 type InvitePreview = Awaited<ReturnType<typeof previewWorkspaceInvite>>;
 
@@ -19,6 +20,7 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
   const [loading, setLoading] = useState(true);
   const [joining, setJoining] = useState(false);
   const [joined, setJoined] = useState(false);
+  const [joinedWorkspaceId, setJoinedWorkspaceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -47,6 +49,7 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
       }
       window.dispatchEvent(new Event(WORKSPACES_UPDATED_EVENT));
       setJoined(true);
+      setJoinedWorkspaceId(result.workspace.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not join the workspace.");
     } finally {
@@ -70,14 +73,14 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
             <CheckCircle2 size={24} className="mt-5 text-success" />
             <h1 className="mt-3 text-xl font-semibold text-foreground">You joined {preview?.workspaceName ?? "the workspace"}</h1>
             <p className="mt-2 text-sm leading-6 text-muted">The workspace is now available in your sidebar.</p>
-            <Button className="mt-6 w-full" onClick={() => router.push("/drive")}>Open Drive</Button>
+            <Button className="mt-6 w-full" onClick={() => router.push(drivePath(joinedWorkspaceId))}>Open workspace files</Button>
           </>
         ) : displayError ? (
           <>
             <h1 className="mt-5 text-xl font-semibold text-foreground">Invitation unavailable</h1>
             <p role="alert" className="mt-2 text-sm leading-6 text-danger">{displayError}</p>
             <p className="mt-3 text-sm leading-6 text-muted">Sign in with the invited email address, then reopen this link. Invitations expire after seven days.</p>
-            <Link href={`/login?next=${encodeURIComponent(`/workspace-invite?token=${token}`)}`} className="mt-5 inline-flex h-10 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-white hover:bg-brand-dark">Sign in</Link>
+            <Link href={`/login?next=${encodeURIComponent(`/workspace-invite?token=${token}`)}`} className="mt-5 inline-flex h-10 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-on-accent hover:bg-brand-hover">Sign in</Link>
           </>
         ) : preview ? (
           <>
@@ -91,7 +94,7 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
             {account ? (
               <Button className="mt-6 w-full" loading={joining} onClick={() => { void handleJoin(); }}>Accept invitation</Button>
             ) : (
-              <Link href={`/login?next=${encodeURIComponent(`/workspace-invite?token=${token}`)}`} className="mt-6 inline-flex h-11 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-white hover:bg-brand-dark">Sign in to accept</Link>
+              <Link href={`/login?next=${encodeURIComponent(`/workspace-invite?token=${token}`)}`} className="mt-6 inline-flex h-11 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-on-accent hover:bg-brand-hover">Sign in to accept</Link>
             )}
           </>
         ) : null}

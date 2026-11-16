@@ -72,7 +72,7 @@ export default function ContextMenu({
 
   function close(restoreFocus = true) {
     setOpen(false);
-    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+    if (restoreFocus) triggerRef.current?.focus();
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLUListElement>) {
@@ -120,7 +120,7 @@ export default function ContextMenu({
             setOpen(true);
           }
         }}
-        className={triggerClassName ?? "inline-flex h-10 w-10 items-center justify-center rounded-[var(--radius-control)] text-muted transition-colors duration-[var(--motion-fast)] hover:bg-background hover:text-foreground"}
+        className={triggerClassName ?? "ui-control inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-muted transition-colors duration-[var(--motion-fast)] hover:bg-background hover:text-foreground"}
       >
         {trigger}
       </button>
@@ -145,9 +145,9 @@ export default function ContextMenu({
                   action.onSelect();
                   close();
                 }}
-                className={`w-full rounded-lg px-3 py-2 text-left text-sm transition-colors duration-[var(--motion-fast)] disabled:cursor-not-allowed disabled:opacity-50 ${
+                className={`ui-control min-h-10 w-full rounded-lg px-3 py-2 text-left text-sm transition-colors duration-[var(--motion-fast)] disabled:cursor-not-allowed disabled:opacity-50 ${
                   action.destructive
-                    ? "text-danger hover:bg-rose-50"
+                    ? "text-danger hover:bg-danger/10"
                     : "text-foreground hover:bg-background"
                 }`}
               >

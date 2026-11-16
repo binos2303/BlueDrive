@@ -76,10 +76,10 @@ export default function UserSessionsDialog({ user, onClose }: {
   }
 
   return <>
-    <Dialog open title={`Sessions · ${user.username}`} description="Observed sessions only. An unexpired session is not proof that a user is currently online." onClose={onClose} className="w-[min(100%-2rem,46rem)]">
+    <Dialog open title={`Sessions · ${user.username}`} description="Observed sessions only. An unexpired session is not proof that a user is currently online." onClose={onClose} closeDisabled={pending} className="w-[min(calc(100%_-_2rem),46rem)]">
       <div className="space-y-4">
         {loading && <p role="status" className="text-sm text-muted">Loading observed sessions…</p>}
-        {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+        {error && <div className="space-y-3"><p role="alert" className="text-sm text-danger">{error}</p><Button size="sm" variant="secondary" onClick={() => { setLoading(true); setError(""); setRevision((value) => value + 1); }}>Retry sessions</Button></div>}
         {!loading && !error && <>
           {data?.results.length ? <div className="space-y-3">
             {data.results.map((session) => <div key={session.id} className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-border p-3">
@@ -102,10 +102,10 @@ export default function UserSessionsDialog({ user, onClose }: {
         </>}
       </div>
     </Dialog>
-    <Dialog open={target !== null} title="Revoke observed session?" description="The user will be signed out on the selected session. The action is recorded in the platform audit log." onClose={closeTarget}>
+    <Dialog open={target !== null} title="Revoke observed session?" description="The user will be signed out on the selected session. The action is recorded in the platform audit log." onClose={closeTarget} closeDisabled={pending}>
       <div className="space-y-4">
         <label className="block text-xs font-semibold">Reason (8–500 characters)
-          <textarea className="mt-2 min-h-24 w-full rounded-xl border border-border bg-background p-3 text-sm font-normal" maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} />
+          <textarea disabled={pending} className="mt-2 min-h-24 w-full rounded-xl border border-border bg-background p-3 text-sm font-normal" maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} />
         </label>
         {actionError && <p role="alert" className="text-sm text-danger">{actionError}</p>}
         <div className="flex justify-end gap-2">

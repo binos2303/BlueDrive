@@ -8,6 +8,7 @@ type DialogProps = {
   title: string;
   description?: string;
   onClose: () => void;
+  closeDisabled?: boolean;
   children: ReactNode;
   className?: string;
 };
@@ -17,6 +18,7 @@ export default function Dialog({
   title,
   description,
   onClose,
+  closeDisabled = false,
   children,
   className = "",
 }: DialogProps) {
@@ -28,8 +30,14 @@ export default function Dialog({
     const dialog = dialogRef.current;
     if (!dialog) return;
 
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (open && !dialog.open) dialog.showModal();
     if (!open && dialog.open) dialog.close();
+    return () => {
+      // Đóng trước khi trả focus; native dialog bị unmount có thể mất điểm mở lại.
+      if (dialog.open) dialog.close();
+      if (open && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    };
   }, [open]);
 
   if (!open) return null;
@@ -41,9 +49,9 @@ export default function Dialog({
       aria-describedby={description ? descriptionId : undefined}
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        if (!closeDisabled) onClose();
       }}
-      className={`m-auto max-h-[min(90vh,48rem)] w-[min(100%-2rem,32rem)] overflow-y-auto rounded-2xl border border-border bg-surface p-0 text-foreground shadow-[var(--shadow-popover)] backdrop:bg-foreground/35 ${className}`}
+      className={`m-auto max-h-[min(90dvh,48rem)] w-[min(calc(100%_-_2rem),32rem)] overflow-y-auto rounded-2xl border border-border bg-surface p-0 text-foreground shadow-[var(--shadow-popover)] backdrop:bg-foreground/35 ${className}`}
     >
       <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
         <div>
@@ -54,7 +62,8 @@ export default function Dialog({
           type="button"
           aria-label="Close dialog"
           onClick={onClose}
-          className="rounded-lg p-2 text-muted transition-colors duration-[var(--motion-fast)] hover:bg-background hover:text-foreground"
+          disabled={closeDisabled}
+          className="ui-control rounded-lg p-2 text-muted transition-colors duration-[var(--motion-fast)] hover:bg-background hover:text-foreground"
         >
           <X size={18} />
         </button>

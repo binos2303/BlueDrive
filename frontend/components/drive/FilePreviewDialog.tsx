@@ -66,7 +66,7 @@ function FilePreviewDialogContent({
 
   return (
     <Dialog open title={file.name} onClose={onClose}
-      className="w-[min(100%-2rem,54rem)]">
+      className="w-[min(calc(100%_-_2rem),54rem)]">
       <div className="flex max-h-[65vh] min-h-48 flex-col gap-3">
         {loading ? <p role="status" className="py-12 text-center text-sm text-muted">Preparing preview…</p>
           : message ? <p role="alert" className="rounded-lg border border-border p-4 text-sm text-muted">{message}</p>

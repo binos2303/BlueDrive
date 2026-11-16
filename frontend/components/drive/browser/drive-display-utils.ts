@@ -2,7 +2,7 @@ import type { DriveListView } from "@/lib/drive-service";
 import type { DriveItem, SortDirection, SortKey } from "./types";
 
 export function listViewForTitle(title: string): DriveListView | null {
-  if (title === "My Drive") return "drive";
+  if (title === "My Drive" || title === "Workspace files") return "drive";
   if (title === "Recent") return "recent";
   if (title === "Trash") return "trash";
   if (title === "Shared with me") return "shared";
@@ -33,7 +33,12 @@ export function sortDriveItems(
 
     let comparison: number;
     if (sortKey === "modified") {
-      comparison = first.modified.localeCompare(second.modified, undefined, { numeric: true });
+      const firstTime = Date.parse(first.modifiedAt ?? "");
+      const secondTime = Date.parse(second.modifiedAt ?? "");
+      // Unknown dates stay last in either direction; localized labels are display-only.
+      if (!Number.isFinite(firstTime)) return Number.isFinite(secondTime) ? 1 : 0;
+      if (!Number.isFinite(secondTime)) return -1;
+      comparison = firstTime - secondTime;
     } else if (sortKey === "size") {
       comparison = parseSize(first.size) - parseSize(second.size);
     } else if (sortKey === "type") {

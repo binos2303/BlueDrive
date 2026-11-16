@@ -36,7 +36,7 @@ export default function DriveGrid({
                   <h3 id="drive-folders-heading" className="text-sm font-semibold text-foreground">Folders</h3>
                   <span className="text-xs text-muted">{folderItems.length}</span>
                 </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,20rem),1fr))] gap-3">
                   {folderItems.map((item) => {
                     const selected = selectedIds.has(item.id);
                     return (
@@ -48,8 +48,10 @@ export default function DriveGrid({
                         onDragOver={(event) => onFolderDragOver(event, item)}
                         onDrop={(event) => void onDropOnFolder(event, item)}
                         role="button"
+                        aria-pressed={selected}
                         tabIndex={0}
                         onKeyDown={(event) => {
+                          if (event.target !== event.currentTarget) return;
                           if (event.key === "Enter") onOpen(item);
                           if (event.key === " ") { event.preventDefault(); onToggleItem(item.id); }
                         }}
@@ -65,7 +67,7 @@ export default function DriveGrid({
                           onDragEnd={() => { onDragEnd(); }}
                           aria-label={`Drag ${item.name}`}
                           title="Drag to move"
-                          className="flex h-6 w-4 shrink-0 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
+                          className="ui-control flex h-9 w-7 shrink-0 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
                         >
                           <GripVertical size={14} />
                         </button>
@@ -82,7 +84,7 @@ export default function DriveGrid({
                             title={item.starred ? "Remove from Starred" : "Add to Starred"}
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => { event.stopPropagation(); void onToggleStar([item]); }}
-                            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
+                            className={`ui-control flex h-10 w-10 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-warning" : "text-muted opacity-60 hover:opacity-100"}`}
                           >
                             <Star size={15} fill={item.starred ? "currentColor" : "none"} />
                           </button>
@@ -111,7 +113,7 @@ export default function DriveGrid({
                   <h3 id="drive-files-heading" className="text-sm font-semibold text-foreground">Files</h3>
                   <span className="text-xs text-muted">{fileItems.length}</span>
                 </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,20rem),1fr))] gap-3">
                   {fileItems.map((item) => {
                     const selected = selectedIds.has(item.id);
                     return (
@@ -121,8 +123,10 @@ export default function DriveGrid({
                         onClick={(event) => onItemClick(event, item.id)}
                         onDoubleClick={() => onOpen(item)}
                         role="button"
+                        aria-pressed={selected}
                         tabIndex={0}
                         onKeyDown={(event) => {
+                          if (event.target !== event.currentTarget) return;
                           if (event.key === "Enter") onOpen(item);
                           if (event.key === " ") { event.preventDefault(); onToggleItem(item.id); }
                         }}
@@ -139,11 +143,11 @@ export default function DriveGrid({
                             onDragEnd={() => { onDragEnd(); }}
                             aria-label={`Drag ${item.name}`}
                             title="Drag to move"
-                            className="flex h-6 w-5 shrink-0 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
+                            className="ui-control flex h-6 w-5 shrink-0 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
                           >
                             <GripVertical size={14} />
                           </button>
-                          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-contrast">
+                          <span className="ui-control flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-contrast">
                             {renderItemIcon(item.type, 16)}
                           </span>
                           <span className="min-w-0 flex-1 truncate text-left text-sm font-medium text-foreground" title={item.name}>
@@ -156,7 +160,7 @@ export default function DriveGrid({
                               title={item.starred ? "Remove from Starred" : "Add to Starred"}
                               onPointerDown={(event) => event.stopPropagation()}
                               onClick={(event) => { event.stopPropagation(); void onToggleStar([item]); }}
-                              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-amber-500" : "text-muted opacity-60 hover:opacity-100"}`}
+                              className={`ui-control flex h-10 w-10 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-brand-soft ${item.starred ? "text-warning" : "text-muted opacity-60 hover:opacity-100"}`}
                             >
                               <Star size={15} fill={item.starred ? "currentColor" : "none"} />
                             </button>

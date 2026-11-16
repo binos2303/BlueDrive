@@ -1,4 +1,5 @@
 import { accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
+import { getAdminOverview } from "@/lib/admin-overview-service";
 
 import { buildAdminUserQuery, type AdminUserSort } from "@/lib/admin-user-query";
 export type { AdminUserSort, AdminUserScope, AdminUserStatus } from "@/lib/admin-user-query";
@@ -58,7 +59,7 @@ export function getAdminUsers(
 export function getAdminUserOverview(signal?: AbortSignal): Promise<{
   users: { total: number; platform_admins: number };
 }> {
-  return requestAccountApi("/accounts/api/admin/overview/", { signal, cache: "no-store" });
+  return getAdminOverview(signal);
 }
 
 export function getAdminUserSessions(

@@ -81,7 +81,7 @@ export default function SettingsPage() {
       <button type="button" onClick={reload} disabled={loading || saving} className="rounded-lg border border-border px-3 py-2 text-sm font-medium hover:bg-background disabled:opacity-60">Refresh</button>
     </div>
     <div className="max-w-3xl space-y-5">
-      {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
+      {error && <p role="alert" className="rounded-lg border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">{error}</p>}
       {message && <p role="status" className="rounded-lg border border-border px-4 py-3 text-sm text-foreground">{message}</p>}
       <section className="rounded-2xl border border-border bg-surface p-5 shadow-sm sm:p-6">
         <div className="flex items-center gap-3">

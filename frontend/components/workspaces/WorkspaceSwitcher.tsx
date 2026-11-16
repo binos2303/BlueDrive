@@ -1,18 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { drivePath, workspaceIdFromPathname } from "@/lib/drive-paths";
 import {
   Check,
   ChevronDown,
-  Clock3,
-  Copy,
+  HardDrive,
   Layers,
-  Link2,
   LoaderCircle,
   LogIn,
   Plus,
-  Users,
 } from "lucide-react";
 import { useAccount } from "@/components/account/AccountProvider";
 import Dialog from "@/components/ui/Dialog";
@@ -21,20 +19,18 @@ import {
   clearActiveWorkspaceSelection,
   getSavedWorkspaceSelection,
   setActiveWorkspaceSelection,
-  FOLDER_TREE_REFRESH_EVENT,
   WORKSPACES_UPDATED_EVENT,
   WORKSPACE_CHANGED_EVENT,
 } from "@/lib/workspace-context";
 import {
   acceptWorkspaceInvite,
   createMyWorkspace,
-  createWorkspaceInvite,
   getMyWorkspaces,
   type InviteRole,
   type OrganizationWorkspace,
 } from "@/lib/workspace-service";
 
-type DialogMode = "create" | "invite" | "join" | null;
+type DialogMode = "create" | "join" | null;
 
 function initials(value: string): string {
   const words = value.trim().split(/\s+/).filter(Boolean);
@@ -56,8 +52,14 @@ function tokenFromInput(value: string): string {
   }
 }
 
-export default function WorkspaceSwitcher() {
+export default function WorkspaceSwitcher({ onWorkspaceChange, onNavigate }: {
+  onWorkspaceChange?: (workspace: OrganizationWorkspace | null) => void;
+  onNavigate?: () => void;
+}) {
   const router = useRouter();
+  const pathname = usePathname();
+  const routeWorkspaceId = workspaceIdFromPathname(pathname);
+  const personalDriveRoute = !routeWorkspaceId && (pathname === "/drive" || pathname.startsWith("/drive/"));
   const { state: accountState } = useAccount();
   const account = accountState.status === "loaded" ? accountState.account : null;
   const username = account?.profile.username ?? "";
@@ -74,25 +76,40 @@ export default function WorkspaceSwitcher() {
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
   const [defaultMemberRole, setDefaultMemberRole] = useState<InviteRole>("viewer");
-  const [inviteWorkspaceId, setInviteWorkspaceId] = useState("");
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<InviteRole>("viewer");
-  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
-  const [copiedInvite, setCopiedInvite] = useState(false);
   const [joinInput, setJoinInput] = useState("");
+  const loadRequestId = useRef(0);
+  const popoverId = useId();
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 64, left: 16 });
 
-  const manageableWorkspaces = useMemo(
-    () => workspaces.filter((workspace) => workspace.canManage),
-    [workspaces],
-  );
+  useEffect(() => {
+    if (!expanded) return;
+    const close = () => popoverRef.current?.hidePopover();
+    window.addEventListener("resize", close);
+    return () => window.removeEventListener("resize", close);
+  }, [expanded]);
 
   const reloadWorkspaces = useCallback(async () => {
     if (!username) return [] as OrganizationWorkspace[];
+    const requestId = ++loadRequestId.current;
     setLoading(true);
     setLoadError(null);
     try {
-      const result = await getMyWorkspaces();
+      const result = (await getMyWorkspaces()).filter((workspace) => !workspace.isDefault);
+      if (requestId !== loadRequestId.current) return result;
       setWorkspaces(result.filter((workspace) => workspace.status === "active"));
+      const routeWorkspace = result.find((workspace) => workspace.id === routeWorkspaceId && workspace.status === "active");
+      if (routeWorkspace) {
+        setSelectedWorkspaceId(routeWorkspace.id);
+        setActiveWorkspaceSelection({ tenantId: routeWorkspace.tenantId, workspaceId: routeWorkspace.id, username });
+        return result;
+      }
+      if (routeWorkspaceId || personalDriveRoute) {
+        clearActiveWorkspaceSelection();
+        setSelectedWorkspaceId("");
+        if (routeWorkspaceId) setLoadError("This workspace is unavailable or you no longer have access.");
+        return result;
+      }
       const saved = getSavedWorkspaceSelection();
       const savedAvailable = Boolean(
         saved && saved.username === username && result.some(
@@ -108,48 +125,45 @@ export default function WorkspaceSwitcher() {
       }
       return result;
     } catch (error) {
-      setLoadError(errorMessage(error));
-      setWorkspaces([]);
+      if (requestId === loadRequestId.current) {
+        setLoadError(errorMessage(error));
+        setWorkspaces([]);
+      }
       return [] as OrganizationWorkspace[];
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestId.current) setLoading(false);
     }
-  }, [username]);
+  }, [username, routeWorkspaceId, personalDriveRoute]);
+
+  const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
+  useEffect(() => { onWorkspaceChange?.(selectedWorkspace); }, [onWorkspaceChange, selectedWorkspace]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void reloadWorkspaces(); }, 0);
     const onUpdated = () => { void reloadWorkspaces(); };
     const onWorkspaceChanged = () => {
       const saved = getSavedWorkspaceSelection();
+      if (routeWorkspaceId && saved?.workspaceId !== routeWorkspaceId) {
+        // Leaving a management route wins over its pending workspace lookup.
+        loadRequestId.current += 1;
+        setLoading(false);
+      }
       setSelectedWorkspaceId(saved?.username === username ? saved.workspaceId : "");
     };
     window.addEventListener(WORKSPACES_UPDATED_EVENT, onUpdated);
     window.addEventListener(WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
     return () => {
+      loadRequestId.current += 1;
       window.clearTimeout(timer);
       window.removeEventListener(WORKSPACES_UPDATED_EVENT, onUpdated);
       window.removeEventListener(WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
     };
-  }, [reloadWorkspaces, username]);
+  }, [reloadWorkspaces, username, routeWorkspaceId]);
 
-
-  const effectiveInviteWorkspaceId = manageableWorkspaces.some(
-    (workspace) => workspace.id === inviteWorkspaceId,
-  ) ? inviteWorkspaceId : (manageableWorkspaces[0]?.id ?? "");
 
   function openDialog(mode: Exclude<DialogMode, null>) {
+    popoverRef.current?.hidePopover();
     setFormError(null);
-    setInviteUrl(null);
-    setCopiedInvite(false);
-    if (mode === "invite") {
-      setInviteEmail("");
-      const selected = manageableWorkspaces.find((workspace) => workspace.id === inviteWorkspaceId)
-        ?? manageableWorkspaces[0];
-      if (selected) {
-        setInviteWorkspaceId(selected.id);
-        setInviteRole(selected.defaultMemberRole);
-      }
-    }
     if (mode === "join") setJoinInput("");
     setDialogMode(mode);
   }
@@ -158,7 +172,6 @@ export default function WorkspaceSwitcher() {
     if (submitting) return;
     setDialogMode(null);
     setFormError(null);
-    setInviteUrl(null);
   }
 
   function activateWorkspace(workspace: OrganizationWorkspace, notify = true) {
@@ -172,8 +185,12 @@ export default function WorkspaceSwitcher() {
   }
 
   function selectWorkspace(workspace: OrganizationWorkspace) {
+    loadRequestId.current += 1;
+    setLoading(false);
     activateWorkspace(workspace);
-    router.push("/drive");
+    popoverRef.current?.hidePopover();
+    onNavigate?.();
+    router.push(drivePath(workspace.id));
   }
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
@@ -193,28 +210,9 @@ export default function WorkspaceSwitcher() {
       setCreateName("");
       setCreateDescription("");
       setDialogMode(null);
-      router.push("/drive");
-    } catch (error) {
-      setFormError(errorMessage(error));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function handleInvite(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSubmitting(true);
-    setFormError(null);
-    setInviteUrl(null);
-    try {
-      const result = await createWorkspaceInvite(effectiveInviteWorkspaceId, {
-        email: inviteEmail.trim(),
-        role: inviteRole,
-      });
-      const url = new URL("/workspace-invite", window.location.origin);
-      url.searchParams.set("token", result.inviteToken);
-      setInviteUrl(url.toString());
-      window.dispatchEvent(new Event(WORKSPACES_UPDATED_EVENT));
+      setExpanded(false);
+      onNavigate?.();
+      router.push(drivePath(workspace.id));
     } catch (error) {
       setFormError(errorMessage(error));
     } finally {
@@ -240,7 +238,9 @@ export default function WorkspaceSwitcher() {
       window.dispatchEvent(new Event(WORKSPACES_UPDATED_EVENT));
       setJoinInput("");
       setDialogMode(null);
-      router.push("/drive");
+      setExpanded(false);
+      onNavigate?.();
+      router.push(drivePath(result.workspace.id));
     } catch (error) {
       setFormError(errorMessage(error));
     } finally {
@@ -248,111 +248,47 @@ export default function WorkspaceSwitcher() {
     }
   }
 
-  async function copyInvite() {
-    if (!inviteUrl) return;
-    try {
-      await navigator.clipboard.writeText(inviteUrl);
-      setCopiedInvite(true);
-    } catch {
-      setFormError("Could not copy automatically. Select and copy the invitation link below.");
-    }
-  }
-
   if (accountState.status !== "loaded") return null;
 
   return (
-    <section className="mx-3 mb-3 rounded-2xl border border-border bg-background p-3" aria-label="Workspaces">
-      <button
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-        className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left"
-      >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-contrast">
-          <Layers size={15} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[12px] font-semibold text-foreground">Workspaces</span>
-        </span>
-        {loading ? <LoaderCircle size={14} className="animate-spin text-muted" /> : expanded ? <ChevronDown size={15} className="text-muted" /> : <ChevronDown size={15} className="-rotate-90 text-muted" />}
+    <section className="min-w-0" aria-label="Workspace switcher">
+      <button type="button" popoverTarget={popoverId} aria-expanded={expanded} aria-controls={popoverId}
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          setPosition({ top: rect.bottom + 8, left: Math.max(16, Math.min(rect.left, window.innerWidth - 336)) });
+        }}
+        className="ui-control flex min-h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-border px-3 text-left transition-colors hover:bg-background">
+        <Layers size={18} className="shrink-0 text-brand-contrast" />
+        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={selectedWorkspace?.name}>{selectedWorkspace?.name || "Workspaces"}</span>
+        {loading ? <LoaderCircle size={15} className="shrink-0 animate-spin text-muted" /> : <ChevronDown size={15} className={`shrink-0 text-muted transition-transform ${expanded ? "rotate-180" : ""}`} />}
       </button>
-
-      {expanded && (
-        <>
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <button type="button" onClick={() => openDialog("create")} className="flex h-[30px] items-center justify-center gap-1 rounded-lg border border-border bg-surface px-1 text-[11px] font-medium text-foreground hover:bg-brand-soft hover:text-brand-contrast">
-              <Plus size={12} /> Create
-            </button>
-            <button type="button" onClick={() => openDialog("join")} className="flex h-[30px] items-center justify-center gap-1 rounded-lg border border-border bg-surface px-1 text-[11px] font-medium text-foreground hover:bg-brand-soft hover:text-brand-contrast">
-              <LogIn size={12} /> Join
-            </button>
-          </div>
-
-          <div className="mt-2 max-h-52 space-y-1 overflow-y-auto pr-0.5">
-            {workspaces.length === 0 && !loading && !loadError && (
-              <p className="px-1 py-2 text-[11px] leading-4 text-muted">No workspaces yet...</p>
-            )}
-            {workspaces.map((workspace) => {
-              const active = selectedWorkspaceId === workspace.id;
-              const avatar = workspace.isOwnedByMe ? ownInitials : workspace.createdByInitials || initials(workspace.createdByUsername);
-              return (
-                <div key={workspace.id} className={`flex items-center gap-1 rounded-xl pr-1 transition-colors ${active ? "bg-brand-soft" : "hover:bg-surface"}`}>
-                  <button
-                    type="button"
-                    onClick={() => selectWorkspace(workspace)}
-                    aria-pressed={active}
-                    title={`${workspace.name} · created by ${workspace.createdByUsername}`}
-                    className="flex min-w-0 flex-1 items-center gap-2 rounded-xl px-1.5 py-2 text-left"
-                  >
-                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${workspace.isOwnedByMe ? "bg-brand-contrast text-white" : "border border-border bg-surface text-foreground"}`}>
-                      {avatar}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className={`block truncate text-xs font-semibold ${active ? "text-brand-contrast" : "text-foreground"}`}>{workspace.name}</span>
-                      <span className="block truncate text-[10px] text-muted">{workspace.isOwnedByMe ? "Created by you" : `By ${workspace.createdByUsername}`} · {workspace.currentUserRole ?? "Member"}</span>
-                    </span>
-                    {active && <Check size={13} className="shrink-0 text-brand-contrast" />}
-                  </button>
-                  {workspace.canManage && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        activateWorkspace(workspace, false);
-                        window.dispatchEvent(new Event(FOLDER_TREE_REFRESH_EVENT));
-                        router.push(`/drive/workspaces/${encodeURIComponent(workspace.id)}/members`);
-                      }}
-                      aria-label={`Manage ${workspace.name} members`}
-                      title="Manage workspace members"
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface hover:text-brand-contrast"
-                    >
-                      <Users size={13} />
-                    </button>
-                  )}
-                  {workspace.canManage && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        // A silent context switch avoids the Drive browser's
-                        // folder-reset navigation racing the timeline route.
-                        activateWorkspace(workspace, false);
-                        window.dispatchEvent(new Event(FOLDER_TREE_REFRESH_EVENT));
-                        router.push(`/drive/workspaces/${encodeURIComponent(workspace.id)}/activity`);
-                      }}
-                      aria-label={`Open ${workspace.name} timeline`}
-                      title="Workspace timeline"
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface hover:text-brand-contrast"
-                    >
-                      <Clock3 size={13} />
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {loadError && <p role="status" className="mt-2 text-[11px] leading-4 text-danger">{loadError}</p>}
-        </>
-      )}
-
+      <div ref={popoverRef} id={popoverId} popover="auto" onToggle={(event) => setExpanded(event.newState === "open")} style={position}
+        className="fixed m-0 max-h-[min(70dvh,32rem)] w-80 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-2xl border border-border bg-surface p-2 text-foreground shadow-[var(--shadow-popover)]">
+        <button type="button" onClick={() => {
+          loadRequestId.current += 1; setLoading(false); setSelectedWorkspaceId("");
+          clearActiveWorkspaceSelection(); popoverRef.current?.hidePopover(); onNavigate?.(); router.push("/drive");
+        }} aria-pressed={!selectedWorkspaceId} className={`flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left ${!selectedWorkspaceId ? "bg-brand-soft" : "hover:bg-background"}`}>
+          <HardDrive size={20} className="shrink-0 text-brand-contrast" /><span className="flex-1 text-sm font-semibold">My Drive</span>
+          {!selectedWorkspaceId && <Check size={16} className="text-brand-contrast" />}
+        </button>
+        <div className="my-2 grid grid-cols-2 gap-2 border-y border-border py-3">
+          <Button variant="secondary" size="sm" onClick={() => openDialog("create")}><Plus size={16} />Create</Button>
+          <Button variant="secondary" size="sm" onClick={() => openDialog("join")}><LogIn size={16} />Join</Button>
+        </div>
+        {loading && workspaces.length === 0 && <p role="status" className="px-3 py-4 text-sm text-muted">Loading workspaces…</p>}
+        {workspaces.length === 0 && !loading && !loadError && <p className="px-3 py-4 text-sm leading-6 text-muted">Create a workspace or join with an invitation link.</p>}
+        <div className="space-y-1">{workspaces.map((workspace) => {
+          const active = selectedWorkspaceId === workspace.id;
+          const avatar = workspace.isOwnedByMe ? ownInitials : workspace.createdByInitials || initials(workspace.createdByUsername);
+          return <button key={workspace.id} type="button" onClick={() => selectWorkspace(workspace)} aria-pressed={active} title={`${workspace.name} · created by ${workspace.createdByUsername}`}
+            className={`flex min-h-14 w-full min-w-0 items-center gap-3 rounded-xl px-3 py-2 text-left ${active ? "bg-brand-soft" : "hover:bg-background"}`}>
+            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${workspace.isOwnedByMe ? "bg-brand-contrast text-on-accent" : "border border-border bg-background text-foreground"}`}>{avatar}</span>
+            <span className="min-w-0 flex-1"><span className={`block truncate text-sm font-semibold ${active ? "text-brand-contrast" : "text-foreground"}`}>{workspace.name}</span><span className="block truncate text-xs text-muted">{workspace.isOwnedByMe ? "Created by you" : `By ${workspace.createdByUsername}`} · {workspace.currentUserRole ?? "Member"}</span></span>
+            {active && <Check size={16} className="shrink-0 text-brand-contrast" />}
+          </button>;
+        })}</div>
+        {loadError && <div role="status" className="px-3 py-3 text-sm leading-6 text-danger"><p>{loadError}</p><Button variant="ghost" size="sm" onClick={() => { void reloadWorkspaces(); }}>Try again</Button></div>}
+      </div>
       <Dialog
         open={dialogMode === "create"}
         title="Create a workspace"
@@ -385,63 +321,6 @@ export default function WorkspaceSwitcher() {
             <Button type="submit" loading={submitting} disabled={!createName.trim()}>Create workspace</Button>
           </div>
         </form>
-      </Dialog>
-
-      <Dialog
-        open={dialogMode === "invite"}
-        title={inviteUrl ? "Invitation link created" : "Invite a member"}
-        description={inviteUrl ? "Copy the link and send it to the invited person." : "Invitations are tied to the recipient's account email and expire in 7 days."}
-        onClose={closeDialog}
-      >
-        {inviteUrl ? (
-          <div className="space-y-4">
-            <div className="rounded-xl border border-border bg-background p-3">
-              <p className="mb-2 text-xs font-semibold text-foreground">Invitation link</p>
-              <input readOnly value={inviteUrl} onFocus={(event) => event.currentTarget.select()} className="h-10 w-full rounded-lg border border-border bg-surface px-2 text-xs text-foreground outline-none" />
-            </div>
-            <p className="text-xs leading-5 text-muted">The link grants the role selected for this invitation. The recipient must sign in with {inviteEmail || "the invited email address"}.</p>
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => { setDialogMode(null); setInviteUrl(null); setInviteEmail(""); }}>Done</Button>
-              <Button onClick={() => { void copyInvite(); }}><Copy size={14} /> {copiedInvite ? "Copied" : "Copy link"}</Button>
-            </div>
-          </div>
-        ) : (
-          <form className="space-y-4" onSubmit={handleInvite}>
-            {manageableWorkspaces.length === 0 ? (
-              <p className="rounded-xl border border-border bg-background p-3 text-sm leading-6 text-muted">You do not manage any workspace yet. Create one or ask a workspace admin to invite members.</p>
-            ) : (
-              <>
-                <label className="block space-y-1.5">
-                  <span className="text-xs font-semibold text-foreground">Workspace</span>
-                  <select required value={effectiveInviteWorkspaceId} onChange={(event) => {
-                    const nextId = event.currentTarget.value;
-                    setInviteWorkspaceId(nextId);
-                    const nextWorkspace = manageableWorkspaces.find((workspace) => workspace.id === nextId);
-                    if (nextWorkspace) setInviteRole(nextWorkspace.defaultMemberRole);
-                  }} className="h-10 w-full rounded-xl border border-border bg-background px-3 text-sm outline-none focus:border-brand">
-                    {manageableWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
-                  </select>
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-xs font-semibold text-foreground">Email address</span>
-                  <input autoFocus required type="email" maxLength={254} value={inviteEmail} onChange={(event) => setInviteEmail(event.currentTarget.value)} placeholder="colleague@example.com" className="h-10 w-full rounded-xl border border-border bg-background px-3 text-sm outline-none focus:border-brand" />
-                </label>
-                <label className="block space-y-1.5">
-                  <span className="text-xs font-semibold text-foreground">Permission</span>
-                  <select value={inviteRole} onChange={(event) => setInviteRole(event.currentTarget.value as InviteRole)} className="h-10 w-full rounded-xl border border-border bg-background px-3 text-sm outline-none focus:border-brand">
-                    <option value="viewer">Viewer — can view and download</option>
-                    <option value="editor">Editor — can add and manage files</option>
-                  </select>
-                </label>
-              </>
-            )}
-            {formError && <p role="alert" className="text-xs leading-5 text-danger">{formError}</p>}
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={closeDialog} disabled={submitting}>Cancel</Button>
-              <Button type="submit" loading={submitting} disabled={manageableWorkspaces.length === 0 || !inviteEmail.trim() || !effectiveInviteWorkspaceId}><Link2 size={14} /> Create invitation</Button>
-            </div>
-          </form>
-        )}
       </Dialog>
 
       <Dialog

@@ -4,15 +4,18 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  Activity, Building2, ChevronDown, ChevronRight, Database, FileText, HardDrive,
+  Activity, Building2, ChevronDown, ChevronRight, Database, FileText,
   LayoutDashboard, Menu, Settings2, ShieldAlert, SunMoon, Users, Workflow, X,
 } from "lucide-react";
 import { BrandLogo } from "@/components/ui/BrandLogo";
 import ContextMenu, { type ContextMenuAction } from "@/components/ui/ContextMenu";
 import Toast from "@/components/ui/Toast";
+import Button from "@/components/ui/Button";
 import { useAccount } from "@/components/account/AccountProvider";
 import { readThemePreference, resolveTheme, setThemePreference } from "@/lib/theme";
 import { ADMIN_CONSOLE_NAME_UPDATED, getAdminSettings } from "@/lib/admin-settings-service";
+import useNavigationDrawer from "./useNavigationDrawer";
+import StorageNavigationLink from "@/components/storage/StorageNavigationLink";
 
 const groups = [
   {
@@ -21,14 +24,13 @@ const groups = [
       { title: "Users", href: "/admin/users", icon: Users },
       { title: "Organizations", href: "/admin/organizations", icon: Building2 },
       { title: "Workspaces", href: "/admin/workspaces", icon: Workflow },
-      { title: "Teams", href: "/admin/teams", icon: Users },
       { title: "Files", href: "/admin/files", icon: FileText },
     ],
   },
   {
     title: "Security", icon: ShieldAlert,
     items: [
-      { title: "Security Alerts", href: "/admin/security/alerts", icon: ShieldAlert },
+      { title: "Roles & Permissions", href: "/admin/permissions", icon: ShieldAlert },
       { title: "User Activity", href: "/admin/activity", icon: Activity },
       { title: "Admin Audit Logs", href: "/admin/audit", icon: Activity },
     ],
@@ -37,7 +39,6 @@ const groups = [
     title: "Infrastructure", icon: Database,
     items: [
       { title: "System Health", href: "/admin/infrastructure", icon: Activity },
-      { title: "Storage Topology", href: "/admin/infrastructure/topology", icon: HardDrive },
       { title: "Storage & Quotas", href: "/admin/infrastructure/quotas", icon: Database },
     ],
   },
@@ -54,6 +55,7 @@ type Access = { allowed: boolean; username: string; email: string };
 
 /** Choose the most specific match so System Health is not active on Storage Topology. */
 function navItemActive(href: string, pathname: string) {
+  if (href === "/admin/infrastructure" && (pathname === "/admin/infrastructure/topology" || pathname.startsWith("/admin/infrastructure/topology/"))) return false;
   if (pathname === href) return true;
   if (!pathname.startsWith(`${href}/`)) return false;
   return !groups.some(({ items }) => items.some(({ href: moreSpecific }) =>
@@ -65,35 +67,46 @@ function navItemActive(href: string, pathname: string) {
 export default function AdminConsole({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { state, signOut, actionError, clearActionError } = useAccount();
+  const { state, refresh, signOut, actionError, clearActionError } = useAccount();
   const [access, setAccess] = useState<Access | null>(null);
   const [consoleName, setConsoleName] = useState("Platform console");
   const [error, setError] = useState("");
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [accessAttempt, setAccessAttempt] = useState(0);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const mobileNav = useRef<HTMLElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
-  const hadMobileNavOpen = useRef(false);
+  useNavigationDrawer(mobileOpen, setMobileOpen, mobileNav, menuButton);
 
   useEffect(() => {
     if (state.status !== "loaded" || !state.account) return;
     const controller = new AbortController();
+    let denied = false;
     fetch(`${apiOrigin}/accounts/api/admin/access/`, {
       credentials: "include", signal: controller.signal, cache: "no-store",
     }).then(async (response) => {
-      if (!response.ok) throw new Error(response.status === 403
-        ? "This account does not have platform administrator access."
-        : `Unable to verify administrator access (HTTP ${response.status}).`);
+      if (!response.ok) {
+        denied = response.status === 401 || response.status === 403;
+        throw new Error(denied
+          ? "This account does not have platform administrator access."
+          : "The administrator access service is unavailable. Please retry.");
+      }
       return response.json() as Promise<Access>;
     }).then((result) => {
       if (controller.signal.aborted) return;
       setAccess(result);
+      setAccessDenied(!result.allowed);
       setError("");
     }).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Access check failed.");
+      if (!controller.signal.aborted) {
+        setAccess(null);
+        setAccessDenied(denied);
+        setError(reason instanceof TypeError ? "Could not connect to verify administrator access. Check your connection and retry." : reason instanceof Error ? reason.message : "Access check failed. Please retry.");
+      }
     });
     return () => controller.abort();
-  }, [state.status, state.account]);
+  }, [state.status, state.account, accessAttempt]);
 
   useEffect(() => {
     if (!access?.allowed) return;
@@ -114,32 +127,22 @@ export default function AdminConsole({ children }: { children: ReactNode }) {
     };
   }, [access?.allowed]);
 
-  useEffect(() => {
-    if (mobileOpen) mobileNav.current?.querySelector<HTMLAnchorElement>("a")?.focus();
-    else if (hadMobileNavOpen.current) menuButton.current?.focus();
-    hadMobileNavOpen.current = mobileOpen;
-  }, [mobileOpen]);
-  useEffect(() => {
-    if (!mobileOpen) return;
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setMobileOpen(false);
-    }
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [mobileOpen]);
 
   const activeGroup = groups.find(({ items }) => items.some(({ href }) => pathname === href || pathname.startsWith(`${href}/`)))?.title;
   const groupIsOpen = (title: string) => expanded[title] ?? title === activeGroup;
   const activeDashboard = pathname === "/admin";
 
   if (state.status === "error" || (state.status === "loaded" && !state.account)) {
-    return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="max-w-md text-center"><h1 className="text-xl font-semibold">Sign in required</h1><p className="mt-2 text-sm text-muted">{state.status === "error" ? state.error : "Sign in to continue."}</p><Link href="/login?next=%2Fadmin" className="mt-4 inline-block text-sm font-semibold text-brand">Sign in</Link></div></main>;
+    if (state.status === "error" && !state.authenticationRequired) {
+      return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="max-w-md text-center"><h1 className="text-xl font-semibold">Could not load your account</h1><p role="alert" className="mt-2 text-sm text-muted">{state.error}</p><Button className="mt-4" onClick={() => void refresh()}>Retry</Button></div></main>;
+    }
+    return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="max-w-md text-center"><h1 className="text-xl font-semibold">Sign in required</h1><p className="mt-2 text-sm text-muted">{state.status === "error" ? state.error : "Sign in to continue."}</p><Link href="/login?next=%2Fadmin" className="mt-4 inline-block text-sm font-semibold text-brand-contrast">Sign in</Link></div></main>;
   }
   if (state.status !== "loaded" || (!access && !error)) {
     return <main className="flex min-h-screen items-center justify-center bg-background text-sm text-muted" role="status">Verifying administrator access…</main>;
   }
   if (error || !access?.allowed) {
-    return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="w-full max-w-md rounded-2xl border border-border bg-surface p-7"><h1 className="text-xl font-semibold">Administrator access required</h1><p role="alert" className="mt-3 text-sm text-muted">{error || "Access denied."}</p><Link href="/login?next=%2Fadmin" className="mt-5 inline-block text-sm font-semibold text-brand">Sign in as admin</Link></div></main>;
+    return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="w-full max-w-md rounded-2xl border border-border bg-surface p-7"><h1 className="text-xl font-semibold">{accessDenied ? "Administrator access required" : "Could not verify administrator access"}</h1><p role="alert" className="mt-3 text-sm text-muted">{error || "Access denied."}</p>{accessDenied ? <Link href="/login?next=%2Fadmin" className="mt-5 inline-block text-sm font-semibold text-brand-contrast">Sign in as admin</Link> : <Button className="mt-5" onClick={() => { setAccess(null); setError(""); setAccessAttempt((attempt) => attempt + 1); }}>Retry</Button>}</div></main>;
   }
 
   const initials = access.username.trim().slice(0, 2).toUpperCase() || "AD";
@@ -149,18 +152,18 @@ export default function AdminConsole({ children }: { children: ReactNode }) {
     { label: "Sign out", destructive: true, onSelect: () => { void signOut().catch(() => undefined); } },
   ];
   const navLinkClass = (selected: boolean) => [
-    "flex h-10 items-center gap-3 rounded-xl px-3 text-[14px] transition-colors duration-(--motion-fast)",
-    selected ? "bg-brand-soft font-semibold text-brand-contrast shadow-[inset_3px_0_0_var(--brand-primary-contrast)]" : "font-medium text-muted hover:bg-background hover:text-foreground",
+    "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm transition-colors duration-(--motion-fast)",
+    selected ? "bg-brand-soft font-semibold text-brand-contrast" : "font-medium text-muted hover:bg-background hover:text-foreground",
   ].join(" ");
 
-  return <div className="flex h-screen overflow-hidden bg-background text-foreground">
+  return <div className="admin-console flex h-dvh overflow-hidden bg-background text-foreground">
     {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-foreground/35 lg:hidden" onClick={() => setMobileOpen(false)} />}
-    <aside ref={mobileNav} id="admin-navigation" className={`fixed inset-y-0 left-0 z-50 flex h-screen w-57.5 shrink-0 flex-col border-r border-border bg-surface transition-transform duration-(--motion-normal) lg:static lg:z-auto lg:translate-x-0 ${mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"}`}>
+    <aside ref={mobileNav} id="admin-navigation" className={`fixed inset-y-0 left-0 z-50 flex h-dvh w-64 max-w-[calc(100vw-3rem)] shrink-0 flex-col border-r border-border bg-surface transition-transform duration-(--motion-normal) lg:static lg:z-auto lg:translate-x-0 ${mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"}`}>
       <div className="flex h-18 shrink-0 items-center justify-between px-4">
         <Link href="/admin" onClick={() => setMobileOpen(false)} aria-label="BlueDrive Admin dashboard"><BrandLogo /></Link>
         <button type="button" aria-label="Close navigation" onClick={() => setMobileOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-brand-soft hover:text-brand-contrast lg:hidden"><X size={18} /></button>
       </div>
-      <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4" aria-label="Admin navigation">
+      <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4" aria-label="Admin navigation">
         <Link href="/admin" aria-current={activeDashboard ? "page" : undefined} onClick={() => setMobileOpen(false)} className={navLinkClass(activeDashboard)}><LayoutDashboard size={17} /><span>Dashboard</span></Link>
         <div className="mt-4 space-y-2">
           {groups.map(({ title, icon: Icon, items }) => {
@@ -173,8 +176,9 @@ export default function AdminConsole({ children }: { children: ReactNode }) {
               {open && <div id={`admin-nav-${title}`} className="ml-5 space-y-0.5 border-l border-border pl-2 py-1">
                 {items.map(({ title: label, href, icon: ChildIcon }) => {
                   const isSelected = navItemActive(href, pathname);
-                  return <Link key={href} href={href} aria-current={isSelected ? "page" : undefined} onClick={() => setMobileOpen(false)} className={`flex min-h-9 items-center gap-2 rounded-lg px-2.5 py-1.5 text-[12px] transition-colors duration-(--motion-fast) ${isSelected ? "bg-brand-soft font-semibold text-brand-contrast" : "text-muted hover:bg-background hover:text-foreground"}`}><ChildIcon size={14} /><span>{label}</span></Link>;
+                  return <Link key={href} href={href} aria-current={isSelected ? "page" : undefined} onClick={() => setMobileOpen(false)} className={`flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors duration-(--motion-fast) ${isSelected ? "bg-brand-soft font-semibold text-brand-contrast" : "text-muted hover:bg-background hover:text-foreground"}`}><ChildIcon size={16} className="shrink-0" /><span>{label}</span></Link>;
                 })}
+                {title === "Infrastructure" && <StorageNavigationLink onNavigate={() => setMobileOpen(false)} />}
               </div>}
             </section>;
           })}
@@ -190,9 +194,9 @@ export default function AdminConsole({ children }: { children: ReactNode }) {
           <button type="button" aria-label="Toggle light or dark theme" title="Toggle theme" onClick={toggleTheme} className="flex h-9 w-9 items-center justify-center rounded-xl text-muted hover:bg-brand-soft hover:text-brand-contrast"><SunMoon size={17} /></button>
           <ContextMenu
             label={`Account actions for ${access.username}`}
-            trigger={<><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-semibold text-brand">{initials}</span><span className="hidden max-w-36 truncate text-[13px] font-semibold xl:block">{access.username}</span></>}
+            trigger={<><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-semibold text-brand-contrast">{initials}</span><span className="hidden max-w-36 truncate text-[13px] font-semibold xl:block">{access.username}</span></>}
             triggerClassName="flex min-h-10 items-center gap-2 rounded-lg p-1 text-left transition-colors hover:bg-background"
-            header={<div className="flex min-w-56 items-center gap-3 px-1 py-1"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-semibold text-brand">{initials}</span><div className="min-w-0"><p className="truncate text-[13px] font-semibold text-foreground">{access.username}</p><p className="max-w-48 truncate text-[11px] text-muted">{access.email || "Platform administrator"}</p><p className="mt-0.5 text-[11px] font-medium text-brand-contrast">Platform Admin</p></div></div>}
+            header={<div className="flex min-w-56 items-center gap-3 px-1 py-1"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-semibold text-brand-contrast">{initials}</span><div className="min-w-0"><p className="truncate text-[13px] font-semibold text-foreground">{access.username}</p><p className="max-w-48 truncate text-[11px] text-muted">{access.email || "Platform administrator"}</p><p className="mt-0.5 text-[11px] font-medium text-brand-contrast">Platform Admin</p></div></div>}
             actions={accountActions}
           />
         </div>

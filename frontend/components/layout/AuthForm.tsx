@@ -8,9 +8,9 @@ import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import { AccountServiceError } from "@/lib/account-service";
 import { djangoAuthService } from "@/lib/auth-service";
-import { safeInternalRedirect } from "@/lib/auth-redirect";
+import { authFormHref, safeInternalRedirect } from "@/lib/auth-redirect";
 
-export default function AuthForm({ mode }: { mode: "login" | "register" }) {
+export default function AuthForm({ mode, nextPath }: { mode: "login" | "register"; nextPath?: string }) {
   const isRegister = mode === "register";
   const passwordFieldName = isRegister ? "password1" : "password";
   const router = useRouter();
@@ -42,7 +42,7 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
           });
         setRegistrationAccepted(true);
         setMessage(
-          "If registration can be completed, you can sign in to continue. If you cannot sign in, check your details or contact support.",
+          "If registration can be completed, you can sign in to continue. If you cannot sign in, check your details and try again.",
         );
         return;
       }
@@ -51,7 +51,7 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
         password: String(formData.get(passwordFieldName) ?? ""),
       });
       acceptAuthenticatedAccount(account);
-      const next = new URLSearchParams(window.location.search).get("next");
+      const next = nextPath;
       router.replace(account.is_platform_admin ? "/admin" : (safeInternalRedirect(next).startsWith("/admin") ? "/drive" : safeInternalRedirect(next)));
     } catch (error) {
       if (error instanceof AccountServiceError) {
@@ -146,7 +146,7 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
                   type="button"
                   aria-label={showPassword ? "Hide password" : "Show password"}
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-muted hover:bg-background"
+                  className="ui-control absolute right-1 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-lg text-muted hover:bg-background"
                 >
                   {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
                 </button>
@@ -173,12 +173,6 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
               </label>
             )}
 
-            {!isRegister && (
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted">Password recovery is not available yet.</span>
-              </div>
-            )}
-
             {message && <p role={registrationAccepted ? "status" : "alert"} className={`rounded-[var(--radius-control)] border p-3 text-sm leading-5 ${registrationAccepted ? "border-success/20 bg-success/10 text-success" : "border-danger/20 bg-danger/10 text-danger"}`}>{message}</p>}
 
             <Button type="submit" variant="primary" size="lg" loading={pending} className="w-full">
@@ -189,7 +183,7 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
 
           <p className="mt-7 text-center text-sm text-muted">
             {isRegister ? "Already have an account?" : "Don't have an account?"}{" "}
-            <Link href={isRegister ? "/login" : "/register"} className="rounded-sm font-semibold text-brand-contrast hover:text-brand-dark">
+            <Link href={authFormHref(isRegister ? "login" : "register", nextPath)} className="rounded-sm font-semibold text-brand-contrast hover:text-brand-dark">
               {isRegister ? "Sign in" : "Create account"}
             </Link>
           </p>

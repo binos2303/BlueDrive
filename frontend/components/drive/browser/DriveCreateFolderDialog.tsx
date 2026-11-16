@@ -1,5 +1,7 @@
 "use client";
 
+import Dialog from "@/components/ui/Dialog";
+
 type DriveCreateFolderDialogProps = {
   open: boolean;
   creating: boolean;
@@ -14,29 +16,7 @@ export default function DriveCreateFolderDialog({
   open, creating, name, error, onNameChange, onClose, onCreate,
 }: DriveCreateFolderDialogProps) {
   return (
-    <>
-      {open && (
-        <div
-          className="fixed inset-0 z-100 flex items-center justify-center bg-black/30 p-4"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !creating) {
-              onClose();
-            }
-          }}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="create-folder-title"
-            className="w-full max-w-126.5 rounded-4xl bg-background px-7.5 pb-7 pt-7.5 shadow-xl"
-          >
-            <h2
-              id="create-folder-title"
-              className="mb-6 text-[28px] font-normal tracking-tight text-foreground"
-            >
-              New folder
-            </h2>
-
+    <Dialog open={open} title="New folder" onClose={onClose} closeDisabled={creating}>
             <form
               onSubmit={(event) => {
                 event.preventDefault();
@@ -58,7 +38,7 @@ export default function DriveCreateFolderDialog({
               />
 
               {error && (
-                <p className="mt-2 text-sm text-red-600" role="alert">
+                <p className="mt-2 text-sm text-danger" role="alert">
                   {error}
                 </p>
               )}
@@ -82,11 +62,6 @@ export default function DriveCreateFolderDialog({
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-
-    </>
+    </Dialog>
   );
 }

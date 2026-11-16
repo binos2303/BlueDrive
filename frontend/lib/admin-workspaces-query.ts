@@ -1,11 +1,11 @@
-/** Teams are active collaboration workspaces, not a separate role system. */
-export type AdminTeamScope = "all" | "personal" | "organization";
-export type AdminTeamSort = "newest" | "oldest" | "name_asc" | "name_desc";
+/** Collaboration membership is assigned through workspaces. */
+export type AdminWorkspaceScope = "all" | "personal" | "organization";
+export type AdminWorkspaceSort = "newest" | "oldest" | "name_asc" | "name_desc";
 
-export function buildAdminTeamQuery(options: {
+export function buildAdminWorkspaceQuery(options: {
   query: string;
-  scope: AdminTeamScope;
-  sort: AdminTeamSort;
+  scope: AdminWorkspaceScope;
+  sort: AdminWorkspaceSort;
   page: number;
 }): string {
   const page = Number.isSafeInteger(options.page) && options.page > 0 ? Math.min(options.page, 100000) : 1;

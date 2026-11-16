@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Building2, FolderKanban, Plus, RefreshCw, Users } from "lucide-react";
 import { useAccount } from "@/components/account/AccountProvider";
 import Button from "@/components/ui/Button";
@@ -19,6 +19,7 @@ import {
   type WorkspaceMemberAssignment,
 } from "@/lib/organization-admin-service";
 import type { OrganizationWorkspace } from "@/lib/workspace-service";
+import { isWorkspaceRole } from "@/lib/workspace-member-policy";
 import { WORKSPACES_UPDATED_EVENT } from "@/lib/workspace-context";
 
 type AdminTab = "workspaces" | "members";
@@ -65,10 +66,18 @@ export default function OrganizationAdminPage() {
   const [accessError, setAccessError] = useState<string | null>(null);
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [selectedRole, setSelectedRole] = useState<WorkspaceRole>("viewer");
+  const accessRequestId = useRef(0);
+  const [pendingMemberChange, setPendingMemberChange] = useState<{
+    workspaceId: string;
+    member: WorkspaceMemberAssignment;
+    role?: WorkspaceRole;
+  } | null>(null);
 
   const activeMembers = useMemo(() => members.filter((member) => member.status === "active"), [members]);
   const assignedIds = new Set(assignments.filter((item) => item.status === "active").map((item) => item.membershipId));
   const availableMembers = activeMembers.filter((member) => !assignedIds.has(member.membershipId));
+
+  useEffect(() => () => { accessRequestId.current += 1; }, [tenantId]);
 
   const load = useCallback(async () => {
     if (!tenantId) return;
@@ -111,16 +120,20 @@ export default function OrganizationAdminPage() {
 
   const refreshAccess = useCallback(async (workspace: OrganizationWorkspace) => {
     if (!tenantId) return;
+    const requestId = ++accessRequestId.current;
     setAccessLoading(true);
+    setAccessError(null);
     try {
       const result = await getWorkspaceMembers(tenantId, workspace.id);
+      if (requestId !== accessRequestId.current) return;
       setAssignments(result.members);
       setAccessError(null);
     } catch (cause) {
+      if (requestId !== accessRequestId.current) return;
       setAccessError(errorMessage(cause));
       throw cause;
     } finally {
-      setAccessLoading(false);
+      if (requestId === accessRequestId.current) setAccessLoading(false);
     }
   }, [tenantId]);
 
@@ -147,6 +160,7 @@ export default function OrganizationAdminPage() {
   }
 
   function openForm(workspace?: OrganizationWorkspace) {
+    setError(null);
     setEditing(workspace ?? null);
     setName(workspace?.name ?? "");
     setDescription(workspace?.description ?? "");
@@ -188,6 +202,12 @@ export default function OrganizationAdminPage() {
     void refreshAccess(workspace).catch(() => undefined);
   }
 
+  function closeAccess() {
+    accessRequestId.current += 1;
+    setSelectedWorkspace(null);
+    setPendingMemberChange(null);
+  }
+
   async function grantMember(membershipId: string, role: WorkspaceRole) {
     if (!tenantId || !selectedWorkspace) return;
     const success = await perform(
@@ -195,14 +215,24 @@ export default function OrganizationAdminPage() {
       "Workspace access updated.", selectedWorkspace,
     );
     if (success) setSelectedMemberId("");
+    return success;
   }
 
   async function revokeMember(membershipId: string) {
     if (!tenantId || !selectedWorkspace) return;
-    await perform(
+    return perform(
       () => removeWorkspaceMember(tenantId, selectedWorkspace.id, membershipId),
       "Workspace access removed.", selectedWorkspace,
     );
+  }
+
+  async function confirmMemberChange() {
+    if (!pendingMemberChange || saving || selectedWorkspace?.id !== pendingMemberChange.workspaceId) return;
+    const { member, role } = pendingMemberChange;
+    const success = role
+      ? await grantMember(member.membershipId, role)
+      : await revokeMember(member.membershipId);
+    if (success) setPendingMemberChange(null);
   }
 
   if (state.status === "loading") return <div className="p-8 text-muted">Loading account…</div>;
@@ -224,7 +254,7 @@ export default function OrganizationAdminPage() {
         <Button variant="secondary" loading={loading} onClick={() => void load()}><RefreshCw size={16} /> Refresh</Button>
       </header>
 
-      {error && <p role="alert" className="rounded-xl border border-rose-200 p-3 text-sm text-danger">{error}</p>}
+      {error && !formOpen && !archiveTarget && <p role="alert" className="rounded-xl border border-danger/30 p-3 text-sm text-danger">{error}</p>}
       {notice && <p role="status" className="rounded-xl border border-border p-3 text-sm">{notice}</p>}
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -251,7 +281,7 @@ export default function OrganizationAdminPage() {
                 <td className={tableCellClass}><div className="flex flex-wrap gap-1">
                   <Button variant="ghost" size="sm" onClick={() => openAccess(workspace)}>Access</Button>
                   <Button variant="ghost" size="sm" onClick={() => openForm(workspace)}>Edit</Button>
-                  <Button variant="ghost" size="sm" disabled={workspace.isDefault && workspace.status === "active"} onClick={() => setArchiveTarget(workspace)}>{workspace.status === "active" ? "Archive" : "Restore"}</Button>
+                  <Button variant="ghost" size="sm" disabled={workspace.isDefault && workspace.status === "active"} onClick={() => { setError(null); setArchiveTarget(workspace); }}>{workspace.status === "active" ? "Archive" : "Restore"}</Button>
                 </div></td>
               </tr>
             ))}</tbody>
@@ -266,15 +296,16 @@ export default function OrganizationAdminPage() {
         )}
       </section>
 
-      <Dialog open={formOpen} title={editing ? "Edit workspace" : "Create workspace"} onClose={() => setFormOpen(false)}>
+      <Dialog open={formOpen} title={editing ? "Edit workspace" : "Create workspace"} onClose={() => setFormOpen(false)} closeDisabled={saving}>
         <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void saveWorkspace(); }}>
+          {error && <p role="alert" className="text-sm text-danger">{error}</p>}
           <label className="block text-sm">Name<input className={`${inputClass} mt-1`} value={name} maxLength={255} required onChange={(event) => setName(event.target.value)} /></label>
           <label className="block text-sm">Description<textarea className={`${inputClass} mt-1`} value={description} maxLength={4000} rows={3} onChange={(event) => setDescription(event.target.value)} /></label>
-          <div className="flex justify-end gap-2"><Button variant="secondary" onClick={() => setFormOpen(false)}>Cancel</Button><Button type="submit" loading={saving} disabled={!name.trim()}>Save</Button></div>
+          <div className="flex justify-end gap-2"><Button variant="secondary" disabled={saving} onClick={() => setFormOpen(false)}>Cancel</Button><Button type="submit" loading={saving} disabled={!name.trim()}>Save</Button></div>
         </form>
       </Dialog>
 
-      <Dialog open={Boolean(selectedWorkspace)} title={selectedWorkspace ? `${selectedWorkspace.name} members` : "Workspace access"} description="Assign access directly to organization members." onClose={() => setSelectedWorkspace(null)} className="w-[min(100%-2rem,50rem)]">
+      <Dialog open={Boolean(selectedWorkspace)} title={selectedWorkspace ? `${selectedWorkspace.name} members` : "Workspace access"} description="Assign access directly to organization members." onClose={closeAccess} closeDisabled={saving} className="w-[min(calc(100%_-_2rem),50rem)]">
         {selectedWorkspace && <div className="space-y-4">
           {accessError && <p role="alert" className="text-sm text-danger">{accessError}</p>}
           <form className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem_auto]" onSubmit={(event) => { event.preventDefault(); if (selectedMemberId) void grantMember(selectedMemberId, selectedRole); }}>
@@ -294,11 +325,20 @@ export default function OrganizationAdminPage() {
                 <tr key={member.assignmentId}>
                   <td className={tableCellClass}>{member.username}<p className="text-xs text-muted">{member.email}</p></td>
                   <td className={tableCellClass}>
-                    <select aria-label={`Role for ${member.username}`} className={inputClass} value={member.workspaceRole} disabled={saving || selectedWorkspace.status !== "active"} onChange={(event) => void grantMember(member.membershipId, event.target.value as WorkspaceRole)}>
+                    <select aria-label={`Role for ${member.username}`} className={inputClass} value={member.workspaceRole} disabled={saving || selectedWorkspace.status !== "active"} onChange={(event) => {
+                      const role = event.target.value;
+                      if (isWorkspaceRole(role) && role !== member.workspaceRole) {
+                        setAccessError(null);
+                        setPendingMemberChange({ workspaceId: selectedWorkspace.id, member, role });
+                      }
+                    }}>
                       {roles.map((role) => <option key={role} value={role}>{formatRole(role)}</option>)}
                     </select>
                   </td>
-                  <td className={tableCellClass}><Button variant="ghost" size="sm" disabled={saving || selectedWorkspace.status !== "active"} onClick={() => void revokeMember(member.membershipId)}>Remove</Button></td>
+                  <td className={tableCellClass}><Button variant="ghost" size="sm" disabled={saving || selectedWorkspace.status !== "active"} onClick={() => {
+                    setAccessError(null);
+                    setPendingMemberChange({ workspaceId: selectedWorkspace.id, member });
+                  }}>Remove</Button></td>
                 </tr>
               ))}</tbody>
             </DataTable>
@@ -306,7 +346,16 @@ export default function OrganizationAdminPage() {
         </div>}
       </Dialog>
 
-      <ConfirmDialog open={Boolean(archiveTarget)} title={archiveTarget?.status === "active" ? "Archive workspace" : "Restore workspace"} description={`Change status of “${archiveTarget?.name ?? ""}”?`} destructive={archiveTarget?.status === "active"} pending={saving} onClose={() => setArchiveTarget(null)} onConfirm={() => void toggleArchive()} />
+      <ConfirmDialog open={pendingMemberChange !== null}
+        title={pendingMemberChange?.role ? "Confirm role change" : "Remove workspace member"}
+        description={pendingMemberChange?.role
+          ? `Change ${pendingMemberChange.member.username}'s role to ${formatRole(pendingMemberChange.role)} in ${selectedWorkspace?.name ?? "this workspace"}?`
+          : `Remove ${pendingMemberChange?.member.username ?? "this member"} from ${selectedWorkspace?.name ?? "this workspace"}?`}
+        confirmLabel={pendingMemberChange?.role ? "Change role" : "Remove member"}
+        destructive={!pendingMemberChange?.role} pending={saving} error={accessError}
+        onClose={() => setPendingMemberChange(null)} onConfirm={() => void confirmMemberChange()} />
+
+      <ConfirmDialog open={Boolean(archiveTarget)} title={archiveTarget?.status === "active" ? "Archive workspace" : "Restore workspace"} description={`Change status of “${archiveTarget?.name ?? ""}”?`} destructive={archiveTarget?.status === "active"} pending={saving} error={error} onClose={() => { setArchiveTarget(null); setError(null); }} onConfirm={() => void toggleArchive()} />
     </div>
   );
 }

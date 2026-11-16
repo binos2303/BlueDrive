@@ -7,7 +7,6 @@ import { sha256File } from "./upload-file-hash";
 export { UploadPausedError } from "./upload-transfer-control";
 import { reconcilePartReceipts, restorePartReceipts, serializePartReceipts, type ProviderPart } from "./upload-resume-model";
 import { AccountServiceError, accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
-import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 
 export type UploadProgressReport = {
   uploadedBytes: number;
@@ -69,7 +68,7 @@ const PART_RETRIES = 3;
 const AUTHORIZATION_BATCH_SIZE = 6;
 const activeTransfers = new Map<string, UploadTransferControl>();
 function resumeStorageKey(task: UploadTask, file: File): string {
-  const workspaceScope = getActiveWorkspaceIdForRequest() ?? "default";
+  const workspaceScope = task.workspaceId ?? "default";
   const destinationScope = task.destinationId ?? "root";
   return `securedrive-upload:${workspaceScope}:${encodeURIComponent(destinationScope)}:${encodeURIComponent(file.name)}:${file.size}:${file.lastModified}`;
 }
@@ -128,14 +127,16 @@ function uploadPart(url: string, headers: Record<string, string>, blob: Blob, si
   });
 }
 
-async function authorize(uploadId: string, part: number): Promise<PartAuthorization> {
+type UploadApi = <T>(path: string, init?: RequestInit) => Promise<T>;
+
+async function authorize(uploadId: string, part: number, requestUploadApi: UploadApi): Promise<PartAuthorization> {
   // Single-part fallback is used only when a previously issued batch URL expires.
   return requestUploadApi<PartAuthorization>(`/files/api/uploads/${uploadId}/parts/${part}/authorization/`, {
     method: "POST", headers: await accountCsrfHeaders(),
   });
 }
 
-async function authorizeBatch(uploadId: string, partNumbers: number[]): Promise<AuthorizedPart[]> {
+async function authorizeBatch(uploadId: string, partNumbers: number[], requestUploadApi: UploadApi): Promise<AuthorizedPart[]> {
   if (partNumbers.length === 0) return [];
   const response = await requestUploadApi<{ parts: AuthorizedPart[] }>(
     `/files/api/uploads/${uploadId}/parts/authorizations/`,
@@ -156,27 +157,31 @@ async function fetchReconciledPartReceipts(
   uploadId: string,
   fileSize: number,
   receipts: ReadonlyMap<number, string>,
+  requestUploadApi: UploadApi,
 ): Promise<Map<number, string>> {
   if (!receipts.size) return new Map();
   const response = await requestUploadApi<{ parts: ProviderPart[] }>(`/files/api/uploads/${uploadId}/parts/`);
   return reconcilePartReceipts(receipts, response.parts, fileSize, PART_SIZE);
 }
 
-async function requestUploadApi<T>(path: string, init: RequestInit = {}): Promise<T> {
-  try {
-    return await requestAccountApi<T>(path, init);
-  } catch (error) {
-    if (error instanceof AccountServiceError && [408, 429, 500, 502, 503, 504].includes(error.status ?? 0)) {
-      throw Object.assign(error, { retryable: true, action: "Retry this upload; completed parts can be sent again safely." });
+function createUploadApi(workspaceId: string | null): UploadApi {
+  return async function requestUploadApi<T>(path: string, init: RequestInit = {}): Promise<T> {
+    try {
+      return await requestAccountApi<T>(path, { ...init, workspaceId });
+    } catch (error) {
+      if (error instanceof AccountServiceError && [408, 429, 500, 502, 503, 504].includes(error.status ?? 0)) {
+        throw Object.assign(error, { retryable: true, action: "Retry this upload; completed parts can be sent again safely." });
+      }
+      throw error;
     }
-    throw error;
-  }
+  };
 }
 
 export const djangoMultipartUploadService: UploadService = {
   connected: true,
   supportsPauseResume: true,
   async upload(task, file, observer, signal) {
+    const requestUploadApi = createUploadApi(task.workspaceId);
     if (activeTransfers.has(task.id)) throw new Error("Upload task already has an active transfer.");
     const control = new UploadTransferControl(signal);
     activeTransfers.set(task.id, control);
@@ -258,14 +263,13 @@ export const djangoMultipartUploadService: UploadService = {
     saveSessionValue(resumeKey, uploadId);
     const count = Math.ceil(file.size / PART_SIZE);
     const receiptsKey = `${resumeKey}:parts`;
-    // Receipts originate from successful XHR responses. Never store presigned URLs.
-    // The server independently validates the manifest against MinIO ListParts.
+    // Chỉ lưu ETag từ PUT thành công; backend đối chiếu ListParts ở kho đã ghim.
     const savedReceipts = alreadyCompleting ? new Map<number, string>()
       : restorePartReceipts(readSessionValue(receiptsKey), uploadId, count);
     // A previously uploaded part can disappear or be overwritten by another tab.
     // Reuse only receipts still confirmed by the storage provider.
     const completed = alreadyCompleting ? savedReceipts
-      : await fetchReconciledPartReceipts(uploadId, file.size, savedReceipts);
+      : await fetchReconciledPartReceipts(uploadId, file.size, savedReceipts, requestUploadApi);
     if (savedReceipts.size > 0) {
       saveSessionValue(receiptsKey, serializePartReceipts(uploadId, completed));
     }
@@ -289,7 +293,7 @@ export const djangoMultipartUploadService: UploadService = {
     // short-lived URLs at once (especially useful on slow or paused uploads).
     const partAuthorizations = new OnDemandPartAuthorizer<AuthorizedPart>(
       pending, AUTHORIZATION_BATCH_SIZE,
-      (numbers) => authorizeBatch(uploadId!, numbers),
+      (numbers) => authorizeBatch(uploadId!, numbers, requestUploadApi),
     );
     let next = 0;
     let fatal: unknown;
@@ -314,7 +318,7 @@ export const djangoMultipartUploadService: UploadService = {
             if (attempt === PART_RETRIES || (error as { retryable?: boolean }).retryable !== true) { fatal = error; return; }
             updatePartProgress(partNumber, 0, true);
             if ((error as { status?: number }).status === 403) {
-              const refreshed = await authorize(uploadId!, partNumber);
+              const refreshed = await authorize(uploadId!, partNumber, requestUploadApi);
               partAuthorizations.replace({ part_number: partNumber, ...refreshed });
             }
             await sleep(Math.min(2000, 200 * (2 ** attempt) + Math.random() * 150));
@@ -367,7 +371,15 @@ export const djangoMultipartUploadService: UploadService = {
       if (result.state === "available" || result.state === "completed" || result.state === "failed") break;
       await sleep(5000);
     }
-    if (result.state === "failed") throw Object.assign(new Error("The server rejected this upload during verification or security checks."), { retryable: false, action: "Review the file and select it again after correcting the issue." });
+    if (result.state === "failed") {
+      if (result.failure_code === "destination_not_writable") {
+        throw Object.assign(new Error("Upload stopped because the destination is no longer available for writing."), {
+          retryable: false,
+          action: "Choose another folder or workspace, or ask its manager to restore write access.",
+        });
+      }
+      throw Object.assign(new Error("The server rejected this upload during verification or security checks."), { retryable: false, action: "Review the file and select it again after correcting the issue." });
+    }
     if (result.state !== "available" && result.state !== "completed") throw Object.assign(new Error("Finalization is still running; retry to resume status polling."), { retryable: true, action: "The server retains this upload session; retry to check its status." });
     removeSessionValue(resumeKey);
     removeSessionValue(`${resumeKey}:idempotency`);
@@ -390,6 +402,7 @@ export const djangoMultipartUploadService: UploadService = {
     // UploadSession/receipt manifest against the provider before sending parts.
   },
   async cancelPaused(task, file) {
+    const requestUploadApi = createUploadApi(task.workspaceId);
     if (!task.uploadSessionId) throw new Error("Paused upload has no server session to cancel.");
     if (activeTransfers.has(task.id)) throw new Error("Cannot cancel while an upload is still stopping.");
     await requestUploadApi(`/files/api/uploads/${task.uploadSessionId}/abort/`, {

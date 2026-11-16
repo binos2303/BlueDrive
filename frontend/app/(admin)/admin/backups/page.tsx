@@ -20,7 +20,7 @@ export default function BackupsPage() {
           <section key={label} className="rounded-[20px] border border-border bg-surface p-5">
             <div className="flex items-center justify-between">
               <p className="text-sm text-muted">{label}</p>
-              <span className="rounded-xl bg-brand-soft p-2.5 text-brand"><Icon size={18} /></span>
+              <span className="rounded-xl bg-brand-soft p-2.5 text-brand-contrast"><Icon size={18} /></span>
             </div>
             <p className="mt-4 text-2xl font-semibold">{value}</p>
           </section>
@@ -39,7 +39,7 @@ export default function BackupsPage() {
         </div>
       </section>
 
-      <div className="mt-5 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+      <div className="mt-5 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning-soft p-4 text-warning">
         <AlertTriangle size={18} className="mt-0.5 shrink-0" />
         <div>
           <p className="text-sm font-semibold">Backup service unavailable</p>
@@ -69,7 +69,7 @@ function StatusRow({ label }: { label: string }) {
 function Destination({ href, icon: Icon, title }: { href: string; icon: typeof Database; title: string }) {
   return (
     <Link href={href} className="flex items-center gap-3 rounded-[20px] border border-border bg-surface p-4 transition hover:bg-background">
-      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-soft text-brand"><Icon size={18} /></span>
+      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-soft text-brand-contrast"><Icon size={18} /></span>
       <span className="flex-1 text-sm font-semibold">{title}</span>
       <ArrowRight size={16} className="text-muted" />
     </Link>

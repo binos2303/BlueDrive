@@ -95,7 +95,7 @@ export default function PermissionsPage() {
                     <article key={role.id} className="rounded-[18px] border border-border bg-surface p-5">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="flex items-center gap-2">
-                          <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-brand-soft text-brand"><ShieldCheck size={18} /></span>
+                          <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-brand-soft text-brand-contrast"><ShieldCheck size={18} /></span>
                           <h3 className="text-sm font-semibold">{role.label}</h3>
                         </div>
                         <span className="rounded-lg bg-background px-2.5 py-1 text-xs font-medium text-muted">
@@ -126,8 +126,8 @@ export default function PermissionsPage() {
               {result.notes.map((note) => <li key={note}>{note}</li>)}
             </ul>
             <div className="mt-4 flex flex-wrap gap-3 border-t border-border pt-4 text-sm">
-              <Link href="/admin/users" className="font-semibold text-brand hover:underline">Manage platform users</Link>
-              <Link href="/admin/workspaces" className="font-semibold text-brand hover:underline">Browse workspaces</Link>
+              <Link href="/admin/users" className="font-semibold text-brand-contrast hover:underline">Manage platform users</Link>
+              <Link href="/admin/workspaces" className="font-semibold text-brand-contrast hover:underline">Browse workspaces</Link>
             </div>
           </section>
         </>

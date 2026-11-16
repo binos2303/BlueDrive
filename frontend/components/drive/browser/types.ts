@@ -8,6 +8,7 @@ export type DriveItem = {
   owner: string;
   ownerInitials: string;
   modified: string;
+  modifiedAt?: string;
   size: string;
   type: DriveItemType;
   starred?: boolean;

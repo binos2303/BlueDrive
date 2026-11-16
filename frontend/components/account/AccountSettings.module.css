@@ -1,0 +1,55 @@
+.page {
+  container-type: inline-size;
+}
+
+.preference {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 1rem;
+  padding: 1.5rem;
+}
+
+.preference > * {
+  min-width: 0;
+}
+
+.dateFilters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: end;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.dateFilters label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.375rem;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.dateFilters input {
+  width: 100%;
+  min-width: 0;
+  height: 2.75rem;
+}
+
+.history :global(.custom-scroll-viewport) {
+  max-height: 24rem;
+}
+
+@container (min-width: 560px) {
+  .dateFilters {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  }
+}
+
+@container (min-width: 720px) {
+  .preference {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 2rem;
+  }
+}

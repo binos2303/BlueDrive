@@ -1,7 +1,6 @@
 /**
- * A part receipt contains only a server-returned ETag, never a presigned URL.
- * Persisting receipts allows a browser retry to keep already uploaded parts.
- * The backend rechecks the complete manifest against MinIO before publishing.
+ * Chỉ lưu ETag do kho trả về để tiếp tục phần đã tải, không lưu URL ký tạm.
+ * Backend đối chiếu lại toàn bộ danh sách phần với kho đã ghim trước publication.
  */
 export function restorePartReceipts(
   serialized: string | null,

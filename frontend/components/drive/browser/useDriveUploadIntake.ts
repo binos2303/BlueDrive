@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type Dispatch, type DragEvent, type SetStateAction } from "react";
-import { DRIVE_UPLOAD_FILES_EVENT, DRIVE_UPLOAD_FOLDER_EVENT } from "@/components/drive/DriveNewMenu";
+import { DRIVE_UPLOAD_FILES_EVENT, DRIVE_UPLOAD_FOLDER_EVENT, driveNewScope, type DriveNewScope } from "@/components/drive/DriveNewMenu";
 import { DRIVE_UPLOAD_COMPLETED_EVENT, useUploadManager } from "@/components/drive/UploadManager";
 import { getDriveItems, type DriveListView } from "@/lib/drive-service";
 import { accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
-import { FOLDER_TREE_REFRESH_EVENT } from "@/lib/workspace-context";
+import { FOLDER_TREE_REFRESH_EVENT, getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 import { ITEM_DRAG_TYPE } from "./drive-move-utils";
+import { captureDriveNewDestination } from "@/lib/drive-new-destination";
 import {
   MAX_UPLOAD_FILES_PER_BATCH, getDroppedEntry, readDroppedEntry,
   validateUploadPath, getDriveDropKind, preferClipboardFileList, type DroppedEntry,
@@ -16,6 +17,7 @@ type UploadInput = { file: File; relativePath: string };
 type ToastSetter = Dispatch<SetStateAction<string | null>>;
 
 type UseDriveUploadIntakeOptions = {
+  scope?: DriveNewScope;
   currentFolderId: number | null;
   listView: DriveListView | null;
   loadItems: (folderId: number | null, view: DriveListView, queryOverride?: string) => Promise<void>;
@@ -31,19 +33,21 @@ type UseDriveUploadIntakeOptions = {
  * Kéo thả mục đã tồn tại trong Drive được phân biệt với upload từ hệ điều hành.
  */
 export default function useDriveUploadIntake({
-  currentFolderId, listView, loadItems, setToast, setFileDropActive,
+  scope = "current", currentFolderId, listView, loadItems, setToast, setFileDropActive,
   setDropTargetFolderId, autoScrollDuringInternalDrag,
 }: UseDriveUploadIntakeOptions) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const pasteHandlerRef = useRef<(files: readonly UploadInput[]) => void>(() => {});
+  const pickerDestination = useRef<{ folderId: number | null; workspaceId: string | null } | null>(null);
   const [dragMessage, setDragMessage] = useState("Drop files to upload");
   const { enqueue, openManager } = useUploadManager();
 
   useEffect(() => {
     function handleUploadCompleted(event: Event) {
-      const detail = (event as CustomEvent<{ destinationId: string | null }>).detail;
+      const detail = (event as CustomEvent<{ destinationId: string | null; workspaceId: string | null }>).detail;
       if (!detail || !listView) return;
+      if (detail.workspaceId !== getActiveWorkspaceIdForRequest()) return;
 
       // Dung lượng và cây thư mục là dữ liệu tổng hợp có cache; sau khi upload xong
       // phải phát tín hiệu cập nhật, kể cả khi tệp nằm ở một thư mục khác.
@@ -65,7 +69,7 @@ export default function useDriveUploadIntake({
     return () => window.removeEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, handleUploadCompleted);
   }, [currentFolderId, listView, loadItems]);
 
-  const addUploadFiles = useCallback(async (files: readonly { file: File; relativePath: string }[]) => {
+  const addUploadFiles = useCallback(async (files: readonly { file: File; relativePath: string }[], destination = captureDriveNewDestination(scope, currentFolderId)) => {
     if (files.length === 0) {
       setToast("No files were provided by the browser. Folder access may have been denied.");
       return;
@@ -75,7 +79,7 @@ export default function useDriveUploadIntake({
       return;
     }
 
-    const baseDestinationId = currentFolderId !== null ? String(currentFolderId) : null;
+    const baseDestinationId = destination.folderId !== null ? String(destination.folderId) : null;
     const normalizedFiles = files.map(({ file, relativePath }) => {
       const normalizedPath = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
       return {
@@ -95,7 +99,7 @@ export default function useDriveUploadIntake({
       if (cached) return cached;
 
       // Tái sử dụng thư mục cùng tên ở đúng thư mục cha để tránh trùng lặp.
-      const siblings = await getDriveItems(parentId === null ? null : Number(parentId), "drive");
+      const siblings = await getDriveItems(parentId === null ? null : Number(parentId), "drive", "", destination.workspaceId);
       const existing = siblings.find((item) =>
         item.type === "folder" && item.name.localeCompare(name, undefined, { sensitivity: "accent" }) === 0,
       );
@@ -112,6 +116,7 @@ export default function useDriveUploadIntake({
         type: "folder";
       }>("/drive/api/folders/", {
         method: "POST",
+        workspaceId: destination.workspaceId,
         headers: await accountCsrfHeaders(),
         body: JSON.stringify({ name, parent_id: parentId === null ? null : Number(parentId) }),
       });
@@ -149,10 +154,10 @@ export default function useDriveUploadIntake({
         relativePath,
         validationError,
         destinationId,
-      })), baseDestinationId);
+      })), baseDestinationId, destination.workspaceId);
       if (createdOrReusedFolderIds.size > 0) {
         window.dispatchEvent(new Event(FOLDER_TREE_REFRESH_EVENT));
-        if (listView === "drive") await loadItems(currentFolderId, "drive");
+        if (listView === "drive" && destination.workspaceId === getActiveWorkspaceIdForRequest()) await loadItems(currentFolderId, "drive");
       }
       openManager();
     } catch (error) {
@@ -160,7 +165,7 @@ export default function useDriveUploadIntake({
         ? `Could not prepare the folder structure. No files were queued. ${error.message}`
         : "Could not prepare the folder structure. No files were queued.");
     }
-  }, [currentFolderId, enqueue, listView, loadItems, openManager, setToast]);
+  }, [scope, currentFolderId, enqueue, listView, loadItems, openManager, setToast]);
 
   function handleSelectedFiles(fileList: FileList | null) {
     if (!fileList) return;
@@ -168,7 +173,8 @@ export default function useDriveUploadIntake({
       file,
       relativePath: file.webkitRelativePath || file.name,
     }));
-    void addUploadFiles(selected);
+    void addUploadFiles(selected, pickerDestination.current ?? undefined);
+    pickerDestination.current = null;
   }
 
   const openFolderPicker = useCallback(() => {
@@ -182,8 +188,13 @@ export default function useDriveUploadIntake({
   }, [setToast]);
 
   useEffect(() => {
-    function onUploadFiles() { fileInputRef.current?.click(); }
-    function onUploadFolder() { openFolderPicker(); }
+    function captureDestination(event: Event) {
+      if (driveNewScope(event) !== scope) return false;
+      pickerDestination.current = captureDriveNewDestination(scope, currentFolderId);
+      return true;
+    }
+    function onUploadFiles(event: Event) { if (captureDestination(event)) fileInputRef.current?.click(); }
+    function onUploadFolder(event: Event) { if (captureDestination(event)) openFolderPicker(); }
     function onFilePickerCancel() {
       setToast("File selection canceled. Nothing was added to the queue.");
     }
@@ -199,12 +210,13 @@ export default function useDriveUploadIntake({
       fileInput?.removeEventListener("cancel", onFilePickerCancel);
       folderInput?.removeEventListener("cancel", onFilePickerCancel);
     };
-  }, [openFolderPicker, setToast]);
+  }, [scope, currentFolderId, openFolderPicker, setToast]);
 
   // Listener dán file chỉ đăng ký một lần; ref luôn trỏ đến bộ xử lý hiện hành.
   useEffect(() => { pasteHandlerRef.current = addUploadFiles; }, [addUploadFiles]);
 
   useEffect(() => {
+    if (scope === "root") return;
     function onPaste(event: ClipboardEvent) {
       const target = event.target;
       if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) {
@@ -226,7 +238,7 @@ export default function useDriveUploadIntake({
     }
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [setToast]);
+  }, [scope, setToast]);
 
   function handleDragEnter(event: DragEvent<HTMLElement>) {
     const kind = getDriveDropKind(event.dataTransfer.types, ITEM_DRAG_TYPE);

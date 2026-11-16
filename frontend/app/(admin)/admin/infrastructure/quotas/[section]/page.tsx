@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import QuotaManagement from "@/components/admin/QuotaManagement";
 
-const sections = new Set(["users", "teams", "capacity", "policies"]);
+const sections = new Set(["users", "workspaces", "capacity", "policies"]);
 
 export default async function QuotaSectionPage({
   params,

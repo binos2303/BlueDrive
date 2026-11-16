@@ -19,9 +19,9 @@ export default function IconButton({
       {...props}
       type={type}
       aria-label={label}
-      className={`inline-flex h-10 w-10 items-center justify-center rounded-[var(--radius-control)] transition-colors duration-[var(--motion-fast)] disabled:pointer-events-none disabled:opacity-50 ${
+      className={`ui-control inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] transition-colors duration-[var(--motion-fast)] disabled:pointer-events-none disabled:opacity-50 ${
         variant === "destructive"
-          ? "text-danger hover:bg-rose-50"
+          ? "text-danger hover:bg-danger/10"
           : "text-muted hover:bg-brand-soft hover:text-brand-contrast"
       } ${className}`}
     >

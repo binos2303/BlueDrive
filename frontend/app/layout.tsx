@@ -1,15 +1,20 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
-import { Poppins } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 import UploadManager from "@/components/drive/UploadManager";
 import AccountProvider from "@/components/account/AccountProvider";
 import ThemeProvider from "@/components/theme/ThemeProvider";
+import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
-const poppins = Poppins({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+const poppins = localFont({
+  src: [
+    { path: "./fonts/poppins/Poppins-Regular.ttf", weight: "400", style: "normal" },
+    { path: "./fonts/poppins/Poppins-Medium.ttf", weight: "500", style: "normal" },
+    { path: "./fonts/poppins/Poppins-SemiBold.ttf", weight: "600", style: "normal" },
+    { path: "./fonts/poppins/Poppins-Bold.ttf", weight: "700", style: "normal" },
+  ],
   variable: "--font-poppins",
   display: "swap",
 });
@@ -30,7 +35,8 @@ export default function RootLayout({
   children: ReactNode;
 }>) {
   return (
-    <html lang="en" className={poppins.variable}>
+    <html lang="en" className={poppins.variable} suppressHydrationWarning>
+      <head><script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} /></head>
       <body
         className={`${poppins.className} min-h-screen bg-background text-foreground antialiased`}
       >

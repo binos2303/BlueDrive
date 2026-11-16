@@ -31,7 +31,7 @@ import {
   type UploadService,
 } from "./upload-service";
 
-import { DRIVE_UPLOAD_COMPLETED_EVENT } from "@/lib/workspace-context";
+import { DRIVE_UPLOAD_COMPLETED_EVENT, getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 export { DRIVE_UPLOAD_COMPLETED_EVENT };
 
 export type UploadFileInput = {
@@ -48,7 +48,7 @@ type UploadManagerValue = {
   tasks: UploadTask[];
   serviceConnected: boolean;
   supportsPauseResume: boolean;
-  enqueue: (files: readonly UploadFileInput[], destinationId: string | null) => void;
+  enqueue: (files: readonly UploadFileInput[], destinationId: string | null, workspaceId?: string | null) => void;
   openManager: () => void;
 };
 
@@ -115,7 +115,6 @@ export default function UploadManager({
   const [open, setOpen] = useState(false);
   const [visible, setVisible] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
-  const [dismissedTaskIds, setDismissedTaskIds] = useState<Set<string>>(() => new Set<string>());
   const tasksRef = useRef(tasks);
   const filesRef = useRef(new Map<string, File>());
   const controllersRef = useRef(new Map<string, AbortController>());
@@ -131,8 +130,8 @@ export default function UploadManager({
   const updateTask = useCallback((id: string, update: (task: UploadTask) => UploadTask) => {
     commit((current) => current.map((task) => task.id === id ? update(task) : task));
   }, [commit]);
-
-  const enqueue = useCallback((inputs: readonly UploadFileInput[], destinationId: string | null) => {
+// tạo thêm file upload mới và thêm vào danh sách upload
+  const enqueue = useCallback((inputs: readonly UploadFileInput[], destinationId: string | null, workspaceId = getActiveWorkspaceIdForRequest()) => {
     const incoming = inputs.map(({ file, relativePath, destinationId: fileDestinationId, validationError }) => {
       const id = `upload-${Date.now()}-${++nextId.current}`;
       if (!validationError) filesRef.current.set(id, file);
@@ -144,12 +143,8 @@ export default function UploadManager({
         size: file.size,
         destinationId: fileDestinationId !== undefined ? fileDestinationId : destinationId,
         validationError,
+        workspaceId,
       });
-    });
-    setDismissedTaskIds((current) => {
-      const next = new Set(current);
-      incoming.forEach((task) => next.delete(task.id));
-      return next;
     });
     commit((current) => markDuplicateTasks([...current, ...incoming]));
     setVisible(true);
@@ -210,7 +205,7 @@ export default function UploadManager({
               applyFailure(id, {
                 message: `Upload service reported an unexpected state (${status}).`,
                 retryable: false,
-                action: "Contact support before retrying.",
+                action: "Refresh the page to check the latest upload status before trying again.",
               });
             }
           },
@@ -245,7 +240,7 @@ export default function UploadManager({
             filesRef.current.delete(id);
             if (typeof window !== "undefined") {
               window.dispatchEvent(new CustomEvent(DRIVE_UPLOAD_COMPLETED_EVENT, {
-                detail: { destinationId: latest.destinationId },
+                detail: { destinationId: latest.destinationId, workspaceId: latest.workspaceId },
               }));
             }
           },
@@ -258,7 +253,7 @@ export default function UploadManager({
         applyFailure(id, {
           message: "Upload service ended without confirming object completion and required checks.",
           retryable: false,
-          action: "Do not treat this file as available. Check service logs or contact support.",
+          action: "Do not treat this file as available. Refresh the page to check its status.",
         });
       }
     } catch (error) {
@@ -330,7 +325,6 @@ export default function UploadManager({
   }, [service, updateTask]);
 
   const closeManager = useCallback(() => {
-    setDismissedTaskIds(new Set(tasksRef.current.map((task) => task.id)));
     setVisible(false);
   }, []);
 
@@ -420,7 +414,7 @@ export default function UploadManager({
   }), [enqueue, service.connected, service.supportsPauseResume, tasks]);
 
 
-  const visibleTasks = tasks.filter((task) => !dismissedTaskIds.has(task.id));
+  const visibleTasks = tasks;
   const queuedCount = visibleTasks.filter((task) => task.status === "queued").length;
   const activeCount = visibleTasks.filter((task) =>
     ["preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
@@ -471,16 +465,16 @@ export default function UploadManager({
                 onClick={() => setOpen((current) => !current)}
                 aria-label={open ? "Collapse upload status" : "Expand upload status"}
                 title={open ? "Collapse" : "Expand"}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
+                className="ui-control flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
               >
                 {open ? <ChevronDown size={22} /> : <ChevronUp size={22} />}
               </button>
               <button
                 type="button"
                 onClick={closeManager}
-                aria-label="Close and clear upload status"
+                aria-label="Hide upload status"
                 title="Hide"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
+                className="ui-control flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
               >
                 <X size={21} />
               </button>
@@ -497,7 +491,7 @@ export default function UploadManager({
                 </p>
                 {cancellableCount > 0 && (
                   <span
-                    className="flex h-8 w-8 shrink-0 items-center justify-center text-muted"
+                    className="ui-control flex h-8 w-8 shrink-0 items-center justify-center text-muted"
                     role="status"
                     aria-label="Upload in progress"
                     title="Upload in progress"
@@ -613,7 +607,7 @@ function UploadTaskRow({
             onClick={onCancel}
             aria-label={`Stop upload of ${task.fileName}`}
             title="Stop upload"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface hover:text-foreground"
+            className="ui-control flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface hover:text-foreground"
           >
             <X size={18} />
           </button>
@@ -626,7 +620,7 @@ function UploadTaskRow({
         ) : null}
       </div>
 
-      {!terminal && task.status !== "verifying" && task.status !== "scanning" && (
+      {!terminal && (
         <p className="mt-1 text-[11px] text-muted">
           {task.status === "uploading" && task.progress
             ? `${progressPercent}% uploaded${task.progress.bytesPerSecond
@@ -669,7 +663,7 @@ function UploadTaskRow({
       )}
 
       {task.duplicate && !terminal && (
-        <fieldset className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-warning">
+        <fieldset className="mt-3 rounded-lg border border-warning/30 bg-warning-soft p-2 text-xs text-warning">
           <legend className="px-1 font-medium">Duplicate path</legend>
           <div className="flex flex-wrap gap-x-3 gap-y-1">
             {([
@@ -677,7 +671,7 @@ function UploadTaskRow({
               ["keep-both", "Keep both"],
               ["replace", "Replace"],
             ] as const).map(([value, label]) => (
-              <label key={value} className="inline-flex items-center gap-1">
+              <label key={value} className="ui-control inline-flex min-h-10 items-center gap-2 px-2">
                 <input
                   type="radio"
                   name={`conflict-${task.id}`}
@@ -692,12 +686,12 @@ function UploadTaskRow({
       )}
 
       {canPause && task.status === "uploading" && (
-        <button type="button" onClick={onPause} className="mt-2 text-xs text-muted underline" aria-label={`Pause ${task.fileName}`}>
+        <button type="button" onClick={onPause} className="ui-control mt-2 inline-flex min-h-10 items-center gap-1 rounded-lg px-2 text-xs text-muted underline" aria-label={`Pause ${task.fileName}`}>
           <Pause size={12} className="mr-1 inline" />Pause
         </button>
       )}
       {canPause && task.status === "paused" && (
-        <button type="button" onClick={onResume} className="mt-2 text-xs text-muted underline" aria-label={`Resume ${task.fileName}`}>
+        <button type="button" onClick={onResume} className="ui-control mt-2 inline-flex min-h-10 items-center gap-1 rounded-lg px-2 text-xs text-muted underline" aria-label={`Resume ${task.fileName}`}>
           <Play size={12} className="mr-1 inline" />Resume
         </button>
       )}

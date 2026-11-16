@@ -103,7 +103,7 @@ export default function useDriveSelection({ items, sortedItems, containerRef }: 
   }
 
   function handleMarqueePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || event.shiftKey) return;
+    if (event.pointerType === "touch" || event.button !== 0 || event.shiftKey) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
     // Starting on a row/card body is allowed: a simple click still selects that item,
@@ -129,7 +129,23 @@ export default function useDriveSelection({ items, sortedItems, containerRef }: 
   }
 
   useEffect(() => {
-    function handlePointerMove(event: PointerEvent) {
+    let frame: number | null = null;
+    let pendingMove: PointerEvent | null = null;
+
+    function cancelPendingFrame() {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = null;
+      pendingMove = null;
+    }
+
+    function cancelGesture() {
+      cancelPendingFrame();
+      selectionStartRef.current = null;
+      setSelectionBox(null);
+      setMarqueeActive(false);
+    }
+
+    function applyPointerMove(event: PointerEvent) {
       const start = selectionStartRef.current;
       const container = containerRef.current;
       if (!start || !container || event.pointerId !== start.pointerId) return;
@@ -162,9 +178,24 @@ export default function useDriveSelection({ items, sortedItems, containerRef }: 
       setSelectedIds(next);
     }
 
+    function handlePointerMove(event: PointerEvent) {
+      if (event.pointerId !== selectionStartRef.current?.pointerId) return;
+      pendingMove = event;
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const latest = pendingMove;
+        pendingMove = null;
+        if (latest) applyPointerMove(latest);
+      });
+    }
+
     function finishPointer(event: PointerEvent) {
       const start = selectionStartRef.current;
       if (!start || (event.pointerId !== undefined && event.pointerId !== start.pointerId)) return;
+      if (event.type !== "pointerup") { cancelGesture(); return; }
+      cancelPendingFrame();
+      applyPointerMove(event);
       if (start.dragged) {
         // Mark the item under the pointer so its synthetic post-drag click is ignored.
         // The marker is stored on the DOM item rather than a ref read by the render callback.
@@ -206,10 +237,16 @@ export default function useDriveSelection({ items, sortedItems, containerRef }: 
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", finishPointer);
     window.addEventListener("pointercancel", finishPointer);
+    window.addEventListener("lostpointercapture", finishPointer);
+    window.addEventListener("blur", cancelGesture);
     return () => {
+      cancelPendingFrame();
+      selectionStartRef.current = null;
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", finishPointer);
       window.removeEventListener("pointercancel", finishPointer);
+      window.removeEventListener("lostpointercapture", finishPointer);
+      window.removeEventListener("blur", cancelGesture);
     };
   }, [containerRef]);
 

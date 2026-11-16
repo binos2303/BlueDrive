@@ -110,7 +110,7 @@ function ShareManagementContent({ target, onClose, onChanged }: Props & { target
 
   return (
     <>
-      <Dialog open title={`Manage access — ${target.name}`} onClose={() => { if (!pending) onClose(); }} className="w-[min(100%-2rem,42rem)]">
+      <Dialog open title={`Manage access — ${target.name}`} onClose={() => { if (!pending) onClose(); }} className="w-[min(calc(100%_-_2rem),42rem)]">
         <div className="space-y-5">
           {error && <p role="alert" className="rounded-lg border border-danger/40 px-3 py-2 text-sm text-danger">{error}</p>}
           {notice && <p role="status" className="text-sm text-foreground">{notice}</p>}

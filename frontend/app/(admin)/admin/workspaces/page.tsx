@@ -1,5 +1,5 @@
-import AdminResourceDirectory from "@/components/admin/AdminResourceDirectory";
+import AdminWorkspaceDirectory from "@/components/admin/AdminWorkspaceDirectory";
 
 export default function WorkspacesPage() {
-  return <AdminResourceDirectory kind="workspaces" />;
+  return <AdminWorkspaceDirectory />;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import DashboardShell from "@/components/layout/DashboardShell";
 import ShareManagementDialog from "@/components/drive/ShareManagementDialog";
 import Button from "@/components/ui/Button";
@@ -49,16 +50,20 @@ export default function SharedByMePage() {
   return (
     <DashboardShell>
       <section className="mx-auto max-w-6xl space-y-5 px-5 py-7 sm:px-8">
-        <div>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
           <h1 className="text-2xl font-semibold text-foreground">Shared by me</h1>
-          <p className="mt-1 text-sm text-muted">Direct grants you own in the selected Workspace. Workspace membership permissions are managed separately.</p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">Manage access to files and folders you have shared. Manage workspace members from the workspace sidebar.</p>
+          </div>
+          <Link href="/drive/shared" className="inline-flex min-h-10 items-center rounded-lg px-3 text-sm font-medium text-brand-contrast hover:bg-brand-soft">Back to Shared with me</Link>
         </div>
         {error && <p role="alert" className="rounded-xl border border-danger/40 px-4 py-3 text-sm text-danger">{error} <Button size="sm" variant="ghost" onClick={() => { void load(page); }}>Retry</Button></p>}
         {loading && <p role="status" className="text-sm text-muted">Loading shared items…</p>}
         {!loading && data?.items.length === 0 && <p className="rounded-xl border border-border bg-surface px-5 py-8 text-sm text-muted">No direct shares in this Workspace.</p>}
         {data && data.items.length > 0 && (
           <div className="overflow-x-auto rounded-xl border border-border bg-surface">
-            <table className="min-w-full divide-y divide-border text-left text-sm">
+            <table className="w-full min-w-[800px] table-fixed divide-y divide-border text-left text-sm">
+              <colgroup><col className="w-[30%]" /><col className="w-[26%]" /><col className="w-[16%]" /><col className="w-[14%]" /><col className="w-[14%]" /></colgroup>
               <thead className="bg-background text-xs font-semibold text-muted"><tr>
                 <th scope="col" className="px-4 py-3">Item</th>
                 <th scope="col" className="px-4 py-3">Recipient</th>
@@ -68,8 +73,8 @@ export default function SharedByMePage() {
               </tr></thead>
               <tbody className="divide-y divide-border">
                 {data.items.map((share) => <tr key={share.id}>
-                  <td className="max-w-60 px-4 py-3"><div className="truncate font-medium">{share.item.name}</div><div className="text-xs text-muted">{share.item.kind}</div></td>
-                  <td className="max-w-60 truncate px-4 py-3">{share.recipient.email || share.recipient.username}</td>
+                  <td className="px-4 py-3"><div className="truncate font-medium" title={share.item.name}>{share.item.name}</div><div className="mt-1 text-xs text-muted">{share.item.kind}</div></td>
+                  <td className="truncate px-4 py-3" title={share.recipient.email || share.recipient.username}>{share.recipient.email || share.recipient.username}</td>
                   <td className="px-4 py-3 capitalize">{share.permission}</td>
                   <td className="px-4 py-3 text-muted">{new Date(share.created_at).toLocaleDateString()}</td>
                   <td className="px-4 py-3"><Button size="sm" variant="secondary" onClick={() => setTarget(share.item)}>Manage</Button></td>

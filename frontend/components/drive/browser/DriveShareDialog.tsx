@@ -2,11 +2,13 @@
 
 import type { FormEvent } from "react";
 import Button from "@/components/ui/Button";
+import Dialog from "@/components/ui/Dialog";
 
 type DriveShareDialogProps = {
   open: boolean;
   targetCount: number;
   sharing: boolean;
+  error: string | null;
   email: string;
   permission: "viewer" | "editor";
   onClose: () => void;
@@ -16,19 +18,16 @@ type DriveShareDialogProps = {
 };
 
 export default function DriveShareDialog({
-  open, targetCount, sharing, email, permission, onClose,
+  open, targetCount, sharing, error, email, permission, onClose,
   onEmailChange, onPermissionChange, onSubmit,
 }: DriveShareDialogProps) {
   return (
-    <>
-      {open && (
-        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sharing) onClose(); }}>
-          <form onSubmit={(event) => onSubmit(event)} aria-labelledby="share-items-title" className="w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
-            <header className="border-b border-border px-5 py-4">
-              <h2 id="share-items-title" className="text-lg font-semibold text-foreground">Share {targetCount} item{targetCount === 1 ? "" : "s"}</h2>
-              <p className="mt-1 text-sm text-muted">Grant access to an existing SecureDrive account by email.</p>
-            </header>
+    <Dialog open={open} title={`Share ${targetCount} item${targetCount === 1 ? "" : "s"}`}
+      description="Grant access to an existing BlueDrive account by email."
+      onClose={onClose} closeDisabled={sharing}>
+          <form onSubmit={onSubmit}>
             <div className="space-y-4 px-5 py-5">
+              {error && <p role="alert" className="text-sm text-danger">{error}</p>}
               <label className="block text-sm font-medium text-foreground">
                 Email address
                 <input
@@ -49,17 +48,13 @@ export default function DriveShareDialog({
                   <option value="editor">Editor — can modify shared items</option>
                 </select>
               </label>
-              <p className="text-xs leading-5 text-muted">The recipient must already have an active SecureDrive account registered with this email. SecureDrive will attempt to send a notification if outgoing email is configured; access permissions are applied independently.</p>
+              <p className="text-xs leading-5 text-muted">The recipient must already have an active BlueDrive account registered with this email. BlueDrive will attempt to send a notification if outgoing email is configured; access permissions are applied independently.</p>
             </div>
             <footer className="flex justify-end gap-2 border-t border-border bg-background px-5 py-4">
               <Button variant="ghost" onClick={() => onClose()} disabled={sharing}>Cancel</Button>
               <Button type="submit" disabled={sharing || !email.trim()}>{sharing ? "Sharing…" : "Share"}</Button>
             </footer>
           </form>
-        </div>
-      )}
-
-
-    </>
+    </Dialog>
   );
 }

@@ -1,4 +1,5 @@
 import { CircleHelp } from "lucide-react";
+import { notFound } from "next/navigation";
 
 const sections: Record<string, { title: string; checks: string[] }> = {
   servers: {
@@ -13,8 +14,8 @@ const sections: Record<string, { title: string; checks: string[] }> = {
     title: "PostgreSQL Database",
     checks: ["Connection status", "Response time", "Connection pool", "Query health"],
   },
-  minio: {
-    title: "MinIO",
+  "object-storage": {
+    title: "Object Storage",
     checks: ["Endpoint connection", "Bucket status", "Capacity", "Read/write health"],
   },
   alerts: {
@@ -24,7 +25,8 @@ const sections: Record<string, { title: string; checks: string[] }> = {
 };
 
 export default function InfrastructureDetail({ section }: { section: string }) {
-  const details = sections[section] ?? sections.servers;
+  const details = Object.hasOwn(sections, section) ? sections[section] : undefined;
+  if (!details) notFound();
   return (
     <div>
       <div className="mb-5">
