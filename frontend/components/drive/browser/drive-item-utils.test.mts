@@ -23,9 +23,10 @@ test("natural name sorting preserves human numeric order", () => {
   assert.deepEqual(names(sortDriveItems(source, "name", "asc")), ["File 1", "File 2", "File 10"]);
 });
 
-test("modified sorting uses the previous localeCompare numeric behavior", () => {
+test("unknown modification dates retain stable order without sorting display labels", () => {
   const source = [item(1, "a", "document", "0 B", "rev 10"), item(2, "b", "document", "0 B", "rev 2")];
-  assert.deepEqual(names(sortDriveItems(source, "modified", "asc")), ["b", "a"]);
+  assert.deepEqual(names(sortDriveItems(source, "modified", "asc")), ["a", "b"]);
+  assert.deepEqual(names(sortDriveItems(source, "modified", "desc")), ["a", "b"]);
 });
 
 test("size sort uses byte values rather than textual order", () => {

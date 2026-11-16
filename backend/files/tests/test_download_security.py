@@ -1,7 +1,7 @@
 from cryptography.exceptions import InvalidTag
 from django.contrib.auth import get_user_model
 from django.http import Http404
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from accounts.models import Membership
@@ -13,7 +13,7 @@ from logs.models import ActivityLog
 User = get_user_model()
 
 
-class DownloadSecurityTests(TestCase):
+class DownloadFixture(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="download-owner", password="secret")
         self.file = File.objects.create(
@@ -38,7 +38,7 @@ class DownloadSecurityTests(TestCase):
         # state in download-success tests rather than bypassing the guard.
         self.storage_config = StorageConfig.objects.create(
             tenant=self.file.tenant,
-            provider=StorageConfig.Provider.MINIO,
+            provider=StorageConfig.Provider.S3,
             status=StorageConfig.Status.ACTIVE,
         )
         self.storage_location = StorageLocation.objects.create(
@@ -50,6 +50,27 @@ class DownloadSecurityTests(TestCase):
             size_bytes=12,
         )
         self.client.force_login(self.user)
+
+
+class DownloadSecurityTests(DownloadFixture):
+    @override_settings(SECUREDRIVE_STORAGE_ENDPOINT_URL='http://original-storage:8333')
+    def test_permanent_delete_rejects_wrong_unpinned_s3_endpoint(self):
+        from unittest.mock import Mock, patch
+        from files.permanent_delete import PermanentDeleteError, permanently_delete_files
+
+        # Không dùng một endpoint S3 khác chỉ vì config cùng tenant đã đổi.
+        self.file.file_path = ''
+        self.file.save(update_fields=['file_path'])
+        self.storage_config.endpoint = 'http://other-storage:8333'
+        self.storage_config.save(update_fields=['endpoint', 'updated_at'])
+        adapter = Mock()
+        with patch('files.permanent_delete.get_storage_adapter', return_value=adapter):
+            with self.assertRaises(PermanentDeleteError):
+                permanently_delete_files([self.file])
+        adapter.delete_object.assert_not_called()
+        self.storage_location.refresh_from_db()
+        self.assertEqual(self.storage_location.state, StorageLocation.State.ERROR)
+        self.assertTrue(File.objects.filter(pk=self.file.pk).exists())
 
     def test_private_file_is_not_downloadable_by_another_user(self):
         other = User.objects.create_user(username="download-other", password="secret")

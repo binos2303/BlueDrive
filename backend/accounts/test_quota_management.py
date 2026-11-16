@@ -74,7 +74,7 @@ class QuotaManagementTests(TestCase):
         self.client.force_login(self.superadmin)
         result = self.client.patch(
             reverse("api-admin-quota-update", kwargs={"quota_id": self.personal_quota.pk}),
-            data=json.dumps({"reason": "Upgrade allocated by administrator", "plan_code": "free", "limit_bytes": None}),
+            data=json.dumps({"reason": "Upgrade allocated by administrator", "plan_code": "free"}),
             content_type="application/json",
         )
         self.assertEqual(result.status_code, 200)
@@ -99,7 +99,7 @@ class QuotaManagementTests(TestCase):
         self.client.force_login(self.superadmin)
         result = self.client.patch(
             reverse("api-admin-quota-update", kwargs={"quota_id": self.workspace_quota.pk}),
-            data=json.dumps({"reason": "Trying incorrect package category", "plan_code": "free", "limit_bytes": None}),
+            data=json.dumps({"reason": "Trying incorrect package category", "plan_code": "free"}),
             content_type="application/json",
         )
         self.assertEqual(result.status_code, 400)
@@ -117,6 +117,57 @@ class QuotaManagementTests(TestCase):
         self.workspace_quota.refresh_from_db()
         self.assertEqual(self.workspace_quota.used_bytes, 0)
         self.assertEqual(self.personal_quota.used_bytes, 0)
+
+    def test_custom_limits_and_extra_limit_field_are_rejected(self):
+        self.client.force_login(self.superadmin)
+        url = reverse("api-admin-quota-update", kwargs={"quota_id": self.personal_quota.pk})
+        for fields in ({"plan_code": None, "limit_bytes": 500}, {"plan_code": None},
+                       {"plan_code": ""}, {"plan_code": "free", "limit_bytes": 1}):
+            with self.subTest(fields=fields):
+                response = self.client.patch(url, data=json.dumps({"reason": "Reject custom quota allocation", **fields}), content_type="application/json")
+                self.assertEqual(response.status_code, 400)
+        self.personal_quota.refresh_from_db()
+        self.assertEqual(self.personal_quota.limit_bytes, 100)
+        self.assertFalse(QuotaAuditEvent.objects.filter(quota_account=self.personal_quota).exists())
+
+    def test_unknown_and_inactive_plans_cannot_be_assigned(self):
+        StoragePlan.objects.create(code="inactive-test", name="Inactive", scope="personal", limit_bytes=999, is_active=False)
+        self.client.force_login(self.superadmin)
+        for code in ("missing-test", "inactive-test"):
+            response = self.client.patch(reverse("api-admin-quota-update", kwargs={"quota_id": self.personal_quota.pk}),
+                data=json.dumps({"reason": "Reject unavailable storage plan", "plan_code": code}), content_type="application/json")
+            self.assertEqual(response.status_code, 400)
+        self.personal_quota.refresh_from_db()
+        self.assertEqual(self.personal_quota.limit_bytes, 100)
+
+    def test_workspace_plan_preserves_usage_and_enforces_its_limit(self):
+        StoragePlan.objects.create(code="workspace-small-test", name="Small workspace", scope="workspace", limit_bytes=90)
+        self.workspace_quota.used_bytes = 80
+        self.workspace_quota.save(update_fields=["used_bytes"])
+        self.client.force_login(self.superadmin)
+        response = self.client.patch(reverse("api-admin-quota-update", kwargs={"quota_id": self.workspace_quota.pk}),
+            data=json.dumps({"reason": "Assign workspace storage package", "plan_code": "workspace-small-test"}), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.workspace_quota.refresh_from_db()
+        self.assertEqual((self.workspace_quota.plan_id, self.workspace_quota.limit_bytes,
+                          self.workspace_quota.used_bytes, self.workspace_quota.reserved_bytes),
+                         ("workspace-small-test", 90, 80, 0))
+        with self.assertRaises(QuotaExceeded):
+            reserve_upload_quota(self.make_upload(self.space, 11).pk, self.owner)
+
+    def test_legacy_allocation_is_preserved_until_plan_is_chosen_and_replay_is_noop(self):
+        self.personal_quota.plan = None
+        self.personal_quota.save(update_fields=["plan"])
+        self.client.force_login(self.superadmin)
+        response = self.client.get(reverse("api-admin-quotas"), {"scope": "personal"})
+        row = next(row for row in response.json()["results"] if row["id"] == str(self.tenant.pk))
+        self.assertEqual((row["quota"]["plan_code"], row["quota"]["limit_bytes"]), (None, 100))
+        payload = {"reason": "Choose a defined personal package", "plan_code": "free"}
+        url = reverse("api-admin-quota-update", kwargs={"quota_id": self.personal_quota.pk})
+        self.assertEqual(self.client.patch(url, data=json.dumps(payload), content_type="application/json").status_code, 200)
+        response = self.client.patch(url, data=json.dumps(payload), content_type="application/json")
+        self.assertTrue(response.json()["unchanged"])
+        self.assertEqual(QuotaAuditEvent.objects.filter(quota_account=self.personal_quota).count(), 1)
 
 
 class OrganizationQuotaAuthorizationTests(TestCase):
@@ -156,3 +207,34 @@ class OrganizationQuotaAuthorizationTests(TestCase):
             self.assertEqual(response.status_code, 404)
         self.quota.refresh_from_db()
         self.assertEqual(self.quota.limit_bytes, 100 * 1024 * 1024)
+
+    def test_platform_quota_directory_excludes_organization_workspaces(self):
+        admin = get_user_model().objects.create_superuser(username="org-quota-platform", email="org-platform@example.test", password="pass123456")
+        personal_workspace = Workspace.objects.create(tenant=self.owner.personal_tenant, name="Personal project", slug="personal-project")
+        self.client.force_login(admin)
+        response = self.client.get(reverse("api-admin-quotas"), {"scope": "workspace"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({row["id"] for row in response.json()["results"]}, {str(personal_workspace.pk)})
+        response = self.client.get(reverse("api-admin-quotas"), {"scope": "workspace", "q": "Engineering"})
+        self.assertEqual(response.json()["count"], 0)
+
+    def test_platform_admin_cannot_assign_plan_to_organization_quota(self):
+        admin = get_user_model().objects.create_superuser(username="org-quota-blocked-platform", email="org-blocked@example.test", password="pass123456")
+        self.client.force_login(admin)
+        response = self.client.patch(reverse("api-admin-quota-update", kwargs={"quota_id": self.quota.pk}),
+            data=json.dumps({"plan_code": "workspace-starter", "reason": "Attempt platform organization edit"}), content_type="application/json")
+        self.assertEqual(response.status_code, 403)
+        self.quota.refresh_from_db()
+        self.assertEqual(self.quota.limit_bytes, 100 * 1024 * 1024)
+
+    def test_platform_history_excludes_organization_allocations_without_deleting_audit(self):
+        admin = get_user_model().objects.create_superuser(username="org-quota-audit-platform", email="org-audit@example.test", password="pass123456")
+        personal = QuotaAccount.objects.get(tenant=self.owner.personal_tenant, scope="tenant")
+        for account in (personal, self.quota):
+            QuotaAuditEvent.objects.create(actor=self.owner, quota_account=account, old_limit_bytes=1,
+                new_limit_bytes=2, old_plan_code="", new_plan_code="", reason="Independent allocation audit fixture")
+        self.client.force_login(admin)
+        response = self.client.get(reverse("api-admin-quota-history"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["quota_account_id"] for row in response.json()["results"]], [str(personal.pk)])
+        self.assertEqual(QuotaAuditEvent.objects.filter(quota_account=self.quota).count(), 1)

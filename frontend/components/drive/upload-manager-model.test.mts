@@ -99,3 +99,26 @@ test("pause and resume preserve UploadSession and do not consume retry budget", 
   current = transitionTask(current, "preparing");
   assert.equal(current.status, "preparing");
 });
+
+test("the same path in My Drive and another workspace is not an upload conflict", () => {
+  const personal = task();
+  const inWorkspace = createUploadTask({ ...personal, id: "workspace-task", workspaceId: "workspace-a" });
+  const anotherWorkspace = createUploadTask({ ...personal, id: "another-task", workspaceId: "workspace-b" });
+  assert.deepEqual(markDuplicateTasks([personal, inWorkspace, anotherWorkspace]).map((entry) => entry.duplicate), [false, false, false]);
+  const duplicate = createUploadTask({ ...inWorkspace, id: "duplicate-in-a" });
+  assert.deepEqual(markDuplicateTasks([inWorkspace, duplicate]).map((entry) => entry.duplicate), [true, true]);
+});
+
+test("pause, retry and completion preserve the task's original workspace", () => {
+  let current = createUploadTask({ ...task(), workspaceId: "workspace-a" });
+  current = transitionTask(current, "preparing");
+  current = transitionTask(current, "uploading", { uploadSessionId: "session-in-a" });
+  current = transitionTask(current, "paused");
+  current = transitionTask(current, "queued");
+  current = transitionTask(current, "failed", { error: "Temporary failure" });
+  current = retryTask(current);
+  assert.equal(current.workspaceId, "workspace-a");
+  current = transitionTask(transitionTask(current, "preparing"), "uploading");
+  current = confirmTaskCompleted(current, true);
+  assert.equal(current.workspaceId, "workspace-a");
+});

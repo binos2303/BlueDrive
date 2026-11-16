@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from files.finalization import finalize_verified_upload
 from files.models import UploadSession
+from files.storage_adapters.base import ObjectStat
 from logs.models import ActivityLog
 
 
@@ -35,6 +36,7 @@ class MultipartUploadActivityTests(TestCase):
     @patch("files.finalization.get_storage_adapter")
     def test_successful_upload_is_logged_once_and_visible_in_personal_history(self, adapter_factory, quota):
         storage = adapter_factory.return_value
+        storage.put_object.return_value = ObjectStat(size_bytes=len(self.content))
         storage.create_object_key.return_value = "primary/audit-test"
         result = finalize_verified_upload(self.session, self.content, self.user)
         self.assertEqual(result["state"], UploadSession.State.AVAILABLE)

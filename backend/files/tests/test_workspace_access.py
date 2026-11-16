@@ -3,7 +3,7 @@ import json
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from accounts.access import can_access_workspace, can_edit_workspace_content, get_default_workspace
@@ -98,6 +98,18 @@ class WorkspaceDriveAccessTests(TestCase):
         self.assertTrue(can_view_file(self.viewer_file, self.member))
         self.assertFalse(can_edit_workspace_content(self.member, self.viewer_workspace))
         self.assertFalse(can_edit_file(self.viewer_file, self.member))
+
+    @override_settings(SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED=True)
+    def test_legacy_upload_routes_cannot_bypass_selected_storage(self):
+        before = (File.objects.count(), Folder.objects.count(), UploadSession.objects.count())
+        for route in ('file_upload', 'folder_upload'):
+            with self.subTest(route=route):
+                response = self.client.post(reverse(route))
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()['code'], 'resumable_upload_required')
+        self.assertEqual(
+            (File.objects.count(), Folder.objects.count(), UploadSession.objects.count()), before,
+        )
 
     def test_drive_list_returns_only_items_from_selected_workspace(self):
         response = self.client.get(

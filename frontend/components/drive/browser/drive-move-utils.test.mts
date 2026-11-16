@@ -26,6 +26,7 @@ test("Chỉ My Drive đang ở view drive được nhận drop tại breadcrumb"
   assert.equal(getBreadcrumbMoveDestination(base), null);
   assert.equal(getBreadcrumbMoveDestination({ ...base, title: "Trash" }), undefined);
   assert.equal(getBreadcrumbMoveDestination({ ...base, listView: "recent" }), undefined);
+  assert.equal(getBreadcrumbMoveDestination({ ...base, title: "Workspace files", index: 0 }), null);
 });
 
 test("Breadcrumb trả đúng root, các thư mục cha và thư mục hiện tại", () => {

@@ -1,4 +1,4 @@
-"""Sprint 2.3: folder ZIP must honor permissions and include MinIO + legacy files."""
+"""Sprint 2.3: folder ZIP must honor permissions and include S3 storage and legacy files."""
 import base64
 import hashlib
 import io
@@ -55,7 +55,7 @@ class FolderArchiveDownloadTests(TestCase):
             is_encrypted=False,
         )
         self.config = StorageConfig.objects.create(
-            tenant=self.tenant, provider=StorageConfig.Provider.MINIO,
+            tenant=self.tenant, provider=StorageConfig.Provider.S3,
             status=StorageConfig.Status.ACTIVE,
         )
         StorageLocation.objects.create(
@@ -77,7 +77,7 @@ class FolderArchiveDownloadTests(TestCase):
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             return {name: archive.read(name) for name in archive.namelist()}
 
-    def test_minio_zip_contains_nested_files_and_empty_directories(self):
+    def test_s3_zip_contains_nested_files_and_empty_directories(self):
         Folder.objects.create(
             tenant=self.tenant, workspace=self.workspace,
             owner=self.owner, parent=self.folder, folder_name="Empty",
@@ -154,7 +154,7 @@ class FolderArchiveDownloadTests(TestCase):
         adapter.assert_not_called()
         self.assertFalse(ActivityLog.objects.filter(action=ActivityLog.Action.DOWNLOAD).exists())
 
-    def test_minio_checksum_mismatch_blocks_whole_archive(self):
+    def test_s3_checksum_mismatch_blocks_whole_archive(self):
         with patch("files.storage_adapters.get_storage_adapter") as adapter:
             adapter.return_value.open_object.return_value = io.BytesIO(b"corrupted")
             response = self.client.get(self.url, HTTP_ACCEPT="application/zip, application/json")

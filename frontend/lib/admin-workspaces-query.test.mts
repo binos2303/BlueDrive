@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAdminTeamQuery, countAssignedMembers } from "./admin-teams-query.ts";
+import { buildAdminWorkspaceQuery, countAssignedMembers } from "./admin-workspaces-query.ts";
 
-test("team listing reuses workspace query with deterministic sort and scope", () => {
-  const query = new URLSearchParams(buildAdminTeamQuery({
+test("workspace listing uses deterministic sort and scope", () => {
+  const query = new URLSearchParams(buildAdminWorkspaceQuery({
     query: " Blue & Green ", scope: "organization", sort: "name_desc", page: 3,
   }));
   assert.equal(query.get("q"), "Blue & Green");
@@ -12,8 +12,8 @@ test("team listing reuses workspace query with deterministic sort and scope", ()
   assert.equal(query.get("page"), "3");
 });
 
-test("team query constrains long searches and invalid page", () => {
-  const query = new URLSearchParams(buildAdminTeamQuery({
+test("workspace query constrains long searches and invalid page", () => {
+  const query = new URLSearchParams(buildAdminWorkspaceQuery({
     query: "x".repeat(300), scope: "all", sort: "newest", page: -2,
   }));
   assert.equal(query.get("q")?.length, 100);

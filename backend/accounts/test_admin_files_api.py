@@ -70,8 +70,8 @@ class AdminFilesAPITests(TestCase):
             is_current=True, sha256="secret-version-checksum",
         )
         storage = StorageConfig.objects.create(
-            tenant=self.personal, provider=StorageConfig.Provider.MINIO,
-            endpoint="https://private-minio.example.test", credential_ref="secret-admin-credential",
+            tenant=self.personal, provider=StorageConfig.Provider.S3,
+            endpoint="https://private-s3.example.test", credential_ref="secret-admin-credential",
         )
         StorageLocation.objects.create(
             tenant=self.personal, file_version=version, storage_config=storage,
@@ -102,11 +102,11 @@ class AdminFilesAPITests(TestCase):
         detail = self.client.get(reverse("api-admin-file-detail", args=[self.personal_file.pk]))
         self.assertEqual(detail.status_code, 200, detail.content)
         self.assertEqual(detail.data["name"], "report.pdf")
-        self.assertEqual(detail.data["versions"][0]["storage"][0]["provider"], "minio")
+        self.assertEqual(detail.data["versions"][0]["storage"][0]["provider"], "s3")
         raw = detail.content.decode("utf-8")
         for secret in (
             "private-object.pdf", "secretchecksum", "secret-version-checksum",
-            "private-minio.example.test", "secret-admin-credential", "private/bucket/object-key",
+            "private-s3.example.test", "secret-admin-credential", "private/bucket/object-key",
             "wrapped_dek", "encryption_nonce", "download_url",
         ):
             self.assertNotIn(secret, raw)

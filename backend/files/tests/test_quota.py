@@ -215,6 +215,7 @@ class QuotaReservationTests(TestCase):
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row locks.")
 class QuotaReservationConcurrencyTests(TransactionTestCase):
     reset_sequences = True
+    serialized_rollback = True
 
     def test_concurrent_reservations_cannot_overrun_quota(self):
         user = User.objects.create_user(username="concurrent-quota-user")

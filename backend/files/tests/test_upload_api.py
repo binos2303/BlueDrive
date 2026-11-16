@@ -97,7 +97,7 @@ class UploadApiTests(TestCase):
         adapter = adapter_factory.return_value
         adapter.create_part_upload_url.side_effect = lambda key, provider_id, number, *, expires_in: type(
             "Signed", (), {
-                "url": f"https://minio.invalid/part/{number}",
+                "url": f"https://s3.invalid/part/{number}",
                 "method": "PUT",
                 "required_headers": {},
             }
@@ -196,7 +196,7 @@ class UploadApiTests(TestCase):
         }, format="json")
         self.assertEqual(created.status_code, 201)
         upload_id = created.data["upload_id"]
-        adapter.create_part_upload_url.return_value.url = "https://minio.invalid/signed"
+        adapter.create_part_upload_url.return_value.url = "https://s3.invalid/signed"
         adapter.create_part_upload_url.return_value.method = "PUT"
         adapter.create_part_upload_url.return_value.required_headers = {}
         authorized = self.client.post(f"/files/api/uploads/{upload_id}/parts/1/authorization/", {}, format="json")

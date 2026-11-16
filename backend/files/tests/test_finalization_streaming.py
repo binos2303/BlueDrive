@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from files.finalization import finalize_verified_upload
 from files.models import File, FileVersion, StorageLocation, UploadSession
-from files.storage_adapters.base import StorageRetryableError
+from files.storage_adapters.base import ObjectStat, StorageRetryableError
 
 
 @override_settings(SECUREDRIVE_UPLOAD_SCANNER="")
@@ -36,6 +36,7 @@ class FinalizationStreamTests(TestCase):
     @patch("files.finalization.get_storage_adapter")
     def test_stream_publication_uses_s3_copy_and_records_integrity(self, get_adapter, quota):
         storage = get_adapter.return_value
+        storage.publish_verified_object.return_value = ObjectStat(size_bytes=len(self.data), version_id="published-v1")
         storage.create_object_key.return_value = "primary/" + "b" * 32
         with tempfile.SpooledTemporaryFile(max_size=4, mode="w+b") as stream:
             stream.write(self.data)
@@ -57,6 +58,8 @@ class FinalizationStreamTests(TestCase):
         self.assertEqual(file.hash_sha256, self.sha)
         self.assertEqual(FileVersion.objects.get(file=file).sha256, self.sha)
         self.assertEqual(StorageLocation.objects.get(file_version__file=file).checksum, self.sha)
+        self.assertEqual(StorageLocation.objects.get(file_version__file=file).provider_version_id, "published-v1")
+        self.assertEqual(StorageLocation.objects.get(file_version__file=file).storage_config.provider, "s3")
         quota.assert_called_once()
 
     @patch("files.finalization.finalize_upload_quota")
@@ -96,6 +99,7 @@ class FinalizationStreamTests(TestCase):
     @patch("files.finalization.get_storage_adapter")
     def test_legacy_bytes_do_not_require_staging_copy(self, get_adapter, quota):
         storage = get_adapter.return_value
+        storage.put_object.return_value = ObjectStat(size_bytes=len(self.data))
         storage.create_object_key.return_value = "primary/" + "b" * 32
         finalize_verified_upload(self.session, self.data, self.user)
         storage.put_object.assert_called_once()
