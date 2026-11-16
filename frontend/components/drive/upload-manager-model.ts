@@ -29,6 +29,7 @@ export type UploadTask = {
   mimeType: string;
   size: number;
   destinationId: string | null;
+  workspaceId: string | null;
   status: UploadStatus;
   retryPolicy: RetryPolicy;
   error: string | null;
@@ -42,7 +43,7 @@ const transitions: Record<UploadStatus, readonly UploadStatus[]> = {
   queued: ["preparing", "canceled", "failed"],
   preparing: ["uploading", "failed", "canceled"],
   uploading: ["paused", "verifying", "scanning", "completed", "failed", "canceled"],
-  paused: ["uploading", "failed", "canceled"],
+  paused: ["queued", "uploading", "failed", "canceled"],
   verifying: ["scanning", "completed", "failed", "canceled"],
   scanning: ["completed", "failed", "canceled"],
   completed: [],
@@ -112,11 +113,13 @@ export function createUploadTask(input: {
   mimeType: string;
   size: number;
   destinationId: string | null;
+  workspaceId?: string | null;
   validationError?: string | null;
 }): UploadTask {
   const { validationError, ...taskInput } = input;
   const task: UploadTask = {
     ...taskInput,
+    workspaceId: input.workspaceId ?? null,
     status: "queued",
     retryPolicy: { retries: 0, maxRetries: 3, retryable: true },
     error: null,
@@ -137,17 +140,17 @@ export function markDuplicateTasks(tasks: UploadTask[]): UploadTask[] {
   const counts = new Map<string, number>();
   for (const task of tasks) {
     if (task.status === "canceled" || (task.status === "failed" && !task.retryPolicy.retryable)) continue;
-    const key = `${task.destinationId ?? "root"}:${task.relativePath.toLocaleLowerCase()}`;
+    const key = `${task.workspaceId ?? "personal"}:${task.destinationId ?? "root"}:${task.relativePath.toLocaleLowerCase()}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return tasks.map((task) => ({
     ...task,
     duplicate: task.status !== "canceled"
       && !(task.status === "failed" && !task.retryPolicy.retryable)
-      && (counts.get(`${task.destinationId ?? "root"}:${task.relativePath.toLocaleLowerCase()}`) ?? 0) > 1,
+      && (counts.get(`${task.workspaceId ?? "personal"}:${task.destinationId ?? "root"}:${task.relativePath.toLocaleLowerCase()}`) ?? 0) > 1,
     conflictResolution: task.status !== "canceled"
       && !(task.status === "failed" && !task.retryPolicy.retryable)
-      && (counts.get(`${task.destinationId ?? "root"}:${task.relativePath.toLocaleLowerCase()}`) ?? 0) > 1
+      && (counts.get(`${task.workspaceId ?? "personal"}:${task.destinationId ?? "root"}:${task.relativePath.toLocaleLowerCase()}`) ?? 0) > 1
       ? task.conflictResolution
       : null,
   }));

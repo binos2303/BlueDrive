@@ -16,7 +16,7 @@ export default function BackupHistoryPage() {
       </div>
 
       <section className="mb-4 grid gap-3 rounded-[20px] border border-border bg-surface p-4 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="flex h-10 items-center gap-2 rounded-xl border border-border bg-background px-3 text-muted">
+        <label data-admin-search-shell className="flex h-10 items-center gap-2 rounded-xl border border-border bg-background px-3 text-muted">
           <Search size={15} /><input aria-label="Search backups" placeholder="Search backup ID" className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted" />
         </label>
         <Filter label="Backup type" value={type} onChange={setType} options={["All types", "Database", "Files", "Full", "Configuration"]} />

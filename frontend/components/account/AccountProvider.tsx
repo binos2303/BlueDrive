@@ -7,7 +7,7 @@ import { syncWorkspaceIdentity } from "@/lib/workspace-context";
 type AccountLoadState =
   | { status: "loading"; account: null; error: null }
   | { status: "loaded"; account: AccountSnapshot; error: null }
-  | { status: "error"; account: null; error: string };
+  | { status: "error"; account: null; error: string; authenticationRequired: boolean };
 
 type AccountContextValue = {
   state: AccountLoadState;
@@ -58,6 +58,7 @@ export default function AccountProvider({
         status: "error",
         account: null,
         error: message,
+        authenticationRequired: error instanceof AccountServiceError && (error.status === 401 || error.status === 403),
       });
     }
   }, [service]);
@@ -87,8 +88,8 @@ export default function AccountProvider({
       }
       return account;
     } catch (error) {
-      if (sequence === requestSequence.current && error instanceof AccountServiceError && (error.status === 401 || error.status === 403)) {
-        setState({ status: "error", account: null, error: "Your session is no longer valid. Sign in again." });
+      if (sequence === requestSequence.current && error instanceof AccountServiceError && (error.status === 401)) {
+        setState({ status: "error", account: null, error: "Your session is no longer valid. Sign in again.", authenticationRequired: true });
       }
       throw error;
     }

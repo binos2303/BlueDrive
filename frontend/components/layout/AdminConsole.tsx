@@ -1,59 +1,208 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Activity, ChevronDown, LayoutDashboard, LogOut, Menu, ShieldAlert, Users, X } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import {
+  Activity, Building2, ChevronDown, ChevronRight, Database, FileText,
+  LayoutDashboard, Menu, Settings2, ShieldAlert, SunMoon, Users, Workflow, X,
+} from "lucide-react";
 import { BrandLogo } from "@/components/ui/BrandLogo";
+import ContextMenu, { type ContextMenuAction } from "@/components/ui/ContextMenu";
+import Toast from "@/components/ui/Toast";
+import Button from "@/components/ui/Button";
 import { useAccount } from "@/components/account/AccountProvider";
+import { readThemePreference, resolveTheme, setThemePreference } from "@/lib/theme";
+import { ADMIN_CONSOLE_NAME_UPDATED, getAdminSettings } from "@/lib/admin-settings-service";
+import useNavigationDrawer from "./useNavigationDrawer";
+import StorageNavigationLink from "@/components/storage/StorageNavigationLink";
 
-const sections = [
-  { title: "Overview", icon: LayoutDashboard, items: [{ title: "Dashboard", href: "/admin" }] },
-  { title: "Management", icon: Users, items: [{ title: "Users", href: "/admin/users" }, { title: "Files", href: "/admin/files" }] },
-  { title: "Monitoring", icon: Activity, items: [{ title: "User Activity", href: "/admin/activity" }, { title: "Audit Logs", href: "/admin/audit" }, { title: "Storage & Quotas", href: "/admin/infrastructure/quotas" }] },
-  { title: "Security", icon: ShieldAlert, items: [{ title: "Security Alerts", href: "/admin/security/alerts" }] },
+const groups = [
+  {
+    title: "Management", icon: Users,
+    items: [
+      { title: "Users", href: "/admin/users", icon: Users },
+      { title: "Organizations", href: "/admin/organizations", icon: Building2 },
+      { title: "Workspaces", href: "/admin/workspaces", icon: Workflow },
+      { title: "Files", href: "/admin/files", icon: FileText },
+    ],
+  },
+  {
+    title: "Security", icon: ShieldAlert,
+    items: [
+      { title: "Roles & Permissions", href: "/admin/permissions", icon: ShieldAlert },
+      { title: "User Activity", href: "/admin/activity", icon: Activity },
+      { title: "Admin Audit Logs", href: "/admin/audit", icon: Activity },
+    ],
+  },
+  {
+    title: "Infrastructure", icon: Database,
+    items: [
+      { title: "System Health", href: "/admin/infrastructure", icon: Activity },
+      { title: "Storage & Quotas", href: "/admin/infrastructure/quotas", icon: Database },
+    ],
+  },
+  {
+    title: "System", icon: Settings2,
+    items: [
+      { title: "Settings", href: "/admin/settings", icon: Settings2 },
+    ],
+  },
 ] as const;
 
-// Keep this in sync with the Django origin used by the existing account API.
-const apiOrigin = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
-
+const apiOrigin = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 type Access = { allowed: boolean; username: string; email: string };
+
+/** Choose the most specific match so System Health is not active on Storage Topology. */
+function navItemActive(href: string, pathname: string) {
+  if (href === "/admin/infrastructure" && (pathname === "/admin/infrastructure/topology" || pathname.startsWith("/admin/infrastructure/topology/"))) return false;
+  if (pathname === href) return true;
+  if (!pathname.startsWith(`${href}/`)) return false;
+  return !groups.some(({ items }) => items.some(({ href: moreSpecific }) =>
+    moreSpecific !== href && moreSpecific.startsWith(`${href}/`) &&
+    (pathname === moreSpecific || pathname.startsWith(`${moreSpecific}/`)),
+  ));
+}
+
 export default function AdminConsole({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const { state, signOut } = useAccount();
+  const router = useRouter();
+  const { state, refresh, signOut, actionError, clearActionError } = useAccount();
   const [access, setAccess] = useState<Access | null>(null);
+  const [consoleName, setConsoleName] = useState("Platform console");
   const [error, setError] = useState("");
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [accessAttempt, setAccessAttempt] = useState(0);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const mobileNav = useRef<HTMLElement>(null);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  useNavigationDrawer(mobileOpen, setMobileOpen, mobileNav, menuButton);
+
   useEffect(() => {
-    if (state.status !== "loaded") return;
-    if (!state.account) return;
+    if (state.status !== "loaded" || !state.account) return;
     const controller = new AbortController();
-    fetch(`${apiOrigin}/accounts/api/admin/access/`, { credentials: "include", signal: controller.signal, cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(response.status === 403 ? "This account does not have platform administrator access." : "Cannot verify administrator access. Check your API connection.");
-        return response.json() as Promise<Access>;
-      })
-      .then((result) => { setAccess(result); setError(""); })
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Access check failed."); });
+    let denied = false;
+    fetch(`${apiOrigin}/accounts/api/admin/access/`, {
+      credentials: "include", signal: controller.signal, cache: "no-store",
+    }).then(async (response) => {
+      if (!response.ok) {
+        denied = response.status === 401 || response.status === 403;
+        throw new Error(denied
+          ? "This account does not have platform administrator access."
+          : "The administrator access service is unavailable. Please retry.");
+      }
+      return response.json() as Promise<Access>;
+    }).then((result) => {
+      if (controller.signal.aborted) return;
+      setAccess(result);
+      setAccessDenied(!result.allowed);
+      setError("");
+    }).catch((reason: unknown) => {
+      if (!controller.signal.aborted) {
+        setAccess(null);
+        setAccessDenied(denied);
+        setError(reason instanceof TypeError ? "Could not connect to verify administrator access. Check your connection and retry." : reason instanceof Error ? reason.message : "Access check failed. Please retry.");
+      }
+    });
     return () => controller.abort();
-  }, [state.status]);
-  const activeSection = sections.find((section) => section.items.some((item) => pathname === item.href || (item.href !== "/admin" && pathname.startsWith(`${item.href}/`))))?.title;
-  function isOpen(title: string) { return expanded[title] ?? title === activeSection; }
-  if (state.status === "error") return <main className="flex min-h-screen items-center justify-center p-6"><div className="max-w-md text-center"><h1 className="text-xl font-semibold">Sign in required</h1><p className="mt-2 text-sm text-muted">{state.error}</p><Link href="/login?next=%2Fadmin" className="mt-4 inline-block text-brand">Sign in</Link></div></main>;
-  if (state.status !== "loaded" || (!access && !error)) return <main className="flex min-h-screen items-center justify-center bg-background text-muted">Verifying administrator access…</main>;
-  if (error || !access?.allowed) return <main className="flex min-h-screen items-center justify-center bg-background px-5"><div className="w-full max-w-md rounded-2xl border border-border bg-surface p-7"><h1 className="text-xl font-semibold">Administrator access required</h1><p className="mt-3 text-sm text-muted">{error || "Access denied."}</p><div className="mt-6 flex gap-4 text-sm"><Link href="/login?next=%2Fadmin" className="font-semibold text-brand">Sign in as admin</Link><Link href="/drive" className="text-muted">Back to Drive</Link></div></div></main>;
-  return <div className="min-h-screen bg-background text-foreground">
-    {mobileOpen && <button aria-label="Close menu" className="fixed inset-0 z-30 bg-black/30 lg:hidden" onClick={() => setMobileOpen(false)} />}
-    <aside className={`fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-border bg-surface transition-transform lg:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
-      <div className="flex h-[72px] items-center justify-between border-b border-border px-4"><Link href="/admin"><BrandLogo className="text-lg" /></Link><button className="lg:hidden" aria-label="Close menu" onClick={() => setMobileOpen(false)}><X size={18} /></button></div>
-      <nav className="min-h-0 flex-1 overflow-y-auto px-3 py-4" aria-label="Admin navigation">
-        {sections.map(({ title, icon: Icon, items }) => <div key={title} className="mb-2">
-          <button type="button" aria-expanded={isOpen(title)} aria-controls={`admin-group-${title}`} onClick={() => setExpanded((old) => ({ ...old, [title]: !isOpen(title) }))} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold transition hover:bg-brand-soft ${title === activeSection ? "text-brand" : "text-foreground"}`}><Icon size={18} /><span className="flex-1">{title}</span><ChevronDown size={16} className={`transition-transform ${isOpen(title) ? "rotate-180" : ""}`} /></button>
-          {isOpen(title) && <div id={`admin-group-${title}`} className="ml-5 space-y-1 border-l border-border pl-3 py-1">{items.map((item) => { const selected = pathname === item.href || (item.href !== "/admin" && pathname.startsWith(`${item.href}/`)); return <Link key={item.href} href={item.href} aria-current={selected ? "page" : undefined} onClick={() => setMobileOpen(false)} className={`block rounded-lg px-3 py-2 text-[13px] transition ${selected ? "bg-brand-soft font-semibold text-brand" : "text-muted hover:bg-background hover:text-foreground"}`}>{item.title}</Link>; })}</div>}
-        </div>)}
-      </nav><div className="border-t border-border p-4"><p className="truncate text-sm font-semibold">{access.username}</p><p className="truncate text-xs text-muted">{access.email}</p><button className="mt-3 flex items-center gap-2 text-xs text-muted hover:text-foreground" onClick={() => void signOut()}><LogOut size={14} />Sign out</button></div>
+  }, [state.status, state.account, accessAttempt]);
+
+  useEffect(() => {
+    if (!access?.allowed) return;
+    const controller = new AbortController();
+    getAdminSettings(controller.signal).then((result) => {
+      if (!controller.signal.aborted) setConsoleName(result.display_name);
+    }).catch(() => {
+      // Console remains usable when this optional display-label request fails.
+    });
+    function updated(event: Event) {
+      const name = (event as CustomEvent<unknown>).detail;
+      if (typeof name === "string") setConsoleName(name);
+    }
+    window.addEventListener(ADMIN_CONSOLE_NAME_UPDATED, updated);
+    return () => {
+      controller.abort();
+      window.removeEventListener(ADMIN_CONSOLE_NAME_UPDATED, updated);
+    };
+  }, [access?.allowed]);
+
+
+  const activeGroup = groups.find(({ items }) => items.some(({ href }) => pathname === href || pathname.startsWith(`${href}/`)))?.title;
+  const groupIsOpen = (title: string) => expanded[title] ?? title === activeGroup;
+  const activeDashboard = pathname === "/admin";
+
+  if (state.status === "error" || (state.status === "loaded" && !state.account)) {
+    if (state.status === "error" && !state.authenticationRequired) {
+      return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="max-w-md text-center"><h1 className="text-xl font-semibold">Could not load your account</h1><p role="alert" className="mt-2 text-sm text-muted">{state.error}</p><Button className="mt-4" onClick={() => void refresh()}>Retry</Button></div></main>;
+    }
+    return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="max-w-md text-center"><h1 className="text-xl font-semibold">Sign in required</h1><p className="mt-2 text-sm text-muted">{state.status === "error" ? state.error : "Sign in to continue."}</p><Link href="/login?next=%2Fadmin" className="mt-4 inline-block text-sm font-semibold text-brand-contrast">Sign in</Link></div></main>;
+  }
+  if (state.status !== "loaded" || (!access && !error)) {
+    return <main className="flex min-h-screen items-center justify-center bg-background text-sm text-muted" role="status">Verifying administrator access…</main>;
+  }
+  if (error || !access?.allowed) {
+    return <main className="flex min-h-screen items-center justify-center bg-background p-6"><div className="w-full max-w-md rounded-2xl border border-border bg-surface p-7"><h1 className="text-xl font-semibold">{accessDenied ? "Administrator access required" : "Could not verify administrator access"}</h1><p role="alert" className="mt-3 text-sm text-muted">{error || "Access denied."}</p>{accessDenied ? <Link href="/login?next=%2Fadmin" className="mt-5 inline-block text-sm font-semibold text-brand-contrast">Sign in as admin</Link> : <Button className="mt-5" onClick={() => { setAccess(null); setError(""); setAccessAttempt((attempt) => attempt + 1); }}>Retry</Button>}</div></main>;
+  }
+
+  const initials = access.username.trim().slice(0, 2).toUpperCase() || "AD";
+  const toggleTheme = () => setThemePreference(resolveTheme(readThemePreference()) === "dark" ? "light" : "dark");
+  const accountActions: ContextMenuAction[] = [
+    { label: "Manage accounts", onSelect: () => router.push("/admin/users") },
+    { label: "Sign out", destructive: true, onSelect: () => { void signOut().catch(() => undefined); } },
+  ];
+  const navLinkClass = (selected: boolean) => [
+    "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm transition-colors duration-(--motion-fast)",
+    selected ? "bg-brand-soft font-semibold text-brand-contrast" : "font-medium text-muted hover:bg-background hover:text-foreground",
+  ].join(" ");
+
+  return <div className="admin-console flex h-dvh overflow-hidden bg-background text-foreground">
+    {mobileOpen && <button type="button" aria-label="Close navigation" className="fixed inset-0 z-40 bg-foreground/35 lg:hidden" onClick={() => setMobileOpen(false)} />}
+    <aside ref={mobileNav} id="admin-navigation" className={`fixed inset-y-0 left-0 z-50 flex h-dvh w-64 max-w-[calc(100vw-3rem)] shrink-0 flex-col border-r border-border bg-surface transition-transform duration-(--motion-normal) lg:static lg:z-auto lg:translate-x-0 ${mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"}`}>
+      <div className="flex h-18 shrink-0 items-center justify-between px-4">
+        <Link href="/admin" onClick={() => setMobileOpen(false)} aria-label="BlueDrive Admin dashboard"><BrandLogo /></Link>
+        <button type="button" aria-label="Close navigation" onClick={() => setMobileOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-brand-soft hover:text-brand-contrast lg:hidden"><X size={18} /></button>
+      </div>
+      <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4" aria-label="Admin navigation">
+        <Link href="/admin" aria-current={activeDashboard ? "page" : undefined} onClick={() => setMobileOpen(false)} className={navLinkClass(activeDashboard)}><LayoutDashboard size={17} /><span>Dashboard</span></Link>
+        <div className="mt-4 space-y-2">
+          {groups.map(({ title, icon: Icon, items }) => {
+            const open = groupIsOpen(title);
+            const selected = title === activeGroup;
+            return <section key={title}>
+              <button type="button" aria-expanded={open} aria-controls={`admin-nav-${title}`} onClick={() => setExpanded((current) => ({ ...current, [title]: !open }))} className={`flex h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-[14px] font-medium transition-colors duration-(--motion-fast) hover:bg-background ${selected ? "text-brand-contrast" : "text-foreground"}`}>
+                <Icon size={17} /><span className="min-w-0 flex-1">{title}</span>{open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+              </button>
+              {open && <div id={`admin-nav-${title}`} className="ml-5 space-y-0.5 border-l border-border pl-2 py-1">
+                {items.map(({ title: label, href, icon: ChildIcon }) => {
+                  const isSelected = navItemActive(href, pathname);
+                  return <Link key={href} href={href} aria-current={isSelected ? "page" : undefined} onClick={() => setMobileOpen(false)} className={`flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors duration-(--motion-fast) ${isSelected ? "bg-brand-soft font-semibold text-brand-contrast" : "text-muted hover:bg-background hover:text-foreground"}`}><ChildIcon size={16} className="shrink-0" /><span>{label}</span></Link>;
+                })}
+                {title === "Infrastructure" && <StorageNavigationLink onNavigate={() => setMobileOpen(false)} />}
+              </div>}
+            </section>;
+          })}
+        </div>
+      </nav>
     </aside>
-    <div className="min-h-screen lg:pl-60"><header className="sticky top-0 z-20 flex h-[72px] items-center gap-3 border-b border-border bg-surface/90 px-5 backdrop-blur"><button className="lg:hidden" aria-label="Open menu" onClick={() => setMobileOpen(true)}><Menu size={21} /></button><span className="text-sm font-semibold">BlueDrive Administration</span><span className="ml-auto rounded-full bg-brand-soft px-3 py-1 text-xs font-semibold text-brand">Platform Admin</span></header><main className="mx-auto w-full max-w-[1440px] p-4 sm:p-6">{children}</main></div>
+    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <header className="flex h-[72px] shrink-0 items-center gap-3 border-b border-border bg-surface/90 px-3 backdrop-blur-sm sm:px-6">
+        <button ref={menuButton} type="button" aria-label="Open navigation" aria-controls="admin-navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen(true)} className="flex h-10 w-10 items-center justify-center rounded-xl text-muted hover:bg-brand-soft hover:text-brand-contrast lg:hidden"><Menu size={20} /></button>
+        {/* Page titles live in AdminPageHeader, never in the global app bar. */}
+        <span className="truncate text-[13px] font-semibold text-muted sm:text-[14px]">{consoleName}</span>
+        <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3">
+          <button type="button" aria-label="Toggle light or dark theme" title="Toggle theme" onClick={toggleTheme} className="flex h-9 w-9 items-center justify-center rounded-xl text-muted hover:bg-brand-soft hover:text-brand-contrast"><SunMoon size={17} /></button>
+          <ContextMenu
+            label={`Account actions for ${access.username}`}
+            trigger={<><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-semibold text-brand-contrast">{initials}</span><span className="hidden max-w-36 truncate text-[13px] font-semibold xl:block">{access.username}</span></>}
+            triggerClassName="flex min-h-10 items-center gap-2 rounded-lg p-1 text-left transition-colors hover:bg-background"
+            header={<div className="flex min-w-56 items-center gap-3 px-1 py-1"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-semibold text-brand-contrast">{initials}</span><div className="min-w-0"><p className="truncate text-[13px] font-semibold text-foreground">{access.username}</p><p className="max-w-48 truncate text-[11px] text-muted">{access.email || "Platform administrator"}</p><p className="mt-0.5 text-[11px] font-medium text-brand-contrast">Platform Admin</p></div></div>}
+            actions={accountActions}
+          />
+        </div>
+      </header>
+      <main id="admin-main" className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-[1440px] px-4 py-6 sm:px-6">{children}</div></main>
+      {actionError && <div className="fixed bottom-4 left-4 z-[80] w-[min(24rem,calc(100vw-2rem))]"><Toast title="Account action failed" variant="error" onDismiss={clearActionError}>{actionError}</Toast></div>}
+    </div>
   </div>;
 }

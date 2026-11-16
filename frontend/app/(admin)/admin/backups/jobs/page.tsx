@@ -14,7 +14,7 @@ export default function BackupJobsPage() {
         <button type="button" disabled className="rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white opacity-50">Run backup</button>
       </div>
 
-      <div className="mb-4 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+      <div className="mb-4 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning-soft p-4 text-warning">
         <AlertTriangle size={18} className="mt-0.5 shrink-0" />
         <p className="text-sm">Backup execution is unavailable.</p>
       </div>
@@ -30,7 +30,7 @@ export default function BackupJobsPage() {
             <tbody>
               {jobs.map(({ name, scope, icon: Icon }) => (
                 <tr key={name} className="border-t border-border/70">
-                  <td className="px-5 py-4"><span className="flex items-center gap-3 text-sm font-medium"><span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-soft text-brand"><Icon size={17} /></span>{name}</span></td>
+                  <td className="px-5 py-4"><span className="flex items-center gap-3 text-sm font-medium"><span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-soft text-brand-contrast"><Icon size={17} /></span>{name}</span></td>
                   <td className="px-4 py-4 text-sm text-muted">{scope}</td>
                   <td className="px-4 py-4"><span className="rounded-full bg-background px-2.5 py-1 text-xs text-muted">Unknown</span></td>
                   <td className="px-4 py-4 text-sm text-muted">—</td>

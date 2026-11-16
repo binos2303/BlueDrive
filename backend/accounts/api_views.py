@@ -1,3 +1,4 @@
+from .platform_admin import is_platform_admin
 from django import forms
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.core.exceptions import ValidationError
@@ -19,6 +20,7 @@ from logs.services import log_action
 from .forms import RegisterForm
 from .models import Membership, Tenant
 from .views import ProfileEmailForm
+from .account_email import EmailUpdateDenied, lock_email_identity, update_user_email
 from django.shortcuts import get_object_or_404
 
 
@@ -90,6 +92,7 @@ def _account_snapshot(user):
         else None
     )
     return {
+        "is_platform_admin": is_platform_admin(user),
         "profile": {
             "username": user.get_username(),
             "email": user.email,
@@ -174,6 +177,11 @@ def register_api_view(request):
 
     try:
         with transaction.atomic():
+            lock_email_identity(form.cleaned_data["email"])
+            if get_user_model().objects.filter(
+                email__iexact=form.cleaned_data["email"]
+            ).exists():
+                return _registration_accepted()
             form.save()
     except IntegrityError:
         user_model = get_user_model()
@@ -259,12 +267,8 @@ def current_account_view(request):
     if request.method == "GET":
         return Response(_account_snapshot(request.user))
 
-    unexpected_fields = set(request.data.keys()) - {"email"}
-    if unexpected_fields:
-        return Response(
-            {"detail": "Only the email field can be updated."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    if not isinstance(request.data, dict) or set(request.data) != {"email", "current_password"}:
+        return Response({"detail": "Email and current password are required."}, status=400)
 
     form = ProfileEmailForm({"email": request.data.get("email", "")})
     if not form.is_valid():
@@ -273,8 +277,10 @@ def current_account_view(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    request.user.email = form.cleaned_data["email"]
-    request.user.save(update_fields=["email"])
+    try:
+        update_user_email(request.user, form.cleaned_data["email"], request.data["current_password"])
+    except EmailUpdateDenied as error:
+        return Response({"detail": error.detail, "fieldErrors": {error.field: [error.detail]}}, status=error.status)
     return Response(_account_snapshot(request.user))
 
 

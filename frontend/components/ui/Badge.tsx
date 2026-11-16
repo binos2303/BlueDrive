@@ -9,9 +9,9 @@ type BadgeProps = {
 const variants = {
   neutral: "bg-background text-foreground",
   brand: "bg-brand-soft text-brand-contrast",
-  success: "bg-green-50 text-success",
-  warning: "bg-amber-50 text-warning",
-  danger: "bg-rose-50 text-danger",
+  success: "bg-success-soft text-success",
+  warning: "bg-warning-soft text-warning",
+  danger: "bg-danger-soft text-danger",
 };
 
 export default function Badge({

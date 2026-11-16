@@ -2,12 +2,16 @@ from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
-from accounts.services import get_personal_tenant
+from accounts.services import get_personal_tenant, starting_storage_plan
+from accounts.platform_admin import is_platform_admin
 
 
 @receiver(post_save, sender=get_user_model())
 def create_personal_tenant_for_new_user(sender, instance, created, **kwargs):
-    if created:
+    # Provisioned admins are created inactive with an unusable password.
+    # They are staff before the first post_save, so they must never receive
+    # the ordinary user's Personal Tenant during invitation.
+    if created and not instance.is_staff and not instance.is_superuser:
         get_personal_tenant(instance)
 
 
@@ -43,3 +47,16 @@ def ensure_default_workspace_for_new_membership(sender, instance, created, **kwa
         membership=instance,
         defaults={"role": role, "status": assignment_status},
     )
+
+
+@receiver(post_save, sender="accounts.Workspace")
+def provision_new_workspace_quota(sender, instance, created, **kwargs):
+    """Assign Workspace Starter to newly created non-default workspaces."""
+    if created and not instance.is_default:
+        from accounts.models import QuotaAccount, StoragePlan
+        plan = starting_storage_plan(StoragePlan.Scope.WORKSPACE)
+        QuotaAccount.objects.get_or_create(
+            tenant=instance.tenant, workspace=instance,
+            scope=QuotaAccount.Scope.WORKSPACE,
+            defaults={"plan": plan, "limit_bytes": plan.limit_bytes},
+        )

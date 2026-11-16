@@ -1,9 +1,11 @@
 from .models import Share
+from files.models import File
 from accounts.access import (
     active_membership,
     can_access_workspace,
     can_edit_workspace_content,
     has_active_membership,
+    workspace_role_for_user,
 )
 from accounts.models import Membership, Tenant, Workspace
 
@@ -61,11 +63,16 @@ def get_folder_ancestor_ids(folder):
 def _folder_has_deleted_ancestor(folder):
     """Return True when this folder or one of its ancestors is in Trash."""
     current = folder
+    visited = set()
 
     while current is not None:
+        # Fail closed on a corrupt/cyclic tree, not just deleted parents.
+        if current.pk in visited:
+            return True
+        visited.add(current.pk)
         if current.deleted_at is not None:
             return True
-        # A malformed cross-workspace parent chain must never inherit a share.
+        # A malformed cross-workspace parent chain must never grant access.
         if (
             current.tenant_id != folder.tenant_id
             or current.workspace_id != folder.workspace_id
@@ -74,6 +81,24 @@ def _folder_has_deleted_ancestor(folder):
         current = current.parent
 
     return False
+
+
+def _file_has_inaccessible_parent(drive_file):
+    """Block every authorization path when a file's folder chain is unusable.
+
+    A file can remain individually live while a parent is in Trash (or a
+    malformed database row references a folder from another workspace).
+    Neither Workspace membership nor a direct share may bypass that boundary.
+    """
+    folder = drive_file.folder
+    return bool(
+        folder is not None
+        and (
+            folder.tenant_id != drive_file.tenant_id
+            or folder.workspace_id != drive_file.workspace_id
+            or _folder_has_deleted_ancestor(folder)
+        )
+    )
 
 
 def get_receiver_share_for_folder(folder, user):
@@ -161,11 +186,7 @@ def get_receiver_share_for_file(drive_file, user):
         )
         return direct_share
 
-    if (
-        drive_file.folder.workspace_id != drive_file.workspace_id
-        or drive_file.folder.tenant_id != drive_file.tenant_id
-        or _folder_has_deleted_ancestor(drive_file.folder)
-    ):
+    if _file_has_inaccessible_parent(drive_file):
         return None
 
     direct_share = (
@@ -194,8 +215,8 @@ def get_receiver_share_for_file(drive_file, user):
 
 
 def can_view_file(drive_file, user):
-    """Return True for an authorized workspace member or direct share recipient."""
-    if drive_file.deleted_at is not None:
+    """Authorize a live file with a live, correctly scoped folder chain."""
+    if drive_file is None or drive_file.deleted_at is not None or _file_has_inaccessible_parent(drive_file):
         return False
     # Workspace members can collaborate on workspace files without requiring
     # a separate Share row for every item. My Drive remains private because its
@@ -218,7 +239,7 @@ def can_edit_file(drive_file, user):
     Viewer:
         Read/download only.
     """
-    if drive_file.deleted_at is not None:
+    if drive_file is None or drive_file.deleted_at is not None or _file_has_inaccessible_parent(drive_file):
         return False
     if _owner_can_edit_workspace_resource(drive_file, user):
         return True
@@ -235,8 +256,8 @@ def can_edit_file(drive_file, user):
 
 
 def can_view_folder(folder, user):
-    """Return True for an authorized workspace member or direct share recipient."""
-    if folder.deleted_at is not None:
+    """A folder with any deleted or invalid ancestor is not visible."""
+    if folder is None or _folder_has_deleted_ancestor(folder):
         return False
     if _owner_can_view_workspace_resource(folder, user):
         return True
@@ -256,7 +277,7 @@ def can_edit_folder(folder, user):
     Viewer:
         Read-only.
     """
-    if folder.deleted_at is not None:
+    if folder is None or _folder_has_deleted_ancestor(folder):
         return False
     if _owner_can_edit_workspace_resource(folder, user):
         return True
@@ -284,9 +305,14 @@ def is_descendant_or_same(candidate, ancestor):
         return False
 
     current = candidate
+    visited = set()
 
     while current is not None:
-        if current.id == ancestor.id:
+        if current.pk in visited:
+            # Corrupt cycles must not hang move/copy permission checks.
+            return False
+        visited.add(current.pk)
+        if current.pk == ancestor.pk:
             return True
         current = current.parent
 
@@ -298,7 +324,7 @@ def can_edit_folder_tree(folder, user):
     Return True when the user can edit the complete live subtree
     rooted at `folder`.
 
-    The owner can always edit the tree while the root is live.
+    Workspace Editors/Admins can edit the live tree regardless of its creator.
 
     For a shared tree, every live folder in the subtree must resolve
     to an Editor permission. This deliberately respects direct child
@@ -309,13 +335,11 @@ def can_edit_folder_tree(folder, user):
     if folder is None:
         return False
 
-    if folder.owner_id == user.id:
-        return (
-            not _folder_has_deleted_ancestor(folder)
-            and _owner_can_edit_workspace_resource(folder, user)
-        )
-
     if _folder_has_deleted_ancestor(folder):
+        return False
+    if _owner_can_edit_workspace_resource(folder, user):
+        return True
+    if folder.owner_id == user.id:
         return False
 
     root_share = get_receiver_share_for_folder(
@@ -409,3 +433,130 @@ def can_edit_destination_folder(
         return False
 
     return can_edit_folder(folder, user)
+
+def upsert_direct_share(*, resource, receiver, owner, permission):
+    """Upsert one grant and report a *real* change under a row lock.
+
+    Caller must use transaction.atomic. Identical repeated shares are no-ops
+    and should not generate an activity event or an email notification.
+    """
+    from .models import Share
+
+    if resource.__class__.__name__ == "File":
+        target = {"file": resource}
+    elif resource.__class__.__name__ == "Folder":
+        target = {"folder": resource}
+    else:
+        raise ValueError("Only files and folders may be directly shared")
+    share, created = Share.objects.select_for_update().get_or_create(
+        **target, receiver=receiver,
+        defaults={"tenant": resource.tenant, "owner": owner, "permission": permission},
+    )
+    if created:
+        return "created", None
+    previous_permission = share.permission
+    if previous_permission == permission:
+        return "unchanged", previous_permission
+    share.permission = permission
+    share.save(update_fields=["permission"])
+    return "permission_changed", previous_permission
+
+def can_manage_direct_share(resource, actor):
+    """Only the file/folder owner with current Workspace edit rights manages grants."""
+    if resource is None or resource.owner_id != actor.pk or resource.deleted_at is not None:
+        return False
+    if not _owner_can_edit_workspace_resource(resource, actor):
+        return False
+    if isinstance(resource, File):
+        folder = resource.folder
+    else:
+        folder = resource
+    return folder is None or not _folder_has_deleted_ancestor(folder)
+
+
+def change_direct_share_permission(*, share, actor, permission):
+    """Requires a locked Share row inside transaction.atomic(). Audit real changes."""
+    from logs.models import ActivityLog
+    from logs.services import log_action
+
+    if permission not in {Share.Permission.VIEWER, Share.Permission.EDITOR}:
+        raise ValueError("Unsupported permission")
+    previous = share.permission
+    if previous == permission:
+        return False
+    resource = share.file if share.file_id else share.folder
+    kind = share.item_type
+    name = resource.file_name if share.file_id else resource.folder_name
+    share.permission = permission
+    share.save(update_fields=["permission"])
+    log_action(
+        actor, ActivityLog.Action.SHARE,
+        f"Changed access to {name} for {share.receiver.username} from {previous} to {permission}",
+        obj=resource,
+        metadata={
+            "operation": "permission_changed", "recipient_username": share.receiver.get_username(),
+            "recipient_email": share.receiver.email, "permission": permission,
+            "previous_permission": previous, "shared_count": 1,
+            "resource_names": [name], "resource_kinds": [kind],
+            "resource_changes": [{"name": name, "kind": kind, "operation": "permission_changed",
+                                  "permission": permission, "previous_permission": previous}],
+        },
+    )
+    return True
+
+
+def revoke_direct_share(*, share, actor):
+    """Requires a locked Share row inside transaction.atomic()."""
+    from logs.models import ActivityLog
+    from logs.services import log_action
+
+    resource = share.file if share.file_id else share.folder
+    kind = share.item_type
+    name = resource.file_name if share.file_id else resource.folder_name
+    recipient = share.receiver
+    permission = share.permission
+    share.delete()
+    log_action(
+        actor, ActivityLog.Action.REVOKE_SHARE,
+        f"Revoked access to {name} for {recipient.username}",
+        obj=resource,
+        metadata={
+            "operation": "revoked", "recipient_username": recipient.get_username(),
+            "recipient_email": recipient.email, "permission": permission,
+            "shared_count": 1, "resource_names": [name], "resource_kinds": [kind],
+            "resource_changes": [{"name": name, "kind": kind, "operation": "revoked", "permission": permission}],
+        },
+    )
+
+
+def describe_resource_access(resource, user, *, share=None):
+    """Consistent details metadata for owners, workspace members and shares.
+
+    Only call this after can_view_file/can_view_folder has authorized the item.
+    A Workspace role is not a global platform role; direct share access is
+    independent and may grant Editor to a recipient outside the Workspace.
+    """
+    if resource.owner_id == user.pk:
+        return {"access": "Owner", "permission": None, "shared_by": None}
+
+    role = workspace_role_for_user(user, resource.workspace)
+    is_file = resource.__class__.__name__ == "File"
+    editable = can_edit_file(resource, user) if is_file else can_edit_folder(resource, user)
+    effective_permission = Share.Permission.EDITOR if editable else Share.Permission.VIEWER
+
+    if role is not None:
+        # A direct Editor grant can exceed a Viewer Workspace role; reflect
+        # effective access rather than reporting a misleading Viewer label.
+        if role == "viewer" and editable:
+            label = "Editor (direct share)"
+        else:
+            label = f"Workspace {role.title()}"
+        return {
+            "access": label, "permission": effective_permission,
+            "shared_by": share.owner.get_username() if share is not None else None,
+        }
+    return {
+        "access": share.permission_label if share is not None else "Viewer",
+        "permission": effective_permission,
+        "shared_by": share.owner.get_username() if share is not None else None,
+    }

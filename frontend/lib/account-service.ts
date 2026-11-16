@@ -3,6 +3,7 @@ import { getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 export type AccountType = "individual" | "business" | "unclassified";
 
 export type AccountSnapshot = {
+  is_platform_admin?: boolean;
   profile: {
     username: string;
     email: string;
@@ -20,7 +21,7 @@ export type AccountSnapshot = {
   }>;
 };
 
-export type ProfileUpdate = Pick<AccountSnapshot["profile"], "email">;
+export type ProfileUpdate = { email: string; current_password: string };
 
 export interface AccountService {
   getCurrentAccount(): Promise<AccountSnapshot>;
@@ -50,10 +51,13 @@ function apiBase(): string {
   return base.replace(/\/+$/, "");
 }
 
+export type AccountRequestInit = RequestInit & { workspaceId?: string | null };
+
 export async function requestAccountApi<T>(
   path: string,
-  init: RequestInit = {},
+  init: AccountRequestInit = {},
 ): Promise<T> {
+  const { workspaceId: explicitWorkspaceId, ...fetchInit } = init;
   let response: Response;
   try {
     const headers = new Headers(init.headers);
@@ -68,12 +72,12 @@ export async function requestAccountApi<T>(
       // The server remains the authorization boundary; this header only selects
       // the active workspace context for the existing Drive APIs.
       headers.delete("X-Workspace-ID");
-      const workspaceId = getActiveWorkspaceIdForRequest();
+      const workspaceId = explicitWorkspaceId === undefined ? getActiveWorkspaceIdForRequest() : explicitWorkspaceId;
       if (workspaceId) headers.set("X-Workspace-ID", workspaceId);
     }
 
     response = await fetch(`${apiBase()}${path}`, {
-      ...init,
+      ...fetchInit,
       credentials: "include",
       headers,
     });
@@ -144,14 +148,3 @@ export const djangoAccountService: AccountService = {
     );
   },
 };
-
-export function getConfiguredSupportUrl(): string | null {
-  const raw = process.env.NEXT_PUBLIC_SUPPORT_URL?.trim();
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : null;
-  } catch {
-    return null;
-  }
-}

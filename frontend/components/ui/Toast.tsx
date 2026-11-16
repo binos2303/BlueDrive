@@ -10,9 +10,9 @@ type ToastProps = {
 };
 
 const variants = {
-  success: "border-green-200 bg-green-50 text-success",
-  warning: "border-amber-200 bg-amber-50 text-warning",
-  error: "border-rose-200 bg-rose-50 text-danger",
+  success: "border-success/30 bg-success-soft text-success",
+  warning: "border-warning/30 bg-warning-soft text-warning",
+  error: "border-danger/30 bg-danger-soft text-danger",
   info: "border-brand/20 bg-brand-soft text-brand-contrast",
 };
 

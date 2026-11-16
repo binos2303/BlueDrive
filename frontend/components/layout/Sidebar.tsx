@@ -1,12 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState, type Ref } from "react";
+import { useCallback, useEffect, useRef, useState, type Ref } from "react";
 import {
-    ChevronDown,
-    ChevronRight,
     Clock3,
     Building2,
-    Folder,
     HardDrive,
     Share2,
     Star,
@@ -17,20 +14,20 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { BrandLogo } from "@/components/ui/BrandLogo";
 import DriveNewMenu from "@/components/drive/DriveNewMenu";
-import WorkspaceSwitcher from "@/components/workspaces/WorkspaceSwitcher";
+import WorkspaceSidebar from "./WorkspaceSidebar";
+import DriveFolderNavigation from "./DriveFolderNavigation";
+import useActiveWorkspaceId from "@/components/workspaces/useActiveWorkspaceId";
+import type { OrganizationWorkspace } from "@/lib/workspace-service";
 import { useAccount } from "@/components/account/AccountProvider";
 import { DRIVE_UPLOAD_COMPLETED_EVENT, FOLDER_TREE_REFRESH_EVENT, WORKSPACE_CHANGED_EVENT } from "@/lib/workspace-context";
 import { requestAccountApi } from "@/lib/account-service";
 import { clearActiveWorkspaceSelection, getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
-
-type FolderTreeNode = {
-    id: number;
-    name: string;
-    parent_id: number | null;
-    children: FolderTreeNode[];
-};
+import { driveFolderIdFromPathname } from "@/lib/drive-paths";
+import StorageNavigationLink from "@/components/storage/StorageNavigationLink";
 
 type SidebarProps = {
+    workspace: OrganizationWorkspace | null;
+    sharedFolderId: number | null;
     mobileOpen: boolean;
     onNavigate: () => void;
     navigationRef: Ref<HTMLElement>;
@@ -75,32 +72,24 @@ const navigationItems = [
     { label: "Trash", href: "/drive/trash", icon: Trash2 },
 ];
 
-function collectAncestorIds(nodes: FolderTreeNode[], targetId: number, path: number[] = []): number[] | null {
-    for (const node of nodes) {
-        const nextPath = [...path, node.id];
-        if (node.id === targetId) return nextPath;
-        const nested = collectAncestorIds(node.children, targetId, nextPath);
-        if (nested) return nested;
-    }
-    return null;
-}
-
-export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: SidebarProps) {
+export default function Sidebar({ mobileOpen, onNavigate, navigationRef, workspace, sharedFolderId }: SidebarProps) {
     const pathname = usePathname();
+    const activeWorkspaceId = useActiveWorkspaceId();
+    const inSharedFolder = sharedFolderId !== null && sharedFolderId === driveFolderIdFromPathname(pathname) && !activeWorkspaceId;
     const { state: accountState } = useAccount();
     const account = accountState.status === "loaded" ? accountState.account : null;
     const tenant = account?.account.tenant ?? null;
     const canManageOrganization = Boolean(
         account?.account.type === "business" && tenant && ["owner", "admin"].includes(tenant.role),
     );
-    const [folderTree, setFolderTree] = useState<FolderTreeNode[]>([]);
-    const [expandedFolders, setExpandedFolders] = useState<Set<number>>(() => new Set());
-    const [myDriveExpanded, setMyDriveExpanded] = useState(false);
     const [quota, setQuota] = useState<QuotaSummary | null>(null);
     const [quotaLoading, setQuotaLoading] = useState(true);
     const [quotaError, setQuotaError] = useState<string | null>(null);
+    const quotaRequestId = useRef(0);
 
     const refreshQuota = useCallback(async () => {
+        const requestId = ++quotaRequestId.current;
+        const selectedWorkspaceId = getActiveWorkspaceIdForRequest();
         if (!account?.profile.username) {
             setQuota(null);
             setQuotaLoading(false);
@@ -110,15 +99,16 @@ export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: Sideb
         setQuotaError(null);
         try {
             const headers = new Headers();
-            const workspaceId = getActiveWorkspaceIdForRequest();
-            if (workspaceId) headers.set("X-Workspace-ID", workspaceId);
+            if (selectedWorkspaceId) headers.set("X-Workspace-ID", selectedWorkspaceId);
             const result = await requestAccountApi<QuotaSummary>("/accounts/api/me/quota/", { headers });
+            if (requestId !== quotaRequestId.current || selectedWorkspaceId !== getActiveWorkspaceIdForRequest()) return;
             setQuota(result);
         } catch (error) {
+            if (requestId !== quotaRequestId.current || selectedWorkspaceId !== getActiveWorkspaceIdForRequest()) return;
             setQuota(null);
             setQuotaError(error instanceof Error ? error.message : "Could not load storage usage.");
         } finally {
-            setQuotaLoading(false);
+            if (requestId === quotaRequestId.current) setQuotaLoading(false);
         }
     }, [account?.profile.username]);
 
@@ -129,94 +119,19 @@ export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: Sideb
         window.addEventListener(FOLDER_TREE_REFRESH_EVENT, onQuotaInvalidated);
         window.addEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, onQuotaInvalidated);
         return () => {
+            quotaRequestId.current += 1;
             window.clearTimeout(timer);
             window.removeEventListener(WORKSPACE_CHANGED_EVENT, onQuotaInvalidated);
             window.removeEventListener(FOLDER_TREE_REFRESH_EVENT, onQuotaInvalidated);
             window.removeEventListener(DRIVE_UPLOAD_COMPLETED_EVENT, onQuotaInvalidated);
         };
-    }, [refreshQuota]);
-
-    const refreshFolderTree = useCallback(async () => {
-        try {
-            const result = await requestAccountApi<{ items: FolderTreeNode[] }>("/drive/api/folder-tree/");
-            setFolderTree(result.items ?? []);
-        } catch {
-            // Keep navigation usable while storage/API services are unavailable.
-        }
-    }, []);
-
-    useEffect(() => {
-        const onFolderTreeRefresh = () => { void refreshFolderTree(); };
-        // Defer the initial request so the effect itself does not synchronously
-        // trigger state updates; the API response updates state asynchronously.
-        const initialRefresh = window.setTimeout(() => {
-            void refreshFolderTree();
-        }, 0);
-        window.addEventListener(FOLDER_TREE_REFRESH_EVENT, onFolderTreeRefresh);
-        window.addEventListener(WORKSPACE_CHANGED_EVENT, onFolderTreeRefresh);
-        return () => {
-            window.clearTimeout(initialRefresh);
-            window.removeEventListener(FOLDER_TREE_REFRESH_EVENT, onFolderTreeRefresh);
-            window.removeEventListener(WORKSPACE_CHANGED_EVENT, onFolderTreeRefresh);
-        };
-    }, [refreshFolderTree]);
-
-    const toggleFolder = useCallback((folderId: number) => {
-        setExpandedFolders((current) => {
-            const next = new Set(current);
-            if (next.has(folderId)) next.delete(folderId);
-            else next.add(folderId);
-            return next;
-        });
-    }, []);
-
-    const renderFolderNode = (node: FolderTreeNode, depth = 0) => {
-        const href = `/drive/folders/${node.id}`;
-        const active = pathname === href || pathname.startsWith(`${href}/`);
-        const expanded = expandedFolders.has(node.id);
-        return (
-            <div key={node.id}>
-                <div className={`group flex h-9 items-center rounded-lg pr-1 transition-colors ${active ? "bg-brand-soft text-brand-contrast" : "text-muted hover:bg-background hover:text-foreground"}`} style={{ paddingLeft: `${8 + depth * 12}px` }}>
-                    <button
-                        type="button"
-                        aria-label={expanded ? `Collapse ${node.name}` : `Expand ${node.name}`}
-                        aria-expanded={expanded}
-                        onClick={() => toggleFolder(node.id)}
-                        className="flex h-7 w-6 shrink-0 items-center justify-center rounded-md hover:bg-surface"
-                    >
-                        {node.children.length > 0
-                            ? expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />
-                            : <span className="w-3" />}
-                    </button>
-                    <Link
-                        href={href}
-                        onClick={() => {
-                            const path = collectAncestorIds(folderTree, node.id);
-                            if (path) {
-                                setExpandedFolders((current) => new Set([...current, ...path]));
-                            }
-                            onNavigate();
-                        }}
-                        aria-current={active ? "page" : undefined}
-                        title={node.name}
-                        className="flex min-w-0 flex-1 items-center gap-2 py-1 text-[12px] font-medium"
-                    >
-                        <Folder size={14} className="shrink-0" />
-                        <span className="truncate">{node.name}</span>
-                    </Link>
-                </div>
-                {expanded && node.children.length > 0 && (
-                    <div>{node.children.map((child) => renderFolderNode(child, depth + 1))}</div>
-                )}
-            </div>
-        );
-    };
+    }, [refreshQuota, activeWorkspaceId]);
 
     return (
-        <aside ref={navigationRef} id="drive-navigation" className={`fixed inset-y-0 left-0 z-50 flex h-screen w-57.5 shrink-0 flex-col border-r border-border bg-surface transition-transform duration-(--motion-normal) lg:static lg:z-auto lg:translate-x-0 ${
+        <aside ref={navigationRef} id="drive-navigation" className={`fixed inset-y-0 left-0 z-50 flex h-dvh w-64 max-w-[calc(100vw-3rem)] shrink-0 flex-col border-r border-border bg-surface transition-transform duration-(--motion-normal) lg:static lg:z-auto lg:translate-x-0 ${
             mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"
         }`}>
-            <div className="flex h-18 shrink-0 items-center justify-between px-4">
+            <div className="flex h-16 shrink-0 items-center justify-between px-4">
                 <Link href="/drive" onClick={() => { clearActiveWorkspaceSelection(); onNavigate(); }} className="flex min-w-0 items-center">
                     <BrandLogo />
                 </Link>
@@ -230,11 +145,9 @@ export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: Sideb
                 </button>
             </div>
 
-            <WorkspaceSwitcher />
-
-            <div className="px-3 pb-4"><DriveNewMenu /></div>
-
-            <nav className="flex-1 overflow-y-auto px-2 pb-3">
+            <div className="shrink-0 px-3 pb-3"><DriveNewMenu onAction={onNavigate} /></div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+              {activeWorkspaceId ? <WorkspaceSidebar workspaceId={activeWorkspaceId} workspace={workspace?.id === activeWorkspaceId ? workspace : null} pathname={pathname} onNavigate={onNavigate} /> : <nav aria-label="Drive navigation">
                 <div className="space-y-1">
                     {navigationItems.map((item) => {
                         const Icon = item.icon;
@@ -243,34 +156,19 @@ export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: Sideb
                             : pathname === item.href || pathname.startsWith(`${item.href}/`);
 
                         if (item.href === "/drive") {
-                            return (
-                                <div key={item.href}>
-                                    <div className={`flex h-10 items-center rounded-xl text-[14px] transition-colors duration-(--motion-fast) ${active ? "bg-brand-soft font-semibold text-brand-contrast shadow-[inset_3px_0_0_var(--brand-primary-contrast)]" : "font-medium text-muted hover:bg-background hover:text-foreground"}`}>
-                                        <Link href={item.href} onClick={() => { if (item.href === "/drive") clearActiveWorkspaceSelection(); onNavigate(); }} aria-current={active ? "page" : undefined} className="flex min-w-0 flex-1 items-center gap-3 px-3">
-                                            <Icon size={17} strokeWidth={active ? 2 : 1.8} />
-                                            <span>{item.label}</span>
-                                        </Link>
-                                        <button type="button" aria-label={myDriveExpanded ? "Collapse My Drive folders" : "Expand My Drive folders"} aria-expanded={myDriveExpanded} onClick={() => setMyDriveExpanded((current) => !current)} className="mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg hover:bg-surface">
-                                            {myDriveExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                                        </button>
-                                    </div>
-                                    {myDriveExpanded && folderTree.length > 0 && (
-                                        <div className="mt-1 space-y-0.5">{folderTree.map((node) => renderFolderNode(node))}</div>
-                                    )}
-                                </div>
-                            );
+                            return <DriveFolderNavigation key={account?.profile.username ?? "personal"} label={item.label} icon={Icon} workspaceId={null} pathname={pathname} activeOverride={inSharedFolder ? false : undefined} onNavigate={onNavigate} />;
                         }
-
                         return (
-                            <Link key={item.href} href={item.href} onClick={onNavigate} aria-current={active ? "page" : undefined} className={[
-                                "flex h-10 items-center gap-3 rounded-xl px-3 text-[14px] transition-colors duration-(--motion-fast)",
-                                active ? "bg-brand-soft font-semibold text-brand-contrast shadow-[inset_3px_0_0_var(--brand-primary-contrast)]" : "font-medium text-muted hover:bg-background hover:text-foreground",
+                            <Link key={item.href} href={item.href} onClick={onNavigate} aria-current={active || (item.href === "/drive/shared" && inSharedFolder) ? "page" : undefined} className={[
+                                "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm transition-colors duration-(--motion-fast)",
+                                active || (item.href === "/drive/shared" && inSharedFolder) ? "bg-brand-soft font-semibold text-brand-contrast" : "font-medium text-muted hover:bg-background hover:text-foreground",
                             ].join(" ")}>
                                 <Icon size={17} strokeWidth={active ? 2 : 1.8} />
                                 <span>{item.label}</span>
                             </Link>
                         );
                     })}
+                    {account?.account.type === "business" && tenant && <StorageNavigationLink key={tenant.id} tenantId={tenant.id} onNavigate={onNavigate} />}
                     {canManageOrganization && (
                         <Link
                             href="/organization/admin"
@@ -288,12 +186,13 @@ export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: Sideb
                         </Link>
                     )}
                 </div>
-            </nav>
+              </nav>}
+            </div>
 
-            <div className="m-4 rounded-[20px] border border-border bg-surface px-4 py-4">
+            <div className="mx-4 mb-4 shrink-0 border-t border-border px-1 pt-4">
                 <div className="mb-2 flex items-center justify-between gap-2">
                     <span className="text-[12px] font-medium text-muted">Storage</span>
-                    <span className="text-[11px] font-semibold text-foreground">
+                    <span className="text-xs font-semibold text-foreground">
                         {quotaLoading ? "Loading…" : quota?.configured ? (quota.limitBytes == null ? "No limit" : `${quota.percentUsed ?? 0}%`) : "Quota"}
                     </span>
                 </div>
@@ -304,12 +203,12 @@ export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: Sideb
                         <div className="h-1.5 overflow-hidden rounded-full bg-background" role="progressbar" aria-label="Storage quota used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={quota.percentUsed ?? 0}>
                             <div className={`h-full rounded-full ${(quota.percentUsed ?? 0) >= 95 ? "bg-danger" : "bg-brand-contrast"}`} style={{ width: `${Math.min(100, Math.max(0, quota.percentUsed ?? 0))}%` }} />
                         </div>
-                        <p className="mt-2 text-[11px] text-muted">
+                        <p className="mt-2 text-xs text-muted">
                             {formatStorageBytes(quota.usedBytes)} used{quota.limitBytes == null ? "" : ` of ${formatStorageBytes(quota.limitBytes)}`}
                         </p>
-                        {quota.reservedBytes ? <p className="mt-1 text-[10px] text-muted">{formatStorageBytes(quota.reservedBytes)} reserved for uploads</p> : null}
+                        {quota.reservedBytes ? <p className="mt-1 text-xs text-muted">{formatStorageBytes(quota.reservedBytes)} reserved for uploads</p> : null}
                         {quota.organizationCap ? (
-                            <p className="mt-1 text-[10px] leading-4 text-muted">
+                            <p className="mt-1 text-xs leading-4 text-muted">
                                 Organization cap: {formatStorageBytes(quota.organizationCap.usedBytes)} used
                                 {quota.organizationCap.limitBytes == null ? " · no limit" : ` of ${formatStorageBytes(quota.organizationCap.limitBytes)}`}
                                 {quota.organizationCap.reservedBytes ? ` · ${formatStorageBytes(quota.organizationCap.reservedBytes)} reserved` : ""}
@@ -317,7 +216,7 @@ export default function Sidebar({ mobileOpen, onNavigate, navigationRef }: Sideb
                         ) : null}
                     </>
                 ) : (
-                    <p className="mt-2 text-[11px] leading-4 text-muted">{quota?.message ?? quotaError ?? "Storage quota is not configured."}</p>
+                    <p className="mt-2 text-xs leading-4 text-muted">{quota?.message ?? quotaError ?? "Storage quota is not configured."}</p>
                 )}
             </div>
         </aside>

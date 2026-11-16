@@ -1,2 +1,5 @@
 import AuthForm from "@/components/layout/AuthForm";
-export default function RegisterPage(){return <AuthForm mode="register"/>}
+export default async function RegisterPage({ searchParams }: { searchParams: Promise<{ next?: string | string[] }> }) {
+  const { next } = await searchParams;
+  return <AuthForm mode="register" nextPath={typeof next === "string" ? next : undefined} />;
+}

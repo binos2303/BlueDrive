@@ -1,4 +1,5 @@
 import type { AccountSnapshot } from "@/lib/account-service";
+import { workspaceIdFromPathname } from "./drive-paths.ts";
 
 export const WORKSPACE_CHANGED_EVENT = "securedrive:workspace-changed";
 export const WORKSPACES_UPDATED_EVENT = "securedrive:workspaces-updated";
@@ -56,6 +57,11 @@ export function getSavedWorkspaceSelection(): WorkspaceSelection | null {
 }
 
 export function getActiveWorkspaceIdForRequest(): string | null {
+  const pathname = typeof window !== "undefined" ? window.location?.pathname : undefined;
+  if (pathname === "/drive" || pathname?.startsWith("/drive/")) {
+    // The URL selects the Drive scope; the backend still validates membership.
+    return workspaceIdFromPathname(pathname);
+  }
   const selection = getSavedWorkspaceSelection();
   const identity = memoryIdentityInitialized
     ? memoryIdentity

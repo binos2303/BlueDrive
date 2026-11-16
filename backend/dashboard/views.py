@@ -1,9 +1,14 @@
+from datetime import timedelta
+
 from accounts.access import (
     active_tenant_required as login_required,
     can_edit_workspace_content,
+    can_manage_workspace,
     get_default_tenant,
     resolve_request_workspace,
+    workspace_role_for_user,
 )
+from accounts.models import WorkspaceMembership
 from django.shortcuts import redirect, get_object_or_404
 from django.http import Http404
 from django.http import JsonResponse
@@ -102,12 +107,6 @@ def _shared_drive_items_response(request, query_text=""):
             query=query_text,
             result_count=len(items),
         )
-        ActivityLog.objects.create(
-            user=request.user,
-            action=ActivityLog.Action.SEARCH,
-            description="Searched directly shared Drive items.",
-            metadata={"query_length": len(query_text), "result_count": len(items), "scope": "shared"},
-        )
 
     return JsonResponse({"items": items, "query": query_text or None})
 
@@ -117,7 +116,7 @@ def _shared_drive_items_response(request, query_text=""):
 def drive_items_api(request):
     """Return Drive items scoped to an authorized workspace or direct share."""
     view = request.GET.get("view", "drive")
-    if view not in {"drive", "recent", "trash", "shared", "starred"}:
+    if view not in {"drive", "recent", "timeline", "trash", "shared", "starred"}:
         raise Http404
     query_text = request.GET.get("q", "").strip()[:255]
 
@@ -155,6 +154,9 @@ def drive_items_api(request):
             raise Http404
         tenant = workspace.tenant
 
+    if view == "timeline" and not can_manage_workspace(request.user, workspace):
+        raise Http404("Workspace activity timeline is unavailable.")
+
     starred_entries = StarredItem.objects.filter(
         user=request.user,
         tenant=tenant,
@@ -162,7 +164,7 @@ def drive_items_api(request):
     starred_file_ids = set(starred_entries.filter(file__isnull=False).values_list("file_id", flat=True))
     starred_folder_ids = set(starred_entries.filter(folder__isnull=False).values_list("folder_id", flat=True))
 
-    if query_text:
+    if query_text and view not in {"recent", "timeline"}:
         # Search is scoped to exactly the active workspace; it never queries
         # other tenants/workspaces and permissions are rechecked per result.
         file_rows = list(File.objects.filter(
@@ -207,14 +209,6 @@ def drive_items_api(request):
             workspace=workspace,
             query=query_text,
             result_count=len(items),
-        )
-        ActivityLog.objects.create(
-            user=request.user,
-            tenant=tenant,
-            workspace=workspace,
-            action=ActivityLog.Action.SEARCH,
-            description="Searched workspace files.",
-            metadata={"query_length": len(query_text), "result_count": len(items)},
         )
     elif view == "starred":
         entries = list(
@@ -290,23 +284,10 @@ def drive_items_api(request):
             for item in files
             if can_edit_workspace_content(request.user, item.workspace)
         )
-    elif view == "recent":
-        # Recent includes owned items and items accessible through a direct or
-        # inherited share. Sort by the newest of access and content modification.
-        share_rows = list(
-            Share.objects.filter(receiver=request.user, tenant=tenant)
-            .filter(Q(file__workspace=workspace) | Q(folder__workspace=workspace))
-            .select_related("owner", "folder", "file")
-        )
-        direct_shared_file_ids = {row.file_id for row in share_rows if row.file_id}
-        shared_folder_ids = set()
-        for share in share_rows:
-            if share.folder_id and share.folder.deleted_at is None:
-                shared_folder_ids.update(
-                    item.pk for item in _owned_subtree(share.folder, share.owner, tenant)
-                    if item.deleted_at is None
-                )
-
+    elif view in {"recent", "timeline"}:
+        # Recent is file-only; the manager's Activity log keeps its 14-day chart.
+        now = timezone.now()
+        cutoff = now - timedelta(days=14 if view == "timeline" else 7)
         file_queryset = File.objects.filter(
             tenant=tenant, workspace=workspace, deleted_at__isnull=True,
         ).filter(
@@ -315,28 +296,28 @@ def drive_items_api(request):
             recent_activity_at=Greatest(
                 Coalesce("last_accessed_at", "updated_at"), "updated_at"
             )
-        ).order_by("-recent_activity_at")[:200]
-        file_rows = [
-            row for row in file_queryset
+        ).filter(recent_activity_at__range=(cutoff, now))
+        if query_text:
+            file_queryset = file_queryset.filter(file_name__icontains=query_text)
+        recent_rows = [
+            (row.recent_activity_at, "file", row)
+            for row in file_queryset.order_by("-recent_activity_at", "-pk")[:200]
             if can_view_file(row, request.user)
         ]
-
-        folder_queryset = Folder.objects.filter(
-            tenant=tenant, workspace=workspace, deleted_at__isnull=True,
-        ).filter(
-            Q(parent__isnull=True) | Q(parent__deleted_at__isnull=True)
-        ).select_related("owner", "parent").annotate(
-            recent_activity_at=Greatest(
-                Coalesce("last_accessed_at", "updated_at"), "updated_at"
+        if view == "timeline":
+            folder_queryset = Folder.objects.filter(
+                tenant=tenant, workspace=workspace, deleted_at__isnull=True,
+                folder_name__icontains=query_text,
+            ).filter(Q(parent__isnull=True) | Q(parent__deleted_at__isnull=True)).select_related(
+                "owner", "parent",
+            ).annotate(recent_activity_at=Greatest(
+                Coalesce("last_accessed_at", "updated_at"), "updated_at",
+            )).filter(recent_activity_at__range=(cutoff, now)).order_by("-recent_activity_at", "-pk")[:200]
+            recent_rows.extend(
+                (row.recent_activity_at, "folder", row)
+                for row in folder_queryset if can_view_folder(row, request.user)
             )
-        ).order_by("-recent_activity_at")[:200]
-        folder_rows = [
-            row for row in folder_queryset
-            if can_view_folder(row, request.user)
-        ]
-        recent_rows = [(row.recent_activity_at, "file", row) for row in file_rows]
-        recent_rows.extend((row.recent_activity_at, "folder", row) for row in folder_rows)
-        recent_rows.sort(key=lambda row: row[0], reverse=True)
+        recent_rows.sort(key=lambda row: (row[0], row[2].pk), reverse=True)
         items = []
         for activity_at, item_type, row in recent_rows[:100]:
             is_shared = row.owner_id != request.user.id
@@ -345,16 +326,17 @@ def drive_items_api(request):
                 not is_shared
                 and can_edit_workspace_content(request.user, row.workspace)
             )
-            if item_type == "file":
-                items.append(_file_item(
-                    row, owner=owner, modified=activity_at, can_manage=can_manage,
-                    starred=row.pk in starred_file_ids,
-                ))
-            else:
-                items.append(_folder_item(
-                    row, owner=owner, modified=activity_at, can_manage=can_manage,
-                    starred=row.pk in starred_folder_ids,
-                ))
+            serialize = _file_item if item_type == "file" else _folder_item
+            starred_ids = starred_file_ids if item_type == "file" else starred_folder_ids
+            items.append(serialize(
+                row, owner=owner, modified=activity_at, can_manage=can_manage,
+                starred=row.pk in starred_ids,
+            ))
+        if query_text:
+            SearchHistory.objects.create(
+                user=request.user, tenant=tenant, workspace=workspace,
+                query=query_text, result_count=len(items),
+            )
     elif view == "shared":
         shares = Share.objects.filter(
             receiver=request.user,
@@ -394,25 +376,31 @@ def drive_items_api(request):
             folder=folder,
             deleted_at__isnull=True,
         ).select_related("owner", "folder").order_by("file_name"))
+        role = workspace_role_for_user(request.user, workspace)
+        workspace_member = role is not None
+        workspace_editor = role in (WorkspaceMembership.Role.EDITOR, WorkspaceMembership.Role.ADMIN)
+        # These are live, immediate children in the already authorized folder
+        # (or workspace root), so Workspace access applies to the whole result.
+        # Direct-share recipients still need per-item checks for child overrides.
         items = [
             _folder_item(
                 item,
                 owner="Me" if item.owner_id == request.user.id else item.owner.get_username(),
                 starred=item.pk in starred_folder_ids,
-                can_manage=can_edit_folder_tree(item, request.user),
+                can_manage=True if workspace_editor else can_edit_folder_tree(item, request.user),
             )
             for item in folders
-            if can_view_folder(item, request.user)
+            if workspace_member or can_view_folder(item, request.user)
         ]
         items.extend(
             _file_item(
                 item,
                 owner="Me" if item.owner_id == request.user.id else item.owner.get_username(),
                 starred=item.pk in starred_file_ids,
-                can_manage=can_edit_file(item, request.user),
+                can_manage=True if workspace_editor else can_edit_file(item, request.user),
             )
             for item in files
-            if can_view_file(item, request.user)
+            if workspace_member or can_view_file(item, request.user)
         )
     return JsonResponse({"items": items, "query": query_text or None})
 
@@ -597,21 +585,13 @@ def bulk_action(request):
         deleted_time = timezone.now()
         with transaction.atomic():
             for folder in top_folders:
-                subtree = []
-                stack = [folder]
-                while stack:
-                    current = stack.pop()
-                    subtree.append(current)
-                    stack.extend(Folder.objects.filter(
-                        owner=request.user, tenant=tenant, workspace=workspace,
-                        parent=current, deleted_at__isnull=True,
-                    ))
+                subtree = _owned_subtree(folder, None, tenant)
                 ids = [item.id for item in subtree]
                 Folder.objects.filter(
-                    owner=request.user, tenant=tenant, workspace=workspace, id__in=ids
+                    tenant=tenant, workspace=workspace, id__in=ids
                 ).update(deleted_at=deleted_time)
                 File.objects.filter(
-                    owner=request.user, tenant=tenant, workspace=workspace,
+                    tenant=tenant, workspace=workspace,
                     folder_id__in=ids, deleted_at__isnull=True,
                 ).update(deleted_at=deleted_time)
             File.objects.filter(
@@ -807,49 +787,26 @@ def bulk_paste(request):
     return _redirect_drive(request, destination.id if destination else None)
 
 
-def _owned_subtree(folder, owner, tenant):
-    """Return only descendants that remain inside the root workspace."""
-    result = [folder]
-    index = 0
-    while index < len(result):
-        current = result[index]
-        result.extend(
-            Folder.objects.filter(
-                owner=owner,
-                tenant=tenant,
-                workspace=folder.workspace,
-                parent=current,
-                deleted_at__isnull=True,
-            )
-        )
-        index += 1
-    return result
+def _owned_subtree(folder, owner, tenant, *, include_deleted=False):
+    from folders.tree_service import folder_subtree
+    if folder.tenant_id != tenant.pk:
+        raise ValueError("Folder tree must stay in the selected tenant.")
+    return folder_subtree(folder, owner=owner, include_deleted=include_deleted)
 
 
 def _unique_copy_folder_name(owner, tenant, parent, original_name, *, workspace=None):
+    from files.services import _bounded_name
+
     if workspace is None and parent is not None:
         workspace = parent.workspace
-    candidate = f"{original_name} (copy)"
+    candidate = _bounded_name(original_name, " (copy)")
     number = 2
-    queryset = Folder.objects.filter(
-        owner=owner,
-        tenant=tenant,
-        parent=parent,
-        folder_name__iexact=candidate,
-        deleted_at__isnull=True,
-    )
+    queryset = Folder.objects.filter(tenant=tenant, parent=parent, deleted_at__isnull=True)
     if workspace is not None:
         queryset = queryset.filter(workspace=workspace)
-    while queryset.exists():
-        candidate = f"{original_name} (copy {number})"
+    elif owner is not None:
+        queryset = queryset.filter(owner=owner)
+    while queryset.filter(folder_name__iexact=candidate).exists():
+        candidate = _bounded_name(original_name, f" (copy {number})")
         number += 1
-        queryset = Folder.objects.filter(
-            owner=owner,
-            tenant=tenant,
-            parent=parent,
-            folder_name__iexact=candidate,
-            deleted_at__isnull=True,
-        )
-        if workspace is not None:
-            queryset = queryset.filter(workspace=workspace)
     return candidate

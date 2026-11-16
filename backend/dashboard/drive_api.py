@@ -30,10 +30,11 @@ from files.models import File, UploadSession
 from files.permanent_delete import PermanentDeleteError, permanently_delete_files
 from files.quota import QuotaExceeded, QuotaStateError
 from files.services import unique_copy_name
+from files.rename_service import rename_resource, RenameError
 from folders.models import Folder
 from dashboard.models import StarredItem
 from sharing.models import Share
-from sharing.services import can_edit_file, can_edit_folder, can_view_file, can_view_folder
+from sharing.services import can_edit_file, can_edit_folder, can_view_file, can_view_folder, upsert_direct_share
 from logs.models import ActivityLog
 from logs.services import log_action
 from .views import _folder_contains_ids, _top_level_folders, _owned_subtree, _unique_copy_folder_name
@@ -118,8 +119,45 @@ def _items_for_operation(payload, request, tenant, workspace):
 
 @login_required
 @require_POST
+def drive_items_rename_api(request):
+    """Rename exactly one live file or folder within the selected workspace."""
+    payload, error = _json_payload(request)
+    if error:
+        return error
+    kind = payload.get("kind")
+    item_id = payload.get("id")
+    name = payload.get("name")
+    if kind not in ("file", "folder") or type(item_id) is not int or item_id <= 0:
+        return JsonResponse({"detail": "Provide a valid item kind and positive ID."}, status=400)
+    if not isinstance(name, str):
+        return JsonResponse({"detail": "Name must be a string."}, status=400)
+
+    tenant, workspace = _drive_context(request, payload)
+    model = File if kind == "file" else Folder
+    resource = model.objects.filter(
+        pk=item_id, tenant=tenant, workspace=workspace,
+        deleted_at__isnull=True,
+    ).first()
+    if resource is None:
+        return JsonResponse({"detail": "Item not found."}, status=404)
+    try:
+        changed = rename_resource(resource=resource, actor=request.user, name=name)
+    except RenameError as exc:
+        return JsonResponse({"detail": exc.detail}, status=exc.status)
+    resource.refresh_from_db(fields=["file_name" if kind == "file" else "folder_name"])
+    return JsonResponse({
+        "id": item_id,
+        "kind": kind,
+        "name": resource.file_name if kind == "file" else resource.folder_name,
+        "changed": changed,
+        "detail": "Renamed successfully." if changed else "Name is unchanged.",
+    })
+
+
+@login_required
+@require_POST
 def drive_items_move_api(request):
-    """Move selected owned items to an optional destination folder (root = null)."""
+    """Move authorized Workspace items to an optional destination folder (root = null)."""
     payload, error = _json_payload(request)
     if error:
         return error
@@ -144,12 +182,11 @@ def drive_items_move_api(request):
     if destination_id is not None:
         destination = Folder.objects.filter(
             id=destination_id,
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             deleted_at__isnull=True,
         ).first()
-        if destination is None:
+        if destination is None or not can_edit_folder(destination, request.user):
             return JsonResponse({"detail": "Destination folder is unavailable or inaccessible."}, status=404)
     destination_parent_id = destination.id if destination else None
 
@@ -159,7 +196,6 @@ def drive_items_move_api(request):
         if destination and _folder_contains_ids(folder, destination.id):
             return JsonResponse({"detail": f'Cannot move "{folder.folder_name}" into itself or one of its subfolders.'}, status=400)
         conflict = Folder.objects.filter(
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             parent=destination,
@@ -173,7 +209,6 @@ def drive_items_move_api(request):
         if drive_file.folder_id == destination_parent_id:
             continue
         conflict = File.objects.filter(
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             folder=destination,
@@ -207,11 +242,12 @@ def drive_items_move_api(request):
 
 
 def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_folder, target_name):
-    """Copy file contents through finalization into an independent MinIO object."""
+    """Nhân bản nội dung qua finalizer thành object S3 riêng theo target đã ghim."""
     from files.finalization import finalize_verified_upload
     from files.models import FileVersion, StorageLocation, UploadSession
     from files.quota import finalize_upload_quota, reserve_upload_quota
     from files.storage_adapters import get_storage_adapter
+    from files.storage_routing import adapter_for_upload, upload_target
     from files.views import _decrypt_file
 
     plaintext = _decrypt_file(source_file)
@@ -225,6 +261,7 @@ def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_f
         expected_sha256=hashlib.sha256(plaintext).hexdigest(),
         expires_at=timezone.now() + timedelta(hours=1),
         state=UploadSession.State.INITIATED,
+        **upload_target(tenant,(target_folder.workspace if target_folder is not None else workspace)),
     )
     reserved = False
     try:
@@ -234,7 +271,7 @@ def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_f
         session.state = UploadSession.State.VERIFYING
         session.save(update_fields=["state", "updated_at"])
         result = finalize_verified_upload(session, plaintext, actor)
-        duplicated_file = File.objects.get(pk=result["file_id"], owner=actor, tenant=tenant)
+        duplicated_file = File.objects.get(pk=result["file_id"], tenant=tenant, workspace=session.workspace)
         version = FileVersion.objects.filter(
             tenant=tenant,
             file=duplicated_file,
@@ -247,8 +284,8 @@ def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_f
             state=StorageLocation.State.AVAILABLE,
         ).select_related("storage_config").order_by("-created_at").first()
         if location is None:
-            raise RuntimeError("New duplicate has no available MinIO location.")
-        return duplicated_file, location.object_ref
+            raise RuntimeError("New duplicate has no available S3 location.")
+        return duplicated_file, (location.storage_connection,location.object_ref)
     except Exception:
         # A final key may already exist if storage succeeded before a later DB error.
         final_key = UploadSession.objects.filter(pk=session.pk).values_list(
@@ -256,7 +293,7 @@ def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_f
         ).first() or session.final_object_key
         if final_key:
             try:
-                get_storage_adapter().delete_object(final_key)
+                adapter_for_upload(session,fallback=get_storage_adapter,cleanup=True).delete_object(final_key)
             except Exception:
                 pass
         if reserved:
@@ -272,13 +309,15 @@ def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_f
 def _cleanup_duplicate_objects(object_keys):
     if not object_keys:
         return
-    try:
-        from files.storage_adapters import get_storage_adapter
-        storage = get_storage_adapter()
-    except Exception:
-        return
-    for object_key in object_keys:
+    from files.storage_adapters import get_storage_adapter
+    adapters = {}
+    for item in object_keys:
         try:
+            connection, object_key = (None,item) if isinstance(item,str) else item
+            target = connection.pk if connection else None
+            if target not in adapters:
+                adapters[target] = get_storage_adapter(connection=connection) if connection else get_storage_adapter()
+            storage = adapters[target]
             storage.delete_object(object_key)
         except Exception:
             # Do not mask the primary request failure; a reconciliation job can
@@ -313,7 +352,7 @@ def drive_items_duplicate_api(request):
                     folder_name=_unique_copy_folder_name(request.user, tenant, source_folder.parent, source_folder.folder_name, workspace=workspace),
                     parent=source_folder.parent,
                 )
-                tree = _owned_subtree(source_folder, request.user, tenant)
+                tree = _owned_subtree(source_folder, None, tenant)
                 folder_map = {source_folder.id: copied_root}
                 for original in tree[1:]:
                     folder_map[original.id] = Folder.objects.create(
@@ -326,7 +365,6 @@ def drive_items_duplicate_api(request):
                 for original in tree:
                     target_folder = folder_map[original.id]
                     source_files_in_folder = File.objects.filter(
-                        owner=request.user,
                         tenant=tenant,
                         workspace=workspace,
                         folder=original,
@@ -385,21 +423,7 @@ def drive_items_duplicate_api(request):
 
 
 def _all_descendant_folders(root, owner, tenant):
-    """Return a folder tree regardless of soft-delete state."""
-    result = [root]
-    index = 0
-    while index < len(result):
-        parent = result[index]
-        result.extend(
-            Folder.objects.filter(
-                owner=owner,
-                tenant=tenant,
-                workspace=root.workspace,
-                parent=parent,
-            ).order_by("pk")
-        )
-        index += 1
-    return result
+    return _owned_subtree(root, owner, tenant, include_deleted=True)
 
 
 def _items_in_trash(payload, request, tenant, workspace):
@@ -456,27 +480,24 @@ def drive_items_trash_api(request):
     trash_time = timezone.now()
     subtree_folders = []
     for folder in top_folders:
-        subtree_folders.extend(_owned_subtree(folder, request.user, tenant))
+        subtree_folders.extend(_owned_subtree(folder, None, tenant))
     subtree_by_id = {folder.pk: folder for folder in subtree_folders}
     subtree_ids = list(subtree_by_id)
 
     with transaction.atomic():
         folder_count = Folder.objects.filter(
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             id__in=subtree_ids,
             deleted_at__isnull=True,
         ).update(deleted_at=trash_time)
         nested_file_count = File.objects.filter(
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             folder_id__in=subtree_ids,
             deleted_at__isnull=True,
         ).update(deleted_at=trash_time)
         direct_file_count = File.objects.filter(
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             id__in=[item.pk for item in direct_files],
@@ -512,7 +533,7 @@ def drive_items_restore_api(request):
             return JsonResponse({
                 "detail": "Restore the parent folder before restoring this folder."
             }, status=409)
-        folder_trees.append(_all_descendant_folders(folder, request.user, tenant))
+        folder_trees.append(_all_descendant_folders(folder, None, tenant))
     tree_by_id = {folder.pk: folder for tree in folder_trees for folder in tree}
     tree_ids = list(tree_by_id)
 
@@ -526,7 +547,6 @@ def drive_items_restore_api(request):
             }, status=409)
         seen_folder_names.add(key)
         if Folder.objects.filter(
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             parent_id=folder.parent_id,
@@ -538,7 +558,6 @@ def drive_items_restore_api(request):
             }, status=409)
 
     subtree_files = list(File.objects.filter(
-        owner=request.user,
         tenant=tenant,
         workspace=workspace,
         folder_id__in=tree_ids,
@@ -562,7 +581,6 @@ def drive_items_restore_api(request):
             }, status=409)
         file_names_seen.add(key)
         if File.objects.filter(
-            owner=request.user,
             tenant=tenant,
             workspace=workspace,
             folder_id=drive_file.folder_id,
@@ -573,16 +591,18 @@ def drive_items_restore_api(request):
                 "detail": f'A file named "{drive_file.file_name}" already exists in the destination.'
             }, status=409)
 
-    with transaction.atomic():
-        folder_count = Folder.objects.filter(
-            owner=request.user, tenant=tenant, workspace=workspace, id__in=tree_ids,
-        ).update(deleted_at=None)
-        file_count = File.objects.filter(
-            owner=request.user,
-            tenant=tenant,
-            workspace=workspace,
-            id__in=list(files_to_restore),
-        ).update(deleted_at=None)
+    try:
+        with transaction.atomic():
+            folder_count = Folder.objects.filter(
+                tenant=tenant, workspace=workspace, id__in=tree_ids,
+            ).update(deleted_at=None)
+            file_count = File.objects.filter(
+                tenant=tenant,
+                workspace=workspace,
+                id__in=list(files_to_restore),
+            ).update(deleted_at=None)
+    except IntegrityError:
+        return JsonResponse({"detail": "An item with the same name appeared during restore. Refresh and try again."}, status=409)
 
     total = folder_count + file_count
     log_action(
@@ -597,7 +617,7 @@ def drive_items_restore_api(request):
 @login_required
 @require_POST
 def drive_items_delete_api(request):
-    """Permanently delete Trash selections and their MinIO objects/metadata."""
+    """Xóa vĩnh viễn mục trong thùng rác cùng object S3 và metadata tương ứng."""
     payload, error = _json_payload(request)
     if error:
         return error
@@ -608,13 +628,12 @@ def drive_items_delete_api(request):
     _all_files, _all_folders, direct_files, top_folders = selected
 
     folder_trees = [
-        _all_descendant_folders(folder, request.user, tenant)
+        _all_descendant_folders(folder, None, tenant)
         for folder in top_folders
     ]
     tree_by_id = {folder.pk: folder for tree in folder_trees for folder in tree}
     tree_ids = list(tree_by_id)
     nested_files = list(File.objects.filter(
-        owner=request.user,
         tenant=tenant,
         workspace=workspace,
         folder_id__in=tree_ids,
@@ -643,7 +662,6 @@ def drive_items_delete_api(request):
         try:
             with transaction.atomic():
                 Folder.objects.filter(
-                    owner=request.user,
                     tenant=tenant,
                     workspace=workspace,
                     id__in=tree_ids,
@@ -796,30 +814,61 @@ def drive_items_share_api(request):
     if permission not in {Share.Permission.VIEWER, Share.Permission.EDITOR}:
         return JsonResponse({"detail": "Permission must be viewer or editor."}, status=400)
 
-    shared_count = 0
+    # A repeated identical grant is not a new Share event. Persist the grant
+    # and its activity atomically, including one event for multi-item requests.
+    changed_names = []
+    changed_kinds = []
+    resource_changes = []
+    created_count = 0
+    updated_count = 0
     with transaction.atomic():
-        for drive_file in direct_files:
-            Share.objects.update_or_create(
-                file=drive_file,
-                receiver=recipient,
-                defaults={"tenant": tenant, "owner": request.user, "permission": permission},
+        for item, kind, name in [
+            *[(file, "file", file.file_name) for file in direct_files],
+            *[(folder, "folder", folder.folder_name) for folder in top_folders],
+        ]:
+            operation, _previous = upsert_direct_share(
+                resource=item, owner=request.user, receiver=recipient, permission=permission,
             )
-            shared_count += 1
-        for folder in top_folders:
-            Share.objects.update_or_create(
-                folder=folder,
-                receiver=recipient,
-                defaults={"tenant": tenant, "owner": request.user, "permission": permission},
+            if operation == "unchanged":
+                continue
+            created_count += int(operation == "created")
+            updated_count += int(operation == "permission_changed")
+            changed_names.append(name)
+            changed_kinds.append(kind)
+            if len(resource_changes) < 20:
+                resource_changes.append({
+                    "name": name, "kind": kind, "operation": operation,
+                    "previous_permission": _previous if operation == "permission_changed" else None,
+                    "permission": permission,
+                })
+
+        shared_count = created_count + updated_count
+        if shared_count:
+            log_action(
+                request.user, ActivityLog.Action.SHARE,
+                f"Updated {shared_count} Drive grant(s) for {recipient.get_username()}",
+                workspace=workspace,
+                metadata={
+                    "operation": "created" if updated_count == 0 else "permission_changed" if created_count == 0 else "mixed",
+                    "recipient_username": recipient.get_username(),
+                    "recipient_email": recipient.email,
+                    "permission": permission,
+                    "shared_count": shared_count,
+                    "created_count": created_count,
+                    "updated_count": updated_count,
+                    "resource_names": changed_names[:20],
+                    "resource_kinds": changed_kinds[:20],
+                    "resource_changes": resource_changes,
+                },
             )
-            shared_count += 1
 
     permission_label = dict(Share.Permission.choices).get(permission, "Viewer")
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        f"Shared {shared_count} Drive item(s) with {recipient.email or recipient.username} as {permission_label}",
-        workspace=workspace,
-    )
+    if shared_count == 0:
+        return JsonResponse({
+            "detail": "No changes: all selected items already have this permission for the recipient.",
+            "count": 0, "email": recipient.email, "permission": permission,
+            "notification_sent": False,
+        })
 
     # Send a lightweight notification when SMTP is explicitly configured. Sharing
     # permissions remain valid if mail is unavailable; that failure is reported.

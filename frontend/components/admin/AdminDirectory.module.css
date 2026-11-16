@@ -1,0 +1,103 @@
+.filterContainer {
+  container-type: inline-size;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: end;
+  gap: 1rem;
+}
+
+.filters > * {
+  min-width: 0;
+}
+
+.filterLabel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.375rem;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.filterLabel select {
+  width: 100%;
+  min-width: 0;
+  height: 2.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--background);
+  padding: 0 0.75rem;
+  color: var(--foreground);
+  font-size: 0.875rem;
+}
+
+.table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.table :is(th, td) {
+  padding: 0.875rem 1.25rem;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.table thead {
+  background: var(--background);
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.table th {
+  font-weight: 600;
+}
+
+.table tbody tr {
+  border-top: 1px solid var(--border);
+  transition: background-color var(--motion-fast);
+}
+
+.table tbody tr:hover {
+  background: var(--background);
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.rowActions > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@container (min-width: 560px) {
+  .filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .search {
+    grid-column: 1 / -1;
+  }
+}
+
+@container (min-width: 900px) {
+  .filters {
+    grid-template-columns: minmax(0, 1fr) 10rem 12rem;
+  }
+
+  .search {
+    grid-column: auto;
+  }
+
+}

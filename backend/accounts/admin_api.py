@@ -1,38 +1,451 @@
-"""Read-only, platform-admin-only API. No account mutations are exposed."""
+"""Platform admin directories, account lifecycle, and session management APIs."""
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import transaction
+from django.utils import timezone
+from django.db.models import Count, F, Min, Q, Sum
+from django.db.models.functions import Lower
+from accounts.models import Tenant, Workspace, WorkspaceMembership, Membership, TrackedAccountSession, PlatformAdminAuditEvent
+from files.models import File, UploadFinalizationJob, UploadSession
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
+from .platform_admin import is_platform_admin, is_platform_super_admin, platform_role
+from .api_views import require_csrf
+from .session_tracking import ONLINE_WINDOW, revoke_all_database_sessions
+
+
+def active_collaboration_workspaces():
+    """Visible collaboration areas, excluding tenant-internal My Drive/default rows.
+
+    Keep this as the single source for both the directory and dashboard counts.
+    No database records are deleted or modified.
+    """
+    return Workspace.objects.filter(
+        is_default=False,
+        status=Workspace.Status.ACTIVE,
+        tenant__status=Tenant.Status.ACTIVE,
+    )
+
+
+class IsPlatformAdmin(BasePermission):
+    def has_permission(self, request, view):
+        return is_platform_admin(request.user)
 
 
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
-@permission_classes([IsAdminUser])
+@permission_classes([IsPlatformAdmin])
 def admin_access_view(request):
     user = request.user
-    return Response({"allowed": True, "username": user.get_username(), "email": user.email})
+    return Response({"allowed": True, "username": user.get_username(), "email": user.email, "role": platform_role(user), "can_manage_admins": is_platform_super_admin(user)})
+
+
+USER_DIRECTORY_SORTS = {
+    "recent_signin": (F("last_login").desc(nulls_last=True), "pk"),
+    "oldest_signin": (F("last_login").asc(nulls_last=True), "pk"),
+    "newest": ("-date_joined", "pk"),
+    "oldest": ("date_joined", "pk"),
+    "name_asc": (Lower("username").asc(), "pk"),
+    "name_desc": (Lower("username").desc(), "pk"),
+}
 
 
 @api_view(["GET"])
 @authentication_classes([SessionAuthentication])
-@permission_classes([IsAdminUser])
+@permission_classes([IsPlatformAdmin])
 def admin_users_view(request):
+    """Filtered account directory with database-level, stable ordering.
+
+    Sorting happens before pagination: sorting only 20 client-side rows would
+    give incorrect results across pages. No password, session key or token is
+    projected into this response.
+    """
     query = str(request.query_params.get("q", "")).strip()[:100]
-    users = get_user_model().objects.all().order_by("pk")
+    scope = request.query_params.get("scope", "all")
+    status = request.query_params.get("status", "all")
+    sort = request.query_params.get("sort", "recent_signin")
+    if scope not in {"all", "users", "admins"}:
+        return Response({"detail": "Invalid scope."}, status=400)
+    if status not in {"all", "active", "inactive"}:
+        return Response({"detail": "Invalid status."}, status=400)
+    if sort not in USER_DIRECTORY_SORTS:
+        return Response({"detail": "Invalid sort option."}, status=400)
+
+    users = get_user_model().objects.select_related("platform_admin_identity").all()
+    admin_filter = Q(is_staff=True) & (
+        Q(is_superuser=True) | Q(platform_admin_identity__isnull=False)
+    )
+    if scope == "users":
+        users = users.filter(is_staff=False, is_superuser=False)
+    elif scope == "admins":
+        users = users.filter(admin_filter)
+    if status == "active":
+        users = users.filter(is_active=True)
+    elif status == "inactive":
+        users = users.filter(is_active=False)
     if query:
-        from django.db.models import Q
         users = users.filter(Q(username__icontains=query) | Q(email__icontains=query))
+
     count = users.count()
-    try:
-        page = max(1, int(request.query_params.get("page", "1")))
-    except (TypeError, ValueError):
-        page = 1
-    per_page = 20
-    results = users[(page - 1) * per_page:page * per_page]
-    return Response({"count": count, "page": page, "page_size": per_page, "results": [
+    page = _requested_page(request)
+    results = list(users.order_by(*USER_DIRECTORY_SORTS[sort])[(page - 1) * 20:page * 20])
+    now = timezone.now()
+    online_ids = set(TrackedAccountSession.objects.filter(
+        user_id__in=[user.pk for user in results],
+        last_seen_at__gte=now - ONLINE_WINDOW,
+        user__is_active=True,
+        session__expire_date__gt=now,
+    ).values_list("user_id", flat=True))
+    return Response({"count": count, "page": page, "page_size": 20, "sort": sort, "results": [
         {"id": user.pk, "username": user.get_username(), "email": user.email,
          "is_active": user.is_active, "is_staff": user.is_staff,
-         "last_login": user.last_login.isoformat() if user.last_login else None}
+         "is_superuser": user.is_superuser,
+         "last_login": user.last_login.isoformat() if user.last_login else None,
+         "date_joined": user.date_joined.isoformat() if user.date_joined else None,
+         "recently_online": user.pk in online_ids,
+         "admin_role": ("super_admin" if user.is_superuser else "platform_admin" if hasattr(user, "platform_admin_identity") else None),
+         "admin_status": ("active" if user.is_superuser and user.is_active else "disabled" if user.is_superuser else
+                          user.platform_admin_identity.status if hasattr(user, "platform_admin_identity") else None)}
         for user in results
     ]})
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_overview_view(request):
+    """Read-only platform metrics from PostgreSQL; no infrastructure telemetry claims.
+
+    Active accounts are enabled for login, NOT necessarily online sessions.
+    File bytes reflect current, non-trashed metadata, NOT physical SeaweedFS capacity.
+    """
+    User = get_user_model()
+    admin_filter = Q(is_staff=True) & (Q(is_superuser=True) | Q(platform_admin_identity__isnull=False))
+    users = User.objects.all()
+    normal_users = users.filter(is_staff=False, is_superuser=False)
+    businesses = Tenant.objects.filter(kind=Tenant.Kind.BUSINESS)
+    workspaces = active_collaboration_workspaces()
+    live_files = File.objects.filter(deleted_at__isnull=True)
+    file_stats = live_files.aggregate(bytes=Sum("file_size"), count=Count("id"))
+    now = timezone.now()
+    jobs = UploadFinalizationJob.objects.aggregate(
+        pending_jobs=Count("pk", filter=Q(state=UploadFinalizationJob.State.PENDING)),
+        processing_jobs=Count("pk", filter=Q(state=UploadFinalizationJob.State.PROCESSING)),
+        failed_jobs=Count("pk", filter=Q(state=UploadFinalizationJob.State.FAILED)),
+        stale_processing_jobs=Count("pk", filter=Q(
+            state=UploadFinalizationJob.State.PROCESSING, updated_at__lt=now - UploadFinalizationJob.STALE_AFTER,
+        )),
+        oldest_active_job_at=Min("updated_at", filter=Q(state__in=[
+            UploadFinalizationJob.State.PENDING, UploadFinalizationJob.State.PROCESSING,
+        ])),
+    )
+    oldest = jobs["oldest_active_job_at"]
+    jobs["oldest_active_job_at"] = oldest.isoformat() if oldest else None
+    uploads = UploadSession.objects.aggregate(
+        verifying_uploads=Count("pk", filter=Q(state=UploadSession.State.VERIFYING)),
+        scanning_uploads=Count("pk", filter=Q(state=UploadSession.State.SCANNING)),
+    )
+    return Response({
+        "users": {
+            "total": normal_users.count(),
+            "active": normal_users.filter(is_active=True).count(),
+            "inactive": normal_users.filter(is_active=False).count(),
+            "platform_admins": users.filter(admin_filter).count(),
+            "recently_seen": TrackedAccountSession.objects.filter(
+                user__is_staff=False, user__is_superuser=False, user__is_active=True,
+                last_seen_at__gte=timezone.now() - ONLINE_WINDOW,
+                session__expire_date__gt=timezone.now(),
+            ).values("user_id").distinct().count(),
+        },
+        "organizations": {
+            "total": businesses.count(),
+            "active": businesses.filter(status=Tenant.Status.ACTIVE).count(),
+        },
+        "workspaces": {
+            "total": workspaces.count(),
+            "active": workspaces.count(),
+            "organization": workspaces.filter(tenant__kind=Tenant.Kind.BUSINESS).count(),
+            "personal": workspaces.filter(tenant__kind=Tenant.Kind.PERSONAL).count(),
+        },
+        "files": {
+            "total": file_stats["count"],
+            "metadata_bytes": file_stats["bytes"] or 0,
+            "in_trash": File.objects.filter(deleted_at__isnull=False).count(),
+        },
+        "health": {"api": "responding", "database": "responding", "storage": "not_monitored"},
+        "uploads": {**jobs, **uploads},
+    })
+
+
+def _requested_page(request):
+    try:
+        return max(1, min(100000, int(request.query_params.get("page", "1"))))
+    except (ValueError, TypeError):
+        return 1
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_organizations_view(request):
+    """Read-only organization directory; never exposes tenant-owned content."""
+    queryset = Tenant.objects.filter(kind=Tenant.Kind.BUSINESS)
+    query = str(request.query_params.get("q", "")).strip()[:100]
+    if query:
+        queryset = queryset.filter(name__icontains=query)
+    queryset = queryset.annotate(workspace_count=Count(
+        "workspaces",
+        filter=Q(
+            status=Tenant.Status.ACTIVE,
+            workspaces__is_default=False,
+            workspaces__status=Workspace.Status.ACTIVE,
+        ),
+        distinct=True,
+    ))
+    page = _requested_page(request)
+    count = queryset.count()
+    results = queryset.order_by("-created_at", "pk")[(page - 1) * 20:page * 20]
+    return Response({"count": count, "page": page, "page_size": 20, "results": [
+        {"id": str(tenant.pk), "name": tenant.name, "status": tenant.status,
+         "workspaces": tenant.workspace_count,
+         "created_at": tenant.created_at.isoformat()}
+        for tenant in results
+    ]})
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_workspaces_view(request):
+    """Active collaboration workspaces and their explicit membership counts.
+
+    Counts refer to active *explicit* assignments, excluding revoked/suspended
+    tenant memberships and disabled users. Tenant owner/admin inherited rights
+    and per-resource Direct Shares are intentionally not counted.
+
+    Read-only: a platform role can inspect metadata but cannot manage workspace
+    membership or access file contents by virtue of this endpoint.
+    """
+    query = str(request.query_params.get("q", "")).strip()[:100]
+    scope = request.query_params.get("scope", "all")
+    sort = request.query_params.get("sort", "newest")
+    if scope not in {"all", "personal", "organization"}:
+        return Response({"detail": "Invalid workspace scope."}, status=400)
+    sorts = {
+        "newest": ("-created_at", "pk"),
+        "oldest": ("created_at", "pk"),
+        "name_asc": (Lower("name").asc(), "pk"),
+        "name_desc": (Lower("name").desc(), "pk"),
+    }
+    if sort not in sorts:
+        return Response({"detail": "Invalid workspace sort."}, status=400)
+
+    queryset = active_collaboration_workspaces().select_related("tenant", "created_by")
+    if scope == "personal":
+        queryset = queryset.filter(tenant__kind=Tenant.Kind.PERSONAL)
+    elif scope == "organization":
+        queryset = queryset.filter(tenant__kind=Tenant.Kind.BUSINESS)
+    if query:
+        queryset = queryset.filter(Q(name__icontains=query) | Q(tenant__name__icontains=query))
+
+    count = queryset.count()
+    page = _requested_page(request)
+    # Aggregate only on the selected page; keeps directory size predictable.
+    selected = list(queryset.order_by(*sorts[sort])[(page - 1) * 20:page * 20])
+    workspace_ids = [workspace.pk for workspace in selected]
+    explicit_counts = {}
+    if workspace_ids:
+        assignments = WorkspaceMembership.objects.filter(
+            workspace_id__in=workspace_ids,
+            workspace__status=Workspace.Status.ACTIVE,
+            workspace__is_default=False,
+            workspace__tenant__status=Tenant.Status.ACTIVE,
+            status=WorkspaceMembership.Status.ACTIVE,
+            membership__status=Membership.Status.ACTIVE,
+            membership__user__is_active=True,
+            membership__tenant_id=F("workspace__tenant_id"),
+        ).values("workspace_id", "role").annotate(total=Count("pk"))
+        for row in assignments:
+            key = row["workspace_id"]
+            if key not in explicit_counts:
+                explicit_counts[key] = {"admin": 0, "editor": 0, "viewer": 0}
+            if row["role"] in explicit_counts[key]:
+                explicit_counts[key][row["role"]] = row["total"]
+
+    results = []
+    for workspace in selected:
+        roles = explicit_counts.get(workspace.pk, {"admin": 0, "editor": 0, "viewer": 0})
+        results.append({
+            "id": str(workspace.pk), "name": workspace.name, "status": workspace.status,
+            "organization": workspace.tenant.name if workspace.tenant.kind == Tenant.Kind.BUSINESS else None,
+            "scope": "organization" if workspace.tenant.kind == Tenant.Kind.BUSINESS else "personal",
+            "created_at": workspace.created_at.isoformat(),
+            "created_by": workspace.created_by.get_username() if workspace.created_by else None,
+            "member_count": sum(roles.values()),
+            "role_counts": roles,
+        })
+    response = Response({
+        "count": count, "page": page, "page_size": 20,
+        "scope": scope, "sort": sort, "results": results,
+    })
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+# --- Phase 02: account lifecycle, observed sessions and platform audit ---
+
+def _db_sessions_supported():
+    return getattr(settings, "SESSION_ENGINE", "django.contrib.sessions.backends.db") == "django.contrib.sessions.backends.db"
+
+
+def _validated_reason(request):
+    if not isinstance(request.data, dict) or set(request.data) != {"reason"}:
+        return None
+    reason = request.data.get("reason")
+    if not isinstance(reason, str):
+        return None
+    reason = reason.strip()
+    return reason if 8 <= len(reason) <= 500 else None
+
+
+def _require_reason(request):
+    reason = _validated_reason(request)
+    if reason is None:
+        return None, Response({"detail": "Provide a reason of 8–500 characters."}, status=400)
+    return reason, None
+
+
+def _regular_account(user, actor):
+    # Do not mutate ANY staff/superuser via this user management endpoint,
+    # even if a misconfigured staff account is not a dedicated platform admin.
+    return user.pk != actor.pk and not user.is_staff and not user.is_superuser
+
+
+@require_csrf
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_suspend_user_view(request, user_id):
+    reason, error = _require_reason(request)
+    if error is not None:
+        return error
+    if not _db_sessions_supported():
+        return Response({"detail": "Session revocation requires Django database sessions."}, status=503)
+    with transaction.atomic():
+        user = get_user_model().objects.select_for_update().filter(pk=user_id).first()
+        if user is None:
+            return Response({"detail": "Account not found."}, status=404)
+        if not _regular_account(user, request.user):
+            return Response({"detail": "Protected administrator/staff account."}, status=403)
+        if not user.is_active:
+            return Response({"detail": "Account is already disabled."}, status=409)
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+        # Includes sessions created before session tracking was installed.
+        revoke_all_database_sessions(user)
+        PlatformAdminAuditEvent.objects.create(
+            actor=request.user, target_user=user,
+            action=PlatformAdminAuditEvent.Action.SUSPEND, reason=reason,
+        )
+    return Response({"id": user.pk, "is_active": False})
+
+
+@require_csrf
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_reactivate_user_view(request, user_id):
+    reason, error = _require_reason(request)
+    if error is not None:
+        return error
+    with transaction.atomic():
+        user = get_user_model().objects.select_for_update().filter(pk=user_id).first()
+        if user is None:
+            return Response({"detail": "Account not found."}, status=404)
+        if not _regular_account(user, request.user):
+            return Response({"detail": "Protected administrator/staff account."}, status=403)
+        if user.is_active:
+            return Response({"detail": "Account is already enabled."}, status=409)
+        user.is_active = True
+        user.save(update_fields=["is_active"])
+        PlatformAdminAuditEvent.objects.create(
+            actor=request.user, target_user=user,
+            action=PlatformAdminAuditEvent.Action.REACTIVATE, reason=reason,
+        )
+    return Response({"id": user.pk, "is_active": True})
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_sessions_view(request):
+    """Observed, unexpired DB sessions; recent activity is not a presence ping."""
+    if not _db_sessions_supported():
+        return Response({"detail": "Session listing requires Django database sessions."}, status=503)
+    scope = request.query_params.get("scope", "users")
+    presence = request.query_params.get("presence", "all")
+    if scope not in ("users", "admins", "all") or presence not in ("all", "recent"):
+        return Response({"detail": "Invalid session filters."}, status=400)
+    now = timezone.now()
+    queryset = TrackedAccountSession.objects.select_related("user", "user__platform_admin_identity", "session").filter(session__expire_date__gt=now)
+    if scope == "users":
+        queryset = queryset.filter(user__is_staff=False, user__is_superuser=False)
+    elif scope == "admins":
+        queryset = queryset.filter(user__is_staff=True).filter(
+            Q(user__is_superuser=True) | Q(user__platform_admin_identity__isnull=False),
+        )
+    if presence == "recent":
+        queryset = queryset.filter(last_seen_at__gte=now - ONLINE_WINDOW)
+    user_id = str(request.query_params.get("user_id", "")).strip()
+    if user_id:
+        if not user_id.isdecimal() or len(user_id) > 18:
+            return Response({"detail": "Invalid user ID."}, status=400)
+        queryset = queryset.filter(user_id=user_id)
+    count = queryset.count()
+    page = _requested_page(request)
+    rows = queryset.order_by("-last_seen_at", "pk")[(page - 1) * 20:page * 20]
+    return Response({
+        "count": count, "page": page, "page_size": 20,
+        "tracking_note": "Only sessions observed since tracking was deployed are shown. An unexpired session is not necessarily online.",
+        "results": [{
+            "id": str(row.pk), "user_id": row.user_id,
+            "username": row.user.get_username(),
+            "account_type": ("admin" if row.user.is_staff and (row.user.is_superuser or hasattr(row.user, "platform_admin_identity"))
+                             else "staff" if row.user.is_staff or row.user.is_superuser else "user"),
+            "started_at": row.started_at.isoformat(),
+            "last_seen_at": row.last_seen_at.isoformat(),
+            "expires_at": row.session.expire_date.isoformat(),
+            "recently_online": row.user.is_active and row.last_seen_at >= now - ONLINE_WINDOW,
+            "user_agent": row.user_agent,
+            "can_revoke": not row.user.is_staff and not row.user.is_superuser,
+        } for row in rows],
+    })
+
+
+@require_csrf
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsPlatformAdmin])
+def admin_revoke_session_view(request, session_id):
+    reason, error = _require_reason(request)
+    if error is not None:
+        return error
+    if not _db_sessions_supported():
+        return Response({"detail": "Session revocation requires Django database sessions."}, status=503)
+    with transaction.atomic():
+        row = TrackedAccountSession.objects.select_for_update().select_related("user", "session").filter(pk=session_id).first()
+        if row is None:
+            return Response({"detail": "Tracked session not found."}, status=404)
+        if not _regular_account(row.user, request.user):
+            return Response({"detail": "Administrator/staff sessions are protected."}, status=403)
+        target_user = row.user
+        session_row = row.session
+        session_row.delete()
+        PlatformAdminAuditEvent.objects.create(
+            actor=request.user, target_user=target_user,
+            action=PlatformAdminAuditEvent.Action.REVOKE_SESSION,
+            reason=reason, metadata={"session_inventory_id": str(session_id)},
+        )
+    return Response({"revoked": True})

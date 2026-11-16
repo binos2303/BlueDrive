@@ -1,0 +1,2 @@
+.filterGrid { display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 12px; align-items: center; }
+@media (max-width: 700px) { .filterGrid { grid-template-columns: minmax(0, 1fr); } }

@@ -15,6 +15,8 @@ type ContextMenuProps = {
   trigger: ReactNode;
   actions: ContextMenuAction[];
   triggerClassName?: string;
+  /** Optional account identity block above menu actions. */
+  header?: ReactNode;
 };
 
 type MenuPosition = {
@@ -27,6 +29,7 @@ export default function ContextMenu({
   trigger,
   actions,
   triggerClassName,
+  header,
 }: ContextMenuProps) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<MenuPosition>({ top: 0, left: 0 });
@@ -69,7 +72,7 @@ export default function ContextMenu({
 
   function close(restoreFocus = true) {
     setOpen(false);
-    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+    if (restoreFocus) triggerRef.current?.focus();
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLUListElement>) {
@@ -117,7 +120,7 @@ export default function ContextMenu({
             setOpen(true);
           }
         }}
-        className={triggerClassName ?? "inline-flex h-10 w-10 items-center justify-center rounded-[var(--radius-control)] text-muted transition-colors duration-[var(--motion-fast)] hover:bg-background hover:text-foreground"}
+        className={triggerClassName ?? "ui-control inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-muted transition-colors duration-[var(--motion-fast)] hover:bg-background hover:text-foreground"}
       >
         {trigger}
       </button>
@@ -131,6 +134,7 @@ export default function ContextMenu({
           style={{ top: position.top, left: position.left }}
           className="fixed z-[70] max-h-[min(70vh,24rem)] min-w-48 overflow-y-auto rounded-xl border border-border bg-surface p-1 shadow-[var(--shadow-popover)]"
         >
+          {header && <li role="none" className="border-b border-border p-2.5">{header}</li>}
           {actions.map((action) => (
             <li key={action.label} role="none">
               <button
@@ -141,9 +145,9 @@ export default function ContextMenu({
                   action.onSelect();
                   close();
                 }}
-                className={`w-full rounded-lg px-3 py-2 text-left text-sm transition-colors duration-[var(--motion-fast)] disabled:cursor-not-allowed disabled:opacity-50 ${
+                className={`ui-control min-h-10 w-full rounded-lg px-3 py-2 text-left text-sm transition-colors duration-[var(--motion-fast)] disabled:cursor-not-allowed disabled:opacity-50 ${
                   action.destructive
-                    ? "text-danger hover:bg-rose-50"
+                    ? "text-danger hover:bg-danger/10"
                     : "text-foreground hover:bg-background"
                 }`}
               >

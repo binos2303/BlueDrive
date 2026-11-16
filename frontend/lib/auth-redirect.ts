@@ -1,5 +1,9 @@
 const FALLBACK_PATH = "/drive";
 
+export function authFormHref(mode: "login" | "register", candidate?: string | null): string {
+  return `/${mode}?${new URLSearchParams({ next: safeInternalRedirect(candidate) })}`;
+}
+
 export function safeInternalRedirect(
   candidate: string | null | undefined,
   fallback = FALLBACK_PATH,

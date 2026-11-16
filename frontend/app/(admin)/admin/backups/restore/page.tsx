@@ -29,7 +29,7 @@ export default function RestoreCenterPage() {
         <span className="rounded-full bg-background px-2.5 py-1 text-xs text-muted">Unavailable</span>
       </div>
 
-      <div className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+      <div className="mb-5 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning-soft p-4 text-warning">
         <AlertTriangle size={18} className="mt-0.5 shrink-0" />
         <div>
           <p className="text-sm font-semibold">Restore service unavailable</p>
@@ -39,7 +39,7 @@ export default function RestoreCenterPage() {
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {modes.map(({ id, label, icon: Icon }) => (
-          <button key={id} type="button" onClick={() => setMode(id)} aria-pressed={mode === id} className={`flex items-center gap-3 rounded-[18px] border p-4 text-left transition ${mode === id ? "border-brand bg-brand-soft text-brand" : "border-border bg-surface text-foreground hover:bg-background"}`}>
+          <button key={id} type="button" onClick={() => setMode(id)} aria-pressed={mode === id} className={`flex items-center gap-3 rounded-[18px] border p-4 text-left transition ${mode === id ? "border-brand bg-brand-soft text-brand-contrast" : "border-border bg-surface text-foreground hover:bg-background"}`}>
             <Icon size={19} /><span className="text-sm font-semibold">{label}</span>
           </button>
         ))}

@@ -2,10 +2,17 @@
 
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useAccount } from "@/components/account/AccountProvider";
 
 import Sidebar from "./Sidebar";
 import SettingsSidebar from "./SettingsSidebar";
 import Header from "./Header";
+import useNavigationDrawer from "./useNavigationDrawer";
+import GlobalDriveActions from "@/components/drive/GlobalDriveActions";
+import type { OrganizationWorkspace } from "@/lib/workspace-service";
+import { SelectedWorkspaceContext } from "@/components/workspaces/SelectedWorkspaceContext";
+import { SharedFolderContext } from "@/components/drive/browser/SharedFolderContext";
 
 export default function DashboardShell({
   children,
@@ -14,52 +21,22 @@ export default function DashboardShell({
   children: ReactNode;
   settingsNavigation?: { active: string; onChange: (section: string) => void };
 }) {
+  const router = useRouter();
+  const { state } = useAccount();
+  useEffect(() => {
+    if (state.status === "loaded" && state.account?.is_platform_admin) router.replace("/admin");
+  }, [state, router]);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const [workspace, setWorkspace] = useState<OrganizationWorkspace | null>(null);
+  const [sharedFolderId, setSharedFolderId] = useState<number | null>(null);
   const navigationRef = useRef<HTMLElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const wasNavigationOpen = useRef(false);
+  useNavigationDrawer(mobileNavigationOpen, setMobileNavigationOpen, navigationRef, menuButtonRef);
 
-  useEffect(() => {
-    if (mobileNavigationOpen) {
-      navigationRef.current?.querySelector("a")?.focus();
-    } else if (wasNavigationOpen.current) {
-      menuButtonRef.current?.focus();
-    }
-    wasNavigationOpen.current = mobileNavigationOpen;
-  }, [mobileNavigationOpen]);
-
-  useEffect(() => {
-    if (!mobileNavigationOpen) return;
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setMobileNavigationOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-
-      const focusable = navigationRef.current?.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusable?.length) return;
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [mobileNavigationOpen]);
+  if (state.status === "loaded" && state.account?.is_platform_admin) return null;
 
   return (
-    <main className="flex h-screen overflow-hidden bg-background">
+    <SelectedWorkspaceContext.Provider value={workspace}><SharedFolderContext.Provider value={{ folderId: sharedFolderId, setFolderId: setSharedFolderId }}><main className="flex h-dvh overflow-hidden bg-background">
       {mobileNavigationOpen && (
         <button
           type="button"
@@ -74,11 +51,14 @@ export default function DashboardShell({
           onNavigate={() => setMobileNavigationOpen(false)} />
       ) : (
         <Sidebar navigationRef={navigationRef} mobileOpen={mobileNavigationOpen}
+          workspace={workspace}
+          sharedFolderId={sharedFolderId}
           onNavigate={() => setMobileNavigationOpen(false)} />
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <Header
+          onWorkspaceChange={setWorkspace}
           menuButtonRef={menuButtonRef}
           mobileOpen={mobileNavigationOpen}
           onMenuClick={() => setMobileNavigationOpen(true)}
@@ -88,6 +68,7 @@ export default function DashboardShell({
           {children}
         </div>
       </div>
-    </main>
+      <GlobalDriveActions />
+    </main></SharedFolderContext.Provider></SelectedWorkspaceContext.Provider>
   );
 }

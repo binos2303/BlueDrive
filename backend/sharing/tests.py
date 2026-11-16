@@ -118,6 +118,80 @@ class SharingAccessTests(TestCase):
             receiver=self.user_b,
         )
 
+    def test_api_repeated_share_is_noop_and_logs_once(self):
+        import json
+        from accounts.access import get_default_workspace
+        from logs.models import ActivityLog
+
+        self.user_b.email = "repeat-recipient@example.test"
+        self.user_b.save(update_fields=["email"])
+        workspace = get_default_workspace(self.file_a.tenant)
+        self.folder_a.workspace = workspace
+        self.folder_a.save(update_fields=["workspace"])
+        self.file_a.workspace = workspace
+        self.file_a.save(update_fields=["workspace"])
+
+        self.client.force_login(self.user_a)
+        url = reverse("drive_items_share_api")
+        payload = json.dumps({
+            "file_ids": [self.file_a.pk], "folder_ids": [],
+            "email": self.user_b.email, "permission": Share.Permission.VIEWER,
+        })
+        first = self.client.post(url, payload, content_type="application/json")
+        second = self.client.post(url, payload, content_type="application/json")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["count"], 1)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["count"], 0)
+        logs = ActivityLog.objects.filter(user=self.user_a, action=ActivityLog.Action.SHARE)
+        self.assertEqual(logs.count(), 1)
+        self.assertEqual(logs.first().metadata["operation"], "created")
+        self.assertEqual(logs.first().metadata["resource_changes"][0]["name"], self.file_a.file_name)
+
+    def test_repeating_identical_file_share_does_not_duplicate_audit(self):
+        from logs.models import ActivityLog
+
+        self.client.force_login(self.user_a)
+        path = reverse("share_file", args=[self.file_a.id])
+        payload = {"username": self.user_b.username, "permission": Share.Permission.VIEWER}
+        self.assertEqual(self.client.post(path, payload).status_code, 302)
+        self.assertEqual(self.client.post(path, payload).status_code, 302)
+
+        history = ActivityLog.objects.filter(
+            user=self.user_a, action=ActivityLog.Action.SHARE, object_id=self.file_a.pk,
+        )
+        self.assertEqual(history.count(), 1)
+        self.assertEqual(history.first().metadata["operation"], "created")
+        self.assertEqual(Share.objects.filter(file=self.file_a, receiver=self.user_b).count(), 1)
+
+    def test_changed_share_permission_is_distinct_and_attributed(self):
+        from logs.models import ActivityLog
+
+        self.client.force_login(self.user_a)
+        path = reverse("share_file", args=[self.file_a.id])
+        self.client.post(path, {"username": self.user_b.username, "permission": Share.Permission.VIEWER})
+        self.client.post(path, {"username": self.user_b.username, "permission": Share.Permission.EDITOR})
+        history = list(ActivityLog.objects.filter(
+            user=self.user_a, action=ActivityLog.Action.SHARE, object_id=self.file_a.pk,
+        ).order_by("created_at", "pk"))
+        self.assertEqual(len(history), 2)
+        self.assertEqual([row.metadata["operation"] for row in history], ["created", "permission_changed"])
+        self.assertEqual(history[1].metadata["previous_permission"], Share.Permission.VIEWER)
+        self.assertEqual(history[1].tenant_id, self.file_a.tenant_id)
+        self.assertEqual(history[1].metadata["recipient_username"], self.user_b.username)
+
+    def test_revoke_share_log_contains_resource_and_recipient(self):
+        from logs.models import ActivityLog
+
+        share = self._share_file()
+        self.client.force_login(self.user_a)
+        self.client.post(reverse("revoke_share", args=[share.pk]))
+        event = ActivityLog.objects.get(user=self.user_a, action=ActivityLog.Action.REVOKE_SHARE)
+        self.assertEqual(event.object_id, self.file_a.pk)
+        self.assertEqual(event.tenant_id, self.file_a.tenant_id)
+        self.assertEqual(event.metadata["operation"], "revoked")
+        self.assertEqual(event.metadata["resource_names"], [self.file_a.file_name])
+
     def test_shared_file_can_view_and_download(self):
         share = self._share_file()
 
@@ -360,43 +434,30 @@ class SharingAccessTests(TestCase):
         self.assertFalse(Share.objects.filter(file=drive_file).exists())
 
     def test_platform_staff_does_not_bypass_file_permissions(self):
-        platform_admin = User.objects.create_user(
-            username="platform_admin",
+        # Django staff alone is not a dedicated Platform Admin identity.
+        # Without an active tenant membership, active_tenant_required returns
+        # HTTP 403 before per-file authorization can return HTTP 404.
+        platform_staff = User.objects.create_user(
+            username="staff_without_tenant",
             is_staff=True,
         )
-        self.client.force_login(platform_admin)
+        self.client.force_login(platform_staff)
 
-        response = self.client.get(reverse("file_view", args=[self.file_a.id]))
-
-        self.assertEqual(response.status_code, 404)
-
-        response = self.client.get(
-            reverse("file_view", args=[self.file_a.id])
-        )
-        self.assertEqual(response.status_code, 404)
-
-        response = self.client.get(
-            reverse("file_download", args=[self.file_a.id])
-        )
-        self.assertEqual(response.status_code, 404)
-
-        response = self.client.get(
-            reverse("file_details", args=[self.file_a.id])
-        )
-        self.assertEqual(response.status_code, 404)
+        for route in ("file_view", "file_download", "file_details"):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route, args=[self.file_a.id]))
+                self.assertEqual(response.status_code, 403)
 
         response = self.client.post(
             reverse("file_rename", args=[self.file_a.id]),
             {"file_name": "unauthorized.txt"},
         )
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 403)
         self.file_a.refresh_from_db()
         self.assertEqual(self.file_a.file_name, "secret.txt")
 
-        response = self.client.post(
-            reverse("file_move_to_trash", args=[self.file_a.id])
-        )
-        self.assertEqual(response.status_code, 404)
+        response = self.client.post(reverse("file_move_to_trash", args=[self.file_a.id]))
+        self.assertEqual(response.status_code, 403)
         self.file_a.refresh_from_db()
         self.assertIsNone(self.file_a.deleted_at)
 
@@ -404,7 +465,46 @@ class SharingAccessTests(TestCase):
             reverse("share_file", args=[self.file_a.id]),
             {"username": self.user_b.username},
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Share.objects.filter(file=self.file_a).exists())
+
+    def test_active_platform_admin_is_blocked_from_drive_endpoints(self):
+        # A dedicated administrator is also blocked by the Platform Admin
+        # middleware, independently of file-owner or workspace permissions.
+        from accounts.models import PlatformAdminIdentity
+
+        super_admin = User.objects.create_superuser(
+            username="admin_inviter", email="inviter@example.test",
+            password="TestPass123!",
+        )
+        dedicated_admin = User.objects.create_user(
+            username="dedicated_admin", is_staff=True,
+        )
+        PlatformAdminIdentity.objects.create(
+            user=dedicated_admin,
+            invited_by=super_admin,
+            status=PlatformAdminIdentity.Status.ACTIVE,
+        )
+        self.client.force_login(dedicated_admin)
+
+        for route in ("file_view", "file_download", "file_details"):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route, args=[self.file_a.id]))
+                self.assertEqual(response.status_code, 403)
+
+        for route, data in (
+            ("file_rename", {"file_name": "unauthorized.txt"}),
+            ("file_move_to_trash", {}),
+            ("share_file", {"username": self.user_b.username}),
+        ):
+            with self.subTest(route=route):
+                response = self.client.post(reverse(route, args=[self.file_a.id]), data)
+                self.assertEqual(response.status_code, 403)
+
+        self.file_a.refresh_from_db()
+        self.assertEqual(self.file_a.file_name, "secret.txt")
+        self.assertIsNone(self.file_a.deleted_at)
+        self.assertFalse(Share.objects.filter(file=self.file_a).exists())
 
 
 @override_settings(NEXTJS_FRONTEND_URL="http://127.0.0.1:3000")

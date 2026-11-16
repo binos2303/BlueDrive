@@ -37,7 +37,7 @@ def _get_active_membership(upload, user):
 def reserve_upload_quota(upload_session_id, user):
     upload = (
         UploadSession.objects.select_for_update()
-        .select_related("tenant")
+        .select_related("tenant", "workspace")
         .get(pk=upload_session_id)
     )
     if upload.initiated_by_id != getattr(user, "pk", None):
@@ -70,33 +70,50 @@ def reserve_upload_quota(upload_session_id, user):
     ):
         raise QuotaStateError("Quota can only be reserved for an active upload.")
 
-    accounts = QuotaAccount.objects.filter(
-        tenant_id=upload.tenant_id,
-        scope=QuotaAccount.Scope.TENANT,
-    )
-    if upload.tenant.kind == "business":
-        accounts = accounts | QuotaAccount.objects.filter(
+    # My Drive uses the tenant allocation. Collaborative workspaces charge
+    # their own quota exclusively; a member's private Drive remains untouched.
+    # Missing accounts on old workspaces are an explicit migration blocker,
+    # never an implicit unlimited allocation.
+    if upload.workspace_id is None:
+        raise QuotaStateError("Upload has no workspace scope.")
+    if upload.workspace.status != "active":
+        raise QuotaStateError("Workspace is not active.")
+    if upload.workspace.is_default:
+        requested_accounts = QuotaAccount.objects.filter(
+            tenant_id=upload.tenant_id, scope=QuotaAccount.Scope.TENANT,
+        )
+        if upload.tenant.kind == Tenant.Kind.BUSINESS:
+            requested_accounts = requested_accounts | QuotaAccount.objects.filter(
+                tenant_id=upload.tenant_id,
+                user_id=user.pk,
+                scope=QuotaAccount.Scope.MEMBER,
+            )
+    else:
+        requested_accounts = QuotaAccount.objects.filter(
             tenant_id=upload.tenant_id,
-            user_id=user.pk,
-            scope=QuotaAccount.Scope.MEMBER,
+            workspace_id=upload.workspace_id,
+            scope=QuotaAccount.Scope.WORKSPACE,
         )
     accounts_by_id = {
         account.pk: account
         for account in QuotaAccount.objects.select_for_update()
-        .filter(pk__in=accounts.values("pk"))
+        .filter(pk__in=requested_accounts.values("pk"))
         .order_by("pk")
     }
-    if not accounts_by_id or not any(
-        account.scope == QuotaAccount.Scope.TENANT
+    if upload.workspace.is_default:
+        if not any(account.scope == QuotaAccount.Scope.TENANT for account in accounts_by_id.values()):
+            raise QuotaStateError("The My Drive quota is not configured.")
+        if upload.tenant.kind == Tenant.Kind.BUSINESS and not any(
+            account.scope == QuotaAccount.Scope.MEMBER and account.user_id == user.pk
+            for account in accounts_by_id.values()
+        ):
+            raise QuotaStateError("The organization member quota is not configured.")
+    elif len(accounts_by_id) != 1 or not any(
+        account.scope == QuotaAccount.Scope.WORKSPACE
+        and account.workspace_id == upload.workspace_id
         for account in accounts_by_id.values()
     ):
-        raise QuotaStateError("The tenant quota account is not configured.")
-    if upload.tenant.kind == "business" and not any(
-        account.scope == QuotaAccount.Scope.MEMBER
-        and account.user_id == user.pk
-        for account in accounts_by_id.values()
-    ):
-        raise QuotaStateError("The member has no quota allocation.")
+        raise QuotaStateError("Workspace quota not initialized. Run quota reconciliation.")
 
     requested_bytes = upload.expected_size_bytes
     for account in accounts_by_id.values():

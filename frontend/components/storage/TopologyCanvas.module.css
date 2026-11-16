@@ -1,0 +1,17 @@
+.canvas {
+  --xy-background-color-default: var(--background);
+  --xy-node-background-color-default: var(--surface);
+  --xy-node-color-default: var(--foreground);
+  --xy-edge-stroke-default: var(--border-strong);
+  --xy-minimap-background-color-default: var(--surface);
+  --xy-minimap-mask-background-color-default: var(--background);
+  --xy-attribution-background-color-default: var(--surface);
+}
+.canvas :global(.react-flow__node-host) { border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface); color: var(--foreground); }
+.canvas :global(.react-flow__node-host.selected) { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+.canvas :global(.react-flow__node-pool) { border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--foreground); }
+.canvas :global(.react-flow__handle) { width: 4px; height: 4px; border: 0; background: var(--border-strong); }
+.canvas :global(.react-flow__attribution) { color: var(--muted); font-size: 11px; }
+.canvas :global(.react-flow__attribution a) { color: inherit; }
+.canvas :global(.react-flow__minimap) { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+@media (max-width: 767px) { .canvas :global(.react-flow__minimap) { display: none; } }

@@ -1,0 +1,129 @@
+"""Read-only file metadata authorization / filtering regression tests.
+
+Run: python manage.py test accounts.test_admin_files_api
+"""
+from datetime import timedelta
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+from django.urls import reverse
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from accounts.models import Membership, Tenant, Workspace
+from files.models import File, FileVersion, StorageConfig, StorageLocation
+
+
+class AdminFilesAPITests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.admin = User.objects.create_superuser(
+            username="platform-file-admin", email="platform@example.test", password="strong-password-123!"
+        )
+        self.owner = User.objects.create_user(
+            username="file-owner", email="owner@example.test", password="strong-password-123!"
+        )
+        # A post_save signal provisions a Personal Tenant and default Workspace
+        # for every regular user. Reuse them instead of violating the unique
+        # personal_owner and one-default-workspace-per-tenant constraints.
+        self.personal = Tenant.objects.get(personal_owner=self.owner)
+        self.business = Tenant.objects.create(kind=Tenant.Kind.BUSINESS, name="Example Org")
+        self.personal_ws = Workspace.objects.get(tenant=self.personal, is_default=True)
+        self.independent_ws = Workspace.objects.create(
+            tenant=self.personal, name="Shared Project", slug="shared-project", is_default=False,
+        )
+        self.org_ws = Workspace.objects.create(
+            tenant=self.business, name="Team Assets", slug="team-assets", is_default=True,
+        )
+        # Files must be owned by a member of the same tenant. The test's
+        # organization owner must belong to Example Org before creating files.
+        # Creating this membership after org_ws also lets its signal attach the
+        # owner to the existing default workspace without creating another one.
+        self.business_membership = Membership.objects.create(
+            tenant=self.business,
+            user=self.owner,
+            role=Membership.Role.OWNER,
+            status=Membership.Status.ACTIVE,
+        )
+        self.personal_file = File.objects.create(
+            tenant=self.personal, workspace=self.personal_ws, owner=self.owner,
+            file_name="report.pdf", file_path="uploads/private-object.pdf",
+            file_size=2048, mime_type="application/pdf", hash_sha256="secretchecksum",
+        )
+        self.workspace_file = File.objects.create(
+            tenant=self.personal, workspace=self.independent_ws, owner=self.owner,
+            file_name="collaboration-notes.txt", file_size=256, mime_type="text/plain",
+        )
+        self.org_file = File.objects.create(
+            tenant=self.business, workspace=self.org_ws, owner=self.owner,
+            file_name="team-photo.png", file_path="uploads/tenant-object.png",
+            file_size=8192, mime_type="image/png",
+        )
+        self.trashed_file = File.objects.create(
+            tenant=self.personal, workspace=self.personal_ws, owner=self.owner,
+            file_name="old-report.txt", file_size=500, mime_type="text/plain",
+            deleted_at=timezone.now(), purge_after=timezone.now() + timedelta(days=30),
+        )
+        version = FileVersion.objects.create(
+            tenant=self.personal, file=self.personal_file, version_number=1,
+            state=FileVersion.State.AVAILABLE, size_bytes=2048,
+            is_current=True, sha256="secret-version-checksum",
+        )
+        storage = StorageConfig.objects.create(
+            tenant=self.personal, provider=StorageConfig.Provider.S3,
+            endpoint="https://private-s3.example.test", credential_ref="secret-admin-credential",
+        )
+        StorageLocation.objects.create(
+            tenant=self.personal, file_version=version, storage_config=storage,
+            object_ref="private/bucket/object-key", state=StorageLocation.State.AVAILABLE,
+        )
+        self.client = APIClient()
+        self.client.force_login(self.admin)
+
+    def test_file_inventory_search_scope_and_status(self):
+        endpoint = reverse("api-admin-files")
+        response = self.client.get(endpoint)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.data["count"], 3)
+        self.assertEqual(response.data["summary"], {
+            "active": 3, "trash": 1, "active_metadata_bytes": 10496,
+        })
+        self.assertEqual(self.client.get(endpoint, {"scope": "organization"}).data["count"], 1)
+        self.assertEqual(self.client.get(endpoint, {"scope": "my_drive"}).data["count"], 1)
+        self.assertEqual(self.client.get(endpoint, {"scope": "workspace"}).data["count"], 1)
+        self.assertEqual(self.client.get(endpoint, {"q": "team-photo"}).data["count"], 1)
+        self.assertEqual(self.client.get(endpoint, {"q": "Example Org"}).data["count"], 1)
+        self.assertEqual(self.client.get(endpoint, {"type": "image"}).data["count"], 1)
+        trashed = self.client.get(endpoint, {"status": "trash"}).data
+        self.assertEqual(trashed["count"], 1)
+        self.assertEqual(trashed["results"][0]["lifecycle"], "trash")
+
+    def test_file_details_expose_no_contents_or_storage_secrets(self):
+        detail = self.client.get(reverse("api-admin-file-detail", args=[self.personal_file.pk]))
+        self.assertEqual(detail.status_code, 200, detail.content)
+        self.assertEqual(detail.data["name"], "report.pdf")
+        self.assertEqual(detail.data["versions"][0]["storage"][0]["provider"], "s3")
+        raw = detail.content.decode("utf-8")
+        for secret in (
+            "private-object.pdf", "secretchecksum", "secret-version-checksum",
+            "private-s3.example.test", "secret-admin-credential", "private/bucket/object-key",
+            "wrapped_dek", "encryption_nonce", "download_url",
+        ):
+            self.assertNotIn(secret, raw)
+        self.assertEqual(self.client.post(reverse("api-admin-files"), {}).status_code, 405)
+        self.assertEqual(self.client.delete(reverse("api-admin-file-detail", args=[self.personal_file.pk])).status_code, 405)
+
+    def test_normal_users_cannot_view_other_files_or_admin_inventory(self):
+        outsider = APIClient()
+        outsider.force_login(self.owner)
+        self.assertEqual(outsider.get(reverse("api-admin-files")).status_code, 403)
+        self.assertEqual(outsider.get(reverse("api-admin-file-detail", args=[self.org_file.pk])).status_code, 403)
+        self.assertEqual(APIClient().get(reverse("api-admin-files")).status_code, 403)
+
+    def test_invalid_filters_and_missing_files(self):
+        endpoint = reverse("api-admin-files")
+        for filter_args in ({"scope": "unknown"}, {"status": "bad"}, {"page": "zero"},
+                            {"sort": "unknown"}, {"workspace_id": "invalid-uuid"},
+                            {"owner_id": "admin"}):
+            self.assertEqual(self.client.get(endpoint, filter_args).status_code, 400)
+        self.assertEqual(self.client.get(reverse("api-admin-file-detail", args=[99999999])).status_code, 404)

@@ -1,5 +1,9 @@
 # ADR-0001: SaaS file transfer and encryption
 
+> Cập nhật trạng thái 16/11/2026: [ADR-0010](ADR-0010-seaweedfs-enterprise-and-client-encryption-target.md) thay thế đích MinIO, download mặc định qua Django, server AES và việc hoãn CSE bằng kiến trúc SeaweedFS-only/Enterprise My Drive/CSE recovery. Nội dung bên dưới giữ lịch sử; không chứng minh CSE đã triển khai. Reader/key AES hiện có vẫn phải hoạt động cho dữ liệu được tham chiếu.
+
+> Implementation update — 2026-11-08: this ADR records the earlier encryption design. Current multipart finalization verifies and publishes S3 objects without application AES encryption (`is_encrypted=False`); optional provider SSE must be configured separately. Eligible downloads can use authorized, version-pinned presigned GET URLs. Legacy encrypted objects still use Django decryption. See [the implemented download pipeline](./PRESIGNED_DOWNLOAD_2026-11-07.md) and [current architecture](../README.md). The AES/quarantine requirements below are historical design intent, not evidence that current multipart objects meet them.
+
 - **Status:** B upload implementation authorized by project owner; production release remains gated on storage, scanner and key-management operations
 - **Date:** 2026-10-13
 - **Scope:** SaaS-operated storage and file transfer. Customer-operated MinIO is a later phase.

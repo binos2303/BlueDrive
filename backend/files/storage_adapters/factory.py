@@ -4,13 +4,32 @@ from .base import StorageConfigurationError
 from .s3_compatible import S3CompatibleStorageAdapter
 
 
-def get_storage_adapter():
+def get_storage_adapter(*, connection=None, bucket=None):
     """Build the configured provider adapter without exposing SDK details."""
+    if connection is not None:
+        import os
+        from infrastructure.connection_profiles import build_client
+        return S3CompatibleStorageAdapter(
+            endpoint_url=connection.endpoint_url, public_endpoint_url=connection.public_endpoint_url,
+            bucket=bucket or connection.bucket, region=connection.region, addressing_style='path',
+            access_key_id=os.environ.get(connection.access_key_env,''),
+            secret_access_key=os.environ.get(connection.secret_key_env,''),
+            tls_verify=True, ca_bundle=connection.ca_bundle, connect_timeout=2, read_timeout=5,
+            max_attempts=2, server_side_encryption=connection.server_side_encryption,
+            kms_key_id=connection.kms_key_id, client=build_client(connection), public_upload_endpoint=True,
+        )
+    if bucket is not None:
+        raise StorageConfigurationError('Bucket overrides require a pinned connection.')
+    # Các caller bỏ quên connection không được âm thầm dùng endpoint toàn cục.
+    if settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED:
+        raise StorageConfigurationError('A verified storage connection is required.')
     if not getattr(settings, "SECUREDRIVE_STORAGE_ENDPOINT_URL", ""):
         raise StorageConfigurationError("Object storage is not configured.")
 
     return S3CompatibleStorageAdapter(
         endpoint_url=settings.SECUREDRIVE_STORAGE_ENDPOINT_URL,
+        public_endpoint_url=settings.SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL,
+        public_upload_endpoint=bool(settings.SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL),
         bucket=settings.SECUREDRIVE_STORAGE_BUCKET,
         region=settings.SECUREDRIVE_STORAGE_REGION,
         addressing_style=settings.SECUREDRIVE_STORAGE_ADDRESSING_STYLE,

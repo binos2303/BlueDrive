@@ -1,6 +1,6 @@
-import type { InputHTMLAttributes } from "react";
+import type { ComponentPropsWithRef } from "react";
 
-type InputProps = InputHTMLAttributes<HTMLInputElement> & {
+type InputProps = ComponentPropsWithRef<"input"> & {
   invalid?: boolean;
 };
 

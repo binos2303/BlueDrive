@@ -49,6 +49,28 @@ class MinIOStorageIntegrationTests(unittest.TestCase):
         self.adapter.delete_object(key)
         self.adapter.delete_object(key)
 
+    def test_list_uploaded_parts_for_browser_resume(self):
+        key = self.adapter.create_object_key("staging")
+        upload = self.adapter.initiate_multipart(
+            key, upload_session_id="integration-resume-parts"
+        )
+        try:
+            payload = b"resume-receipt"
+            response = self.adapter._client.upload_part(
+                Bucket=settings.SECUREDRIVE_STORAGE_BUCKET,
+                Key=key,
+                UploadId=upload.upload_id,
+                PartNumber=1,
+                Body=payload,
+            )
+            parts = self.adapter.list_uploaded_parts(key, upload.upload_id)
+            self.assertEqual(len(parts), 1)
+            self.assertEqual(parts[0].part_number, 1)
+            self.assertEqual(parts[0].etag, response["ETag"])
+            self.assertEqual(parts[0].size_bytes, len(payload))
+        finally:
+            self.adapter.abort_multipart(key, upload.upload_id)
+
     def test_repeated_multipart_complete_returns_the_same_verified_object(self):
         payload = b"repeatable-complete"
         key = self.adapter.create_object_key("quarantine")
@@ -80,6 +102,55 @@ class MinIOStorageIntegrationTests(unittest.TestCase):
         finally:
             self.adapter.abort_multipart(key, upload.upload_id)
             self.adapter.delete_object(key)
+
+    def test_publish_verified_staging_uses_server_side_copy(self):
+        """Run only against a disposable bucket with real S3 CopyObject support."""
+        import hashlib
+
+        payload = b"verified-by-the-worker" * 1024
+        digest = hashlib.sha256(payload).hexdigest()
+        session_id = "integration-publish-staging"
+        staging = self.adapter.create_object_key("staging")
+        primary = self.adapter.create_object_key("primary")
+        upload = self.adapter.initiate_multipart(
+            staging, upload_session_id=session_id,
+        )
+        try:
+            part = self.adapter._client.upload_part(
+                Bucket=settings.SECUREDRIVE_STORAGE_BUCKET,
+                Key=staging,
+                UploadId=upload.upload_id,
+                PartNumber=1,
+                Body=payload,
+            )
+            complete_stat = self.adapter.complete_multipart(
+                staging, upload.upload_id,
+                [MultipartPart(part_number=1, etag=part["ETag"])],
+                expected_size=len(payload),
+                expected_upload_session_id=session_id,
+            )
+            # Emulate the finalizer's independent verification, not the
+            # checksum calculated by the storage provider.
+            retrieved = BytesIO()
+            downloaded_stat = self.adapter.download_to(
+                staging, retrieved, max_bytes=len(payload)
+            )
+            self.assertEqual(hashlib.sha256(retrieved.getvalue()).hexdigest(), digest)
+            self.assertEqual(downloaded_stat.etag, complete_stat.etag)
+            published = self.adapter.publish_verified_object(
+                staging, primary, expected_size=len(payload),
+                expected_sha256=digest, upload_session_id=session_id,
+                expected_source_etag=downloaded_stat.etag,
+            )
+            self.assertEqual(published.size_bytes, len(payload))
+            self.assertEqual(published.metadata.get("securedrive-sha256"), digest)
+            copied = BytesIO()
+            self.adapter.download_to(primary, copied, max_bytes=len(payload))
+            self.assertEqual(hashlib.sha256(copied.getvalue()).hexdigest(), digest)
+        finally:
+            self.adapter.abort_multipart(staging, upload.upload_id)
+            self.adapter.delete_object(staging)
+            self.adapter.delete_object(primary)
 
     def test_wrong_credentials_are_non_retryable_and_redacted(self):
         adapter = S3CompatibleStorageAdapter(

@@ -2,9 +2,11 @@
 
 :root {
   --brand-primary: #7288fa;
-  --brand-primary-hover: #5f75e8;
+  --brand-primary-hover: #4354ae;
   --brand-primary-soft: #eef1ff;
   --brand-primary-contrast: #4e61c5;
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
 
   --brand-dark: #121523;
   --brand-deep: #04050c;
@@ -17,8 +19,11 @@
   --foreground: #121523;
   --muted: #65728a;
   --success: #15803d;
+  --success-soft: #f0fdf4;
   --warning: #a16207;
+  --warning-soft: #fffbeb;
   --danger: #be123c;
+  --danger-soft: #fff1f2;
   --focus-ring: #536bdc;
   --radius-control: 0.75rem;
   --shadow-popover: 0 12px 32px rgb(18 21 35 / 12%);
@@ -32,6 +37,8 @@ html[data-theme="dark"] {
   --brand-primary-hover: #a7b4ff;
   --brand-primary-soft: #252e4c;
   --brand-primary-contrast: #a8b6ff;
+  --on-accent: #0c1020;
+  --on-danger: #37111c;
 
   --brand-dark: #e7ebff;
   --brand-deep: #f5f6ff;
@@ -44,8 +51,11 @@ html[data-theme="dark"] {
   --foreground: #edf0fb;
   --muted: #a3aec7;
   --success: #4ade80;
+  --success-soft: #102e23;
   --warning: #facc15;
+  --warning-soft: #332a14;
   --danger: #fb7185;
+  --danger-soft: #351d2b;
   --focus-ring: #a8b6ff;
   --shadow-popover: 0 12px 32px rgb(0 0 0 / 40%);
 }
@@ -62,6 +72,8 @@ html[data-theme="light"] {
   --color-brand-hover: var(--brand-primary-hover);
   --color-brand-soft: var(--brand-primary-soft);
   --color-brand-contrast: var(--brand-primary-contrast);
+  --color-on-accent: var(--on-accent);
+  --color-on-danger: var(--on-danger);
 
   --color-brand-dark: var(--brand-dark);
   --color-brand-deep: var(--brand-deep);
@@ -71,8 +83,11 @@ html[data-theme="light"] {
   --color-border-strong: var(--border-strong);
   --color-muted: var(--muted);
   --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
   --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
 
   --font-sans: var(--font-poppins);
 }
@@ -118,17 +133,27 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-poppins), sans-serif;
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 }
 
 a {
   text-decoration: none;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
 }
 
 :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
@@ -146,13 +171,17 @@ a {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  html {
     scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+  }
+
+  .animate-spin,
+  .animate-pulse {
+    animation: none;
+  }
+
+  .transition-transform {
+    transition-property: color, background-color, opacity;
   }
 }
 
@@ -167,6 +196,47 @@ a {
     [tabindex]
   ):focus-visible {
     outline: 2px solid Highlight;
+  }
+}
+
+@layer components {
+  .admin-console :is(table, input, select) {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .admin-console :is(button, select) {
+    min-height: 2.5rem;
+  }
+
+  .admin-console table th {
+    white-space: nowrap;
+  }
+
+  .admin-console table td {
+    vertical-align: middle;
+  }
+}
+
+@media (pointer: coarse) {
+  .drive-scrollbar {
+    width: 2.75rem;
+  }
+
+  .secure-drive-scroll-host {
+    padding-inline-end: 2.75rem;
+  }
+
+  .ui-control,
+  .drive-toolbar :is(button, select),
+  .admin-console :is(button, select) {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    font-size: 1rem;
   }
 }
 
@@ -186,4 +256,30 @@ a {
   display: none;
   width: 0;
   height: 0;
+}
+
+
+/* Admin composite search fields: focus the full control, not its nested input.
+   This overrides the general input focus shadow without hiding keyboard focus. */
+[data-admin-search-shell] {
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+[data-admin-search-shell]:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
+[data-admin-search-shell] input:focus,
+[data-admin-search-shell] input:focus-visible {
+  outline: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+@media (forced-colors: active) {
+  [data-admin-search-shell]:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
 }

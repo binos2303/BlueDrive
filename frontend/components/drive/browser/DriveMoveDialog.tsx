@@ -1,0 +1,78 @@
+"use client";
+
+import { Folder, FolderOpen } from "lucide-react";
+import Button from "@/components/ui/Button";
+import Dialog from "@/components/ui/Dialog";
+import type { DriveFolderDetails } from "@/lib/drive-service";
+import type { DriveItem } from "./types";
+
+type DriveMoveDialogProps = {
+  open: boolean;
+  moving: boolean;
+  targetCount: number;
+  details: DriveFolderDetails | null;
+  items: DriveItem[];
+  loading: boolean;
+  error: string | null;
+  destinationId: number | null;
+  onClose: () => void;
+  onLoadDestination: (id: number | null) => void;
+  onConfirm: () => void;
+};
+
+export default function DriveMoveDialog({
+  open, moving, targetCount, details, items, loading, error, destinationId,
+  onClose, onLoadDestination, onConfirm,
+}: DriveMoveDialogProps) {
+  return (
+    <Dialog open={open} title={`Move ${targetCount} item${targetCount === 1 ? "" : "s"}`}
+      description="Choose a destination folder. You can also drag items onto a folder in Drive."
+      onClose={onClose} closeDisabled={moving} className="w-[min(calc(100%_-_2rem),38.75rem)]">
+            <div className="flex flex-wrap items-center gap-1 border-b border-border px-5 py-3 text-sm">
+              <button type="button" onClick={() => onLoadDestination(null)} className="rounded-md px-2 py-1 font-medium text-brand-contrast hover:bg-brand-soft">My Drive</button>
+              {(details?.ancestors ?? []).map((ancestor) => (
+                <span key={ancestor.id} className="inline-flex items-center gap-1">
+                  <span className="text-muted">/</span>
+                  <button type="button" onClick={() => onLoadDestination(ancestor.id)} className="rounded-md px-2 py-1 text-brand-contrast hover:bg-brand-soft">{ancestor.name}</button>
+                </span>
+              ))}
+              {details && <span className="inline-flex items-center gap-1"><span className="text-muted">/</span><span className="rounded-md bg-brand-soft px-2 py-1 font-semibold text-brand-contrast">{details.name}</span></span>}
+            </div>
+            <div className="min-h-55 flex-1 overflow-y-auto p-3">
+              {loading ? (
+                <div className="flex min-h-40 items-center justify-center text-sm text-muted">Loading folders…</div>
+              ) : error ? (
+                <div className="rounded-lg border border-danger/30 bg-background p-4 text-sm text-danger" role="alert">
+                  <p>{error}</p>
+                  <button type="button" onClick={() => onLoadDestination(destinationId)} className="mt-2 font-semibold underline">Try again</button>
+                </div>
+              ) : items.length === 0 ? (
+                <div className="flex min-h-40 flex-col items-center justify-center text-center">
+                  <FolderOpen size={28} className="mb-2 text-muted" />
+                  <p className="text-sm font-medium text-foreground">No subfolders here</p>
+                  <p className="mt-1 text-xs text-muted">Move here will place the selected items in this location.</p>
+                </div>
+              ) : (
+                <ul className="space-y-1">
+                  {items.map((folder) => (
+                    <li key={folder.id} className="flex items-center gap-2 rounded-lg border border-transparent px-2 py-1.5 hover:border-border hover:bg-background">
+                      <Folder size={17} className="shrink-0 text-brand-contrast" />
+                      <button type="button" onClick={() => folder.folderId && onLoadDestination(folder.folderId)} className="min-w-0 flex-1 truncate py-1 text-left text-sm text-foreground" title={`Open ${folder.name}`}>{folder.name}</button>
+                      <button type="button" disabled={!folder.folderId || loading} onClick={() => folder.folderId && onLoadDestination(folder.folderId)} className="rounded-md px-2 py-1 text-xs font-medium text-brand-contrast hover:bg-brand-soft disabled:opacity-50">Open</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <footer className="flex items-center justify-between gap-3 border-t border-border bg-background px-5 py-4">
+              <p className="min-w-0 truncate text-xs text-muted">Destination: {details ? details.location || details.name : "My Drive (root)"}</p>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button variant="ghost" onClick={() => onClose()} disabled={moving}>Cancel</Button>
+                <Button onClick={() => onConfirm()} disabled={moving || loading || Boolean(error)}>
+                  {moving ? "Moving…" : "Move here"}
+                </Button>
+              </div>
+            </footer>
+    </Dialog>
+  );
+}

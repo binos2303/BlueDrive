@@ -10,10 +10,12 @@ from .drive_api import (
     drive_items_star_api,
     drive_folder_tree_api,
     drive_items_share_api,
+    drive_items_rename_api,
 )
 
 urlpatterns = [
     path("drive/api/items/", views.drive_items_api, name="drive_items_api"),
+    path("drive/api/items/rename/", drive_items_rename_api, name="drive_items_rename_api"),
     path(
         "drive/api/items/move/",
         drive_items_move_api,

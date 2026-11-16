@@ -97,7 +97,7 @@ class UploadApiTests(TestCase):
         adapter = adapter_factory.return_value
         adapter.create_part_upload_url.side_effect = lambda key, provider_id, number, *, expires_in: type(
             "Signed", (), {
-                "url": f"https://minio.invalid/part/{number}",
+                "url": f"https://s3.invalid/part/{number}",
                 "method": "PUT",
                 "required_headers": {},
             }
@@ -154,6 +154,24 @@ class UploadApiTests(TestCase):
         self.assertEqual(second.status_code, 202)
         self.assertEqual(UploadSession.objects.get(pk=upload.pk).state, UploadSession.State.VERIFYING)
 
+    def test_abort_is_rejected_after_finalization_begins(self):
+        upload = UploadSession.objects.create(
+            tenant=self.tenant,
+            initiated_by=self.user,
+            client_name="document.txt",
+            expected_size_bytes=1,
+            expected_sha256="a" * 64,
+            object_key="staging/" + "a" * 32,
+            expires_at="2035-01-01T00:00:00Z",
+            state=UploadSession.State.VERIFYING,
+        )
+        with patch("files.upload_api.get_storage_adapter") as storage_adapter:
+            response = self.client.post(f"/files/api/uploads/{upload.pk}/abort/")
+            storage_adapter.assert_not_called()
+        self.assertEqual(response.status_code, 409)
+        upload.refresh_from_db()
+        self.assertEqual(upload.state, UploadSession.State.VERIFYING)
+
     @patch("files.upload_api.reserve_upload_quota")
     @patch("files.upload_api.get_storage_adapter")
     def test_empty_file_uses_verified_zero_byte_put(self, adapter_factory, reserve):
@@ -178,7 +196,7 @@ class UploadApiTests(TestCase):
         }, format="json")
         self.assertEqual(created.status_code, 201)
         upload_id = created.data["upload_id"]
-        adapter.create_part_upload_url.return_value.url = "https://minio.invalid/signed"
+        adapter.create_part_upload_url.return_value.url = "https://s3.invalid/signed"
         adapter.create_part_upload_url.return_value.method = "PUT"
         adapter.create_part_upload_url.return_value.required_headers = {}
         authorized = self.client.post(f"/files/api/uploads/{upload_id}/parts/1/authorization/", {}, format="json")

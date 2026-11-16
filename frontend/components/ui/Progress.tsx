@@ -24,10 +24,11 @@ export default function Progress({
       aria-valuemin={0}
       aria-valuemax={safeMax}
       aria-valuenow={safeValue}
+      aria-valuetext={percentage === undefined ? "In progress" : undefined}
       className={`h-2 overflow-hidden rounded-full bg-border ${className}`}
     >
       <div
-        className={`h-full rounded-full bg-brand-contrast transition-[width] duration-[var(--motion-normal)] ${
+        className={`h-full rounded-full bg-brand-contrast transition-[width] duration-[var(--motion-normal)] motion-reduce:transition-none ${
           percentage === undefined ? "w-1/3 animate-pulse" : ""
         }`}
         style={percentage === undefined ? undefined : { width: `${percentage}%` }}

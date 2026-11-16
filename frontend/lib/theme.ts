@@ -3,6 +3,16 @@ export type ThemePreference = "system" | "light" | "dark";
 export const THEME_CHANGED_EVENT = "securedrive:theme-changed";
 const THEME_KEY = "securedrive:theme-preference:v1";
 
+// Run while parsing the document, before the first paint; the provider keeps it in sync afterward.
+export const THEME_INIT_SCRIPT = `(() => {
+  let preference;
+  try { preference = window.localStorage.getItem(${JSON.stringify(THEME_KEY)}); } catch {}
+  const theme = preference === "light" || preference === "dark" ? preference
+    : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+})();`;
+
 export function readThemePreference(): ThemePreference {
   if (typeof window === "undefined") return "system";
   try {

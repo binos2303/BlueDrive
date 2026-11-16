@@ -4,6 +4,27 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Clock3, RefreshCw } from "lucide-react";
 import { getWorkspaceActivity, type WorkspaceActivityEvent } from "@/lib/workspace-service";
+import { drivePath } from "@/lib/drive-paths";
+import { getDriveItems } from "@/lib/drive-service";
+import RecentTimeline from "@/components/drive/browser/RecentTimeline";
+import type { DriveItem } from "@/components/drive/browser/types";
+
+function WorkspaceRecentTimeline({ workspaceId }: { workspaceId: string }) {
+  const [items, setItems] = useState<DriveItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getDriveItems(null, "timeline", "", workspaceId)
+      .then((rows) => { if (!cancelled) setItems(rows); })
+      .catch(() => { if (!cancelled) setError("Recent file timeline could not be loaded. Refresh to try again."); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  if (error) return <p role="alert" className="border-b border-border p-5 text-sm text-danger">{error}</p>;
+  if (!items) return <p role="status" className="border-b border-border p-5 text-sm text-muted">Loading recent file timeline…</p>;
+  return <RecentTimeline items={items} />;
+}
 
 function formatDate(value: string): string {
   const date = new Date(value);
@@ -31,7 +52,7 @@ export default function WorkspaceActivityPage({ workspaceId }: { workspaceId: st
     void getWorkspaceActivity(workspaceId)
       .then((rows) => { if (!cancelled) setEvents(rows); })
       .catch((reason: unknown) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : "The workspace timeline could not be loaded.");
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "The workspace activity log could not be loaded.");
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; window.clearTimeout(startTimer); };
@@ -39,16 +60,15 @@ export default function WorkspaceActivityPage({ workspaceId }: { workspaceId: st
 
   return (
     <section className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-      <Link href="/drive" className="inline-flex items-center gap-2 rounded-lg text-sm font-medium text-muted hover:text-foreground">
-        <ArrowLeft size={16} /> Back to Drive
+      <Link href={drivePath(workspaceId)} className="inline-flex min-h-10 items-center gap-2 rounded-lg text-sm font-medium text-muted hover:text-foreground">
+        <ArrowLeft size={16} /> Back to workspace files
       </Link>
       <div className="mt-5 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2 text-sm font-medium text-muted"><Clock3 size={16} /> Workspace activity</div>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-foreground">Timeline</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Workspace activity log</h1>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">Review file and membership events in this workspace. Access is limited to workspace managers.</p>
         </div>
-        <button type="button" onClick={() => setRefreshCount((value) => value + 1)} disabled={loading} className="inline-flex h-9 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-xs font-semibold text-foreground hover:bg-background disabled:opacity-50">
+        <button type="button" onClick={() => setRefreshCount((value) => value + 1)} disabled={loading} className="ui-control inline-flex h-10 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-[13px] font-semibold text-foreground hover:bg-background disabled:opacity-50">
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
         </button>
       </div>
@@ -58,31 +78,36 @@ export default function WorkspaceActivityPage({ workspaceId }: { workspaceId: st
           <div className="p-10 text-center text-sm text-muted">Loading workspace activity…</div>
         ) : error ? (
           <div className="p-6">
-            <p role="alert" className="text-sm font-semibold text-danger">Timeline could not be loaded</p>
+            <p role="alert" className="text-sm font-semibold text-danger">Activity log could not be loaded</p>
             <p className="mt-1 text-sm leading-6 text-muted">{error}</p>
           </div>
-        ) : events.length === 0 ? (
-          <div className="p-10 text-center">
-            <Clock3 size={24} className="mx-auto text-muted" />
-            <p className="mt-3 text-sm font-semibold text-foreground">No activity yet</p>
-            <p className="mt-1 text-sm text-muted">Workspace events will appear here as people work with files and members.</p>
-          </div>
         ) : (
-          <ol className="divide-y divide-border">
-            {events.map((event) => (
-              <li key={event.id} className="grid gap-2 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_12rem] sm:items-start sm:px-5">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-soft text-[10px] font-bold text-brand-contrast">{event.username.slice(0, 1).toUpperCase()}</span>
-                    <span className="text-sm font-semibold text-foreground">{event.username}</span>
-                    <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold text-muted">{event.actionLabel || event.action}</span>
-                  </div>
-                  <p className="mt-2 break-words text-sm leading-6 text-foreground">{event.description || event.actionLabel || event.action}</p>
-                </div>
-                <time className="text-xs text-muted sm:text-right">{formatDate(event.createdAt)}</time>
-              </li>
-            ))}
-          </ol>
+          <>
+            <WorkspaceRecentTimeline key={`${workspaceId}:${refreshCount}`} workspaceId={workspaceId} />
+            {events.length === 0 ? (
+              <div className="p-10 text-center">
+                <Clock3 size={24} className="mx-auto text-muted" />
+                <p className="mt-3 text-sm font-semibold text-foreground">No activity yet</p>
+                <p className="mt-1 text-sm text-muted">Workspace events will appear here as people work with files and members.</p>
+              </div>
+            ) : (
+              <ol className="divide-y divide-border">
+                {events.map((event) => (
+                  <li key={event.id} className="grid gap-2 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_12rem] sm:items-start sm:px-5">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-soft text-[10px] font-bold text-brand-contrast">{event.username.slice(0, 1).toUpperCase()}</span>
+                        <span className="text-sm font-semibold text-foreground">{event.username}</span>
+                        <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold text-muted">{event.actionLabel || event.action}</span>
+                      </div>
+                      <p className="mt-2 break-words text-sm leading-6 text-foreground">{event.description || event.actionLabel || event.action}</p>
+                    </div>
+                    <time className="text-xs text-muted sm:text-right">{formatDate(event.createdAt)}</time>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </>
         )}
       </div>
     </section>

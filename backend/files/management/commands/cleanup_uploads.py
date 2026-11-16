@@ -3,10 +3,11 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from files.models import UploadSession
+from files.models import QuotaReservation, StorageLocation, UploadSession
 from files.quota import QuotaStateError, finalize_upload_quota
 from files.storage_adapters import get_storage_adapter
 from files.storage_adapters.base import StorageError
+from files.storage_routing import adapter_for_upload
 
 
 class Command(BaseCommand):
@@ -14,31 +15,50 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         now = timezone.now()
-        sessions = UploadSession.objects.filter(
-            (Q(expires_at__lte=now, state__in=[UploadSession.State.INITIATED, UploadSession.State.UPLOADING, UploadSession.State.EXPIRED, UploadSession.State.AVAILABLE])
-             | Q(state=UploadSession.State.CANCELED)
-             | Q(expires_at__lte=now, state=UploadSession.State.FAILED))
-        ).order_by("expires_at")
-        adapter = get_storage_adapter()
+        published = ('available','completed')
+        pending_keys = ~Q(object_key='') | ~Q(provider_upload_id='') | ~Q(final_object_key='') | Q(quota_reservations__state='reserved')
+        eligible = (Q(expires_at__lte=now,state__in=['initiated','uploading','expired','failed']) | Q(state='canceled')) & pending_keys
+        eligible |= Q(expires_at__lte=now,state__in=published) & (~Q(object_key='') | ~Q(provider_upload_id=''))
+        ids = UploadSession.objects.filter(eligible).order_by('expires_at','pk').values_list('pk',flat=True).distinct()[:100]
         cleaned = pending = 0
-        for session in sessions.iterator():
+        for upload_id in list(ids):
+            with transaction.atomic():
+                session = UploadSession.objects.select_related('tenant','storage_config','storage_connection__cluster').select_for_update(of=('self',)).get(pk=upload_id)
+                if session.state in ('verifying','scanning') or (session.state != 'canceled' and session.expires_at > now):
+                    continue
+                if session.state not in (*published,'initiated','uploading','expired','failed','canceled'):
+                    continue
+                if session.state in ('initiated','uploading'):
+                    session.state = 'expired'
+                    session.failure_code = 'expired'
+                    session.save(update_fields=['state','failure_code','updated_at'])
+                if session.state not in published and QuotaReservation.objects.filter(upload_session=session,state='reserved').exists():
+                    try:
+                        finalize_upload_quota(session.pk,completed=False)
+                    except QuotaStateError:
+                        pending += 1
+                        continue
+                claimed_state = session.state
             try:
+                adapter = adapter_for_upload(session,fallback=get_storage_adapter,cleanup=True)
                 if session.provider_upload_id:
                     adapter.abort_multipart(session.object_key, session.provider_upload_id)
-                if session.object_key:
-                    adapter.delete_object(session.object_key)
-                if session.final_object_key and session.state != UploadSession.State.AVAILABLE:
-                    adapter.delete_object(session.final_object_key)
+                keys = [session.object_key]
+                if claimed_state not in published:
+                    keys.append(session.final_object_key)
+                for key in set(keys) - {''}:
+                    # Metadata AVAILABLE bảo vệ object ngay cả khi session cũ sai state.
+                    if not StorageLocation.objects.filter(tenant_id=session.tenant_id,storage_connection_id=session.storage_connection_id,object_ref=key,state='available').exists():
+                        adapter.delete_object(key)
                 with transaction.atomic():
-                    locked = UploadSession.objects.select_for_update().get(pk=session.pk)
-                    if locked.state not in (UploadSession.State.COMPLETED, UploadSession.State.AVAILABLE, UploadSession.State.CANCELED):
-                        locked.state = UploadSession.State.EXPIRED
-                        locked.failure_code = "expired"
-                        locked.save(update_fields=["state", "failure_code", "updated_at"])
-                        try:
-                            finalize_upload_quota(locked.pk, completed=False)
-                        except QuotaStateError:
-                            pass
+                    current = UploadSession.objects.select_for_update().get(pk=session.pk)
+                    if current.state == claimed_state:
+                        current.object_key = current.provider_upload_id = ''
+                        fields = ['object_key','provider_upload_id','updated_at']
+                        if current.state not in published:
+                            current.final_object_key = ''
+                            fields.append('final_object_key')
+                        current.save(update_fields=fields)
                 cleaned += 1
             except StorageError:
                 pending += 1

@@ -25,12 +25,13 @@ import {
 import {
   djangoMultipartUploadService,
   UploadServiceUnavailableError,
+  UploadPausedError,
   type UploadFailure,
   type UploadProgressReport,
   type UploadService,
 } from "./upload-service";
 
-import { DRIVE_UPLOAD_COMPLETED_EVENT } from "@/lib/workspace-context";
+import { DRIVE_UPLOAD_COMPLETED_EVENT, getActiveWorkspaceIdForRequest } from "@/lib/workspace-context";
 export { DRIVE_UPLOAD_COMPLETED_EVENT };
 
 export type UploadFileInput = {
@@ -47,7 +48,7 @@ type UploadManagerValue = {
   tasks: UploadTask[];
   serviceConnected: boolean;
   supportsPauseResume: boolean;
-  enqueue: (files: readonly UploadFileInput[], destinationId: string | null) => void;
+  enqueue: (files: readonly UploadFileInput[], destinationId: string | null, workspaceId?: string | null) => void;
   openManager: () => void;
 };
 
@@ -114,10 +115,10 @@ export default function UploadManager({
   const [open, setOpen] = useState(false);
   const [visible, setVisible] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
-  const [dismissedTaskIds, setDismissedTaskIds] = useState<Set<string>>(() => new Set<string>());
   const tasksRef = useRef(tasks);
   const filesRef = useRef(new Map<string, File>());
   const controllersRef = useRef(new Map<string, AbortController>());
+  const cancelingRef = useRef(new Set<string>());
   const nextId = useRef(0);
 
   const commit = useCallback((update: (current: UploadTask[]) => UploadTask[]) => {
@@ -129,8 +130,8 @@ export default function UploadManager({
   const updateTask = useCallback((id: string, update: (task: UploadTask) => UploadTask) => {
     commit((current) => current.map((task) => task.id === id ? update(task) : task));
   }, [commit]);
-
-  const enqueue = useCallback((inputs: readonly UploadFileInput[], destinationId: string | null) => {
+// tạo thêm file upload mới và thêm vào danh sách upload
+  const enqueue = useCallback((inputs: readonly UploadFileInput[], destinationId: string | null, workspaceId = getActiveWorkspaceIdForRequest()) => {
     const incoming = inputs.map(({ file, relativePath, destinationId: fileDestinationId, validationError }) => {
       const id = `upload-${Date.now()}-${++nextId.current}`;
       if (!validationError) filesRef.current.set(id, file);
@@ -142,12 +143,8 @@ export default function UploadManager({
         size: file.size,
         destinationId: fileDestinationId !== undefined ? fileDestinationId : destinationId,
         validationError,
+        workspaceId,
       });
-    });
-    setDismissedTaskIds((current) => {
-      const next = new Set(current);
-      incoming.forEach((task) => next.delete(task.id));
-      return next;
     });
     commit((current) => markDuplicateTasks([...current, ...incoming]));
     setVisible(true);
@@ -208,7 +205,7 @@ export default function UploadManager({
               applyFailure(id, {
                 message: `Upload service reported an unexpected state (${status}).`,
                 retryable: false,
-                action: "Contact support before retrying.",
+                action: "Refresh the page to check the latest upload status before trying again.",
               });
             }
           },
@@ -243,7 +240,7 @@ export default function UploadManager({
             filesRef.current.delete(id);
             if (typeof window !== "undefined") {
               window.dispatchEvent(new CustomEvent(DRIVE_UPLOAD_COMPLETED_EVENT, {
-                detail: { destinationId: latest.destinationId },
+                detail: { destinationId: latest.destinationId, workspaceId: latest.workspaceId },
               }));
             }
           },
@@ -256,11 +253,18 @@ export default function UploadManager({
         applyFailure(id, {
           message: "Upload service ended without confirming object completion and required checks.",
           retryable: false,
-          action: "Do not treat this file as available. Check service logs or contact support.",
+          action: "Do not treat this file as available. Refresh the page to check its status.",
         });
       }
     } catch (error) {
       if (controller.signal.aborted) return;
+      if (error instanceof UploadPausedError) {
+        const latest = tasksRef.current.find((task) => task.id === id);
+        if (latest?.status === "uploading") {
+          updateTask(id, (task) => transitionTask(task, "paused"));
+        }
+        return;
+      }
       if (error instanceof UploadServiceUnavailableError) {
         applyFailure(id, { message: error.message, retryable: false, action: error.action });
       } else {
@@ -289,17 +293,38 @@ export default function UploadManager({
     }
   }, [start, updateTask]);
 
-  const cancel = useCallback((id: string) => {
+  const cancel = useCallback(async (id: string) => {
     const current = tasksRef.current.find((task) => task.id === id);
-    if (!current || ["completed", "failed", "canceled"].includes(current.status)) return;
+    // Once Complete has been submitted, a cancel click cannot reliably
+    // undo storage completion or DB publication. Do not claim it was canceled.
+    if (!current || !["queued", "preparing", "uploading", "paused"].includes(current.status)) return;
+    if (cancelingRef.current.has(id)) return;
+    if ((current.status === "paused" || current.status === "queued") &&
+        current.uploadSessionId && !controllersRef.current.has(id)) {
+      const file = filesRef.current.get(id);
+      if (!file || !service.cancelPaused) {
+        setNotification("Cannot cancel the paused upload safely without its file and server abort support.");
+        return;
+      }
+      cancelingRef.current.add(id);
+      try {
+        await service.cancelPaused(current, file);
+      } catch (error) {
+        setNotification(error instanceof Error ? error.message : "Could not abort the server upload session.");
+        return;
+      } finally {
+        cancelingRef.current.delete(id);
+      }
+    }
+    const latest = tasksRef.current.find((task) => task.id === id);
+    if (!latest || !["queued", "preparing", "uploading", "paused"].includes(latest.status)) return;
     controllersRef.current.get(id)?.abort();
     updateTask(id, (task) => transitionTask(task, "canceled"));
     filesRef.current.delete(id);
     controllersRef.current.delete(id);
-  }, [updateTask]);
+  }, [service, updateTask]);
 
   const closeManager = useCallback(() => {
-    setDismissedTaskIds(new Set(tasksRef.current.map((task) => task.id)));
     setVisible(false);
   }, []);
 
@@ -321,11 +346,16 @@ export default function UploadManager({
 
   const resume = useCallback(async (id: string) => {
     const task = tasksRef.current.find((item) => item.id === id);
-    if (!task || !service.supportsPauseResume || !service.resume || task.status !== "paused" || !task.uploadSessionId) return;
+    if (!task || cancelingRef.current.has(id) || !service.supportsPauseResume || !service.resume || task.status !== "paused" || !task.uploadSessionId) return;
     try {
       await service.resume(task);
       const latest = tasksRef.current.find((item) => item.id === id);
-      if (latest?.status === "paused") updateTask(id, (item) => transitionTask(item, "uploading"));
+      if (latest?.status === "paused") {
+        // A resumed run must rehash/verify its file and reconcile remote parts.
+        // It is a new transport invocation using the same server UploadSession.
+        updateTask(id, (item) => transitionTask(item, "queued"));
+        // Normal scheduler enforces MAX_CONCURRENT_UPLOADS before restart.
+      }
     } catch (error) {
       setNotification(error instanceof Error ? error.message : "The upload could not be resumed.");
     }
@@ -338,7 +368,7 @@ export default function UploadManager({
 
     const activeIds = new Set(
       tasks
-        .filter((task) => ["preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status))
+        .filter((task) => ["preparing", "uploading", "verifying", "scanning"].includes(task.status))
         .map((task) => task.id),
     );
     for (const id of controllersRef.current.keys()) activeIds.add(id);
@@ -384,7 +414,7 @@ export default function UploadManager({
   }), [enqueue, service.connected, service.supportsPauseResume, tasks]);
 
 
-  const visibleTasks = tasks.filter((task) => !dismissedTaskIds.has(task.id));
+  const visibleTasks = tasks;
   const queuedCount = visibleTasks.filter((task) => task.status === "queued").length;
   const activeCount = visibleTasks.filter((task) =>
     ["preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
@@ -394,7 +424,7 @@ export default function UploadManager({
 
   const visibleCount = queuedCount + activeCount;
   const cancellableCount = visibleTasks.filter((task) =>
-    ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status),
+    ["queued", "preparing", "uploading", "paused"].includes(task.status),
   ).length;
   const etaSeconds = visibleTasks
     .filter((task) => task.status === "uploading" && Number.isFinite(task.progress?.etaSeconds))
@@ -435,16 +465,16 @@ export default function UploadManager({
                 onClick={() => setOpen((current) => !current)}
                 aria-label={open ? "Collapse upload status" : "Expand upload status"}
                 title={open ? "Collapse" : "Expand"}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
+                className="ui-control flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
               >
                 {open ? <ChevronDown size={22} /> : <ChevronUp size={22} />}
               </button>
               <button
                 type="button"
                 onClick={closeManager}
-                aria-label="Close and clear upload status"
+                aria-label="Hide upload status"
                 title="Hide"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
+                className="ui-control flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background"
               >
                 <X size={21} />
               </button>
@@ -461,7 +491,7 @@ export default function UploadManager({
                 </p>
                 {cancellableCount > 0 && (
                   <span
-                    className="flex h-8 w-8 shrink-0 items-center justify-center text-muted"
+                    className="ui-control flex h-8 w-8 shrink-0 items-center justify-center text-muted"
                     role="status"
                     aria-label="Upload in progress"
                     title="Upload in progress"
@@ -492,7 +522,7 @@ export default function UploadManager({
                   task={task}
                   connected={service.connected}
                   canPause={service.supportsPauseResume && Boolean(task.uploadSessionId)}
-                  onCancel={() => cancel(task.id)}
+                  onCancel={() => { void cancel(task.id); }}
                   onRetry={() => retry(task.id)}
                   onPause={() => { void pause(task.id); }}
                   onResume={() => { void resume(task.id); }}
@@ -545,7 +575,7 @@ function UploadTaskRow({
   onConflictResolution: (value: UploadConflictResolution) => void;
 }) {
   const terminal = task.status === "completed" || task.status === "failed" || task.status === "canceled";
-  const canCancel = ["queued", "preparing", "uploading", "paused", "verifying", "scanning"].includes(task.status);
+  const canCancel = ["queued", "preparing", "uploading", "paused"].includes(task.status);
   const showProgress = Boolean(task.progress)
     && ["uploading", "verifying", "scanning"].includes(task.status);
   const transferred = task.progress?.uploadedBytes ?? 0;
@@ -577,7 +607,7 @@ function UploadTaskRow({
             onClick={onCancel}
             aria-label={`Stop upload of ${task.fileName}`}
             title="Stop upload"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface hover:text-foreground"
+            className="ui-control flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-surface hover:text-foreground"
           >
             <X size={18} />
           </button>
@@ -590,10 +620,13 @@ function UploadTaskRow({
         ) : null}
       </div>
 
-      {!terminal && task.status !== "verifying" && task.status !== "scanning" && (
+      {!terminal && (
         <p className="mt-1 text-[11px] text-muted">
           {task.status === "uploading" && task.progress
-            ? `${progressPercent}% uploaded`
+            ? `${progressPercent}% uploaded${task.progress.bytesPerSecond
+              ? ` · ${formatBytes(task.progress.bytesPerSecond)}/s${task.progress.etaSeconds !== undefined
+                ? ` · ${formatDuration(task.progress.etaSeconds)} remaining` : ""}`
+              : ""}`
             : statusLabel(task.status)}
         </p>
       )}
@@ -630,7 +663,7 @@ function UploadTaskRow({
       )}
 
       {task.duplicate && !terminal && (
-        <fieldset className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-warning">
+        <fieldset className="mt-3 rounded-lg border border-warning/30 bg-warning-soft p-2 text-xs text-warning">
           <legend className="px-1 font-medium">Duplicate path</legend>
           <div className="flex flex-wrap gap-x-3 gap-y-1">
             {([
@@ -638,7 +671,7 @@ function UploadTaskRow({
               ["keep-both", "Keep both"],
               ["replace", "Replace"],
             ] as const).map(([value, label]) => (
-              <label key={value} className="inline-flex items-center gap-1">
+              <label key={value} className="ui-control inline-flex min-h-10 items-center gap-2 px-2">
                 <input
                   type="radio"
                   name={`conflict-${task.id}`}
@@ -653,12 +686,12 @@ function UploadTaskRow({
       )}
 
       {canPause && task.status === "uploading" && (
-        <button type="button" onClick={onPause} className="mt-2 text-xs text-muted underline" aria-label={`Pause ${task.fileName}`}>
+        <button type="button" onClick={onPause} className="ui-control mt-2 inline-flex min-h-10 items-center gap-1 rounded-lg px-2 text-xs text-muted underline" aria-label={`Pause ${task.fileName}`}>
           <Pause size={12} className="mr-1 inline" />Pause
         </button>
       )}
       {canPause && task.status === "paused" && (
-        <button type="button" onClick={onResume} className="mt-2 text-xs text-muted underline" aria-label={`Resume ${task.fileName}`}>
+        <button type="button" onClick={onResume} className="ui-control mt-2 inline-flex min-h-10 items-center gap-1 rounded-lg px-2 text-xs text-muted underline" aria-label={`Resume ${task.fileName}`}>
           <Play size={12} className="mr-1 inline" />Resume
         </button>
       )}

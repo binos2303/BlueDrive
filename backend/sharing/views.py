@@ -1,4 +1,5 @@
-﻿from django.contrib import messages
+from django.contrib import messages
+from django.db import transaction
 from django.http import FileResponse, Http404
 import io
 import zipfile
@@ -12,11 +13,12 @@ from securedrive.frontend_redirects import redirect_to_frontend
 
 from files.models import File
 from folders.models import Folder
-from .services import get_receiver_share_for_file, get_receiver_share_for_folder
+from .services import (
+    get_receiver_share_for_file, get_receiver_share_for_folder, upsert_direct_share,
+    can_manage_direct_share, change_direct_share_permission, revoke_direct_share,
+)
 from logs.models import ActivityLog
 from logs.services import log_action
-from security.aes_service import build_file_aad, decrypt_bytes, get_master_key, unwrap_dek
-from security.hash_service import verify_sha256
 
 from .forms import FileShareForm
 from .models import Share
@@ -33,6 +35,10 @@ def share_file(request, file_id):
         tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
+
+    if not can_manage_direct_share(drive_file, request.user):
+        messages.error(request, "You cannot manage sharing for this item.")
+        return redirect("dashboard")
 
     form = FileShareForm(
         request.POST,
@@ -57,15 +63,29 @@ def share_file(request, file_id):
     receiver = form.cleaned_data["username"]
     permission = form.cleaned_data["permission"]
 
-    Share.objects.update_or_create(
-        file=drive_file,
-        receiver=receiver,
-        defaults={
-            "tenant": drive_file.tenant,
-            "owner": request.user,
-            "permission": permission,
-        },
-    )
+    with transaction.atomic():
+        operation, previous_permission = upsert_direct_share(
+            resource=drive_file, receiver=receiver, owner=request.user, permission=permission,
+        )
+        if operation != "unchanged":
+            log_action(
+                request.user, ActivityLog.Action.SHARE,
+                f"{operation} file {drive_file.file_name} for {receiver.get_username()}",
+                obj=drive_file,
+                metadata={
+                    "operation": operation,
+                    "recipient_username": receiver.get_username(),
+                    "recipient_email": receiver.email,
+                    "permission": permission,
+                    "previous_permission": previous_permission if operation == "permission_changed" else None,
+                    "resource_names": [drive_file.file_name],
+                    "resource_kinds": ["file"],
+                    "resource_changes": [{"name": drive_file.file_name, "kind": "file",
+                        "operation": operation, "permission": permission,
+                        "previous_permission": previous_permission if operation == "permission_changed" else None}],
+                    "shared_count": 1,
+                },
+            )
 
     permission_label = dict(
         Share.Permission.choices
@@ -74,23 +94,9 @@ def share_file(request, file_id):
         "Viewer",
     )
 
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        (
-            f"Shared file {drive_file.file_name} "
-            f"with {receiver.username} "
-            f"as {permission_label}"
-        ),
-    )
 
-    messages.success(
-        request,
-        (
-            f"File shared with {receiver.username} "
-            f"as {permission_label}."
-        ),
-    )
+    notify = messages.info if operation == "unchanged" else messages.success
+    notify(request, f"{'Already shared with' if operation == 'unchanged' else 'Updated access for' if operation == 'permission_changed' else 'Shared with'} {receiver.username} as {permission_label}.")
 
     return redirect(
         request.META.get(
@@ -111,6 +117,10 @@ def share_folder(request, folder_id):
         tenant__in=active_tenant_ids(request.user),
         deleted_at__isnull=True,
     )
+
+    if not can_manage_direct_share(folder, request.user):
+        messages.error(request, "You cannot manage sharing for this item.")
+        return redirect("dashboard")
 
     form = FileShareForm(
         request.POST,
@@ -135,15 +145,29 @@ def share_folder(request, folder_id):
     receiver = form.cleaned_data["username"]
     permission = form.cleaned_data["permission"]
 
-    Share.objects.update_or_create(
-        folder=folder,
-        receiver=receiver,
-        defaults={
-            "tenant": folder.tenant,
-            "owner": request.user,
-            "permission": permission,
-        },
-    )
+    with transaction.atomic():
+        operation, previous_permission = upsert_direct_share(
+            resource=folder, receiver=receiver, owner=request.user, permission=permission,
+        )
+        if operation != "unchanged":
+            log_action(
+                request.user, ActivityLog.Action.SHARE,
+                f"{operation} folder {folder.folder_name} for {receiver.get_username()}",
+                obj=folder,
+                metadata={
+                    "operation": operation,
+                    "recipient_username": receiver.get_username(),
+                    "recipient_email": receiver.email,
+                    "permission": permission,
+                    "previous_permission": previous_permission if operation == "permission_changed" else None,
+                    "resource_names": [folder.folder_name],
+                    "resource_kinds": ["folder"],
+                    "resource_changes": [{"name": folder.folder_name, "kind": "folder",
+                        "operation": operation, "permission": permission,
+                        "previous_permission": previous_permission if operation == "permission_changed" else None}],
+                    "shared_count": 1,
+                },
+            )
 
     permission_label = dict(
         Share.Permission.choices
@@ -152,23 +176,9 @@ def share_folder(request, folder_id):
         "Viewer",
     )
 
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        (
-            f"Shared folder {folder.folder_name} "
-            f"with {receiver.username} "
-            f"as {permission_label}"
-        ),
-    )
 
-    messages.success(
-        request,
-        (
-            f"Folder shared with {receiver.username} "
-            f"as {permission_label}."
-        ),
-    )
+    notify = messages.info if operation == "unchanged" else messages.success
+    notify(request, f"{'Already shared with' if operation == 'unchanged' else 'Updated access for' if operation == 'permission_changed' else 'Shared with'} {receiver.username} as {permission_label}.")
 
     return redirect(
         request.META.get(
@@ -180,67 +190,27 @@ def share_folder(request, folder_id):
 @login_required
 @require_POST
 def change_share_permission(request, share_id):
-    """Change Viewer/Editor permission. Only the original owner may do this."""
-    share = get_object_or_404(
-        Share,
-        id=share_id,
-        owner=request.user,
-        tenant__in=active_tenant_ids(request.user),
-    )
-
+    """Legacy form endpoint backed by the same audited service as the JSON API."""
     permission = request.POST.get("permission", "").strip()
-
-    valid_permissions = {
-        Share.Permission.VIEWER,
-        Share.Permission.EDITOR,
-    }
-
-    if permission not in valid_permissions:
+    if permission not in {Share.Permission.VIEWER, Share.Permission.EDITOR}:
         messages.error(request, "Invalid sharing permission.")
         return redirect("shared_with_me")
 
-    old_permission = share.permission
+    with transaction.atomic():
+        share = get_object_or_404(
+            Share.objects.select_for_update(of=("self",)).select_related(
+                "file__tenant", "file__workspace", "file__folder",
+                "folder__tenant", "folder__workspace", "folder__parent", "receiver",
+            ),
+            id=share_id, owner=request.user, tenant__in=active_tenant_ids(request.user),
+        )
+        resource = share.file if share.file_id else share.folder
+        if not can_manage_direct_share(resource, request.user):
+            messages.error(request, "You cannot manage sharing for this item.")
+            return redirect("shared_with_me")
+        changed = change_direct_share_permission(share=share, actor=request.user, permission=permission)
 
-    if old_permission == permission:
-        messages.info(request, "Sharing permission was not changed.")
-        return redirect("shared_with_me")
-
-    share.permission = permission
-    share.save(update_fields=["permission"])
-
-    item_name = (
-        share.file.file_name
-        if share.file_id
-        else share.folder.folder_name
-    )
-
-    permission_label = dict(Share.Permission.choices).get(
-        permission,
-        "Viewer",
-    )
-    old_permission_label = dict(Share.Permission.choices).get(
-        old_permission,
-        "Viewer",
-    )
-
-    log_action(
-        request.user,
-        ActivityLog.Action.SHARE,
-        (
-            f"Changed access to {item_name} for "
-            f"{share.receiver.username} from "
-            f"{old_permission_label} to {permission_label}"
-        ),
-    )
-
-    messages.success(
-        request,
-        (
-            f"Access for {share.receiver.username} changed to "
-            f"{permission_label}."
-        ),
-    )
-
+    messages.success(request, "Sharing permission updated." if changed else "Sharing permission was not changed.")
     return redirect("shared_with_me")
 
 
@@ -251,25 +221,22 @@ def shared_with_me(request):
 @login_required
 @require_POST
 def revoke_share(request, share_id):
-    """Chá»‰ owner ban Ä‘áº§u má»›i cĂ³ thá»ƒ thu há»“i quyá»n."""
-    share = get_object_or_404(
-        Share,
-        id=share_id,
-        owner=request.user,
-        tenant__in=active_tenant_ids(request.user),
-    )
+    """Legacy form endpoint; revoke atomically through the common service."""
+    with transaction.atomic():
+        share = get_object_or_404(
+            Share.objects.select_for_update(of=("self",)).select_related(
+                "file__tenant", "file__workspace", "file__folder",
+                "folder__tenant", "folder__workspace", "folder__parent", "receiver",
+            ),
+            id=share_id, owner=request.user, tenant__in=active_tenant_ids(request.user),
+        )
+        resource = share.file if share.file_id else share.folder
+        if not can_manage_direct_share(resource, request.user):
+            messages.error(request, "You cannot manage sharing for this item.")
+            return redirect("shared_with_me")
+        revoke_direct_share(share=share, actor=request.user)
 
-    receiver_name = share.receiver.username
-    item_name = share.file.file_name if share.file_id else share.folder.folder_name
-    share.delete()
-
-    log_action(
-        request.user,
-        ActivityLog.Action.REVOKE_SHARE,
-        f"Revoked access to {item_name} for {receiver_name}",
-    )
-
-    messages.success(request, f"Access revoked for {receiver_name}.")
+    messages.success(request, "Access revoked.")
     return redirect("shared_with_me")
 
 
@@ -299,6 +266,8 @@ def bulk_download_shared(request):
         messages.error(request, "One or more selected files are unavailable or in Trash.")
         return redirect("shared_with_me")
 
+    from files.views import _decrypt_file, _download_block_reason
+
     payloads = []
     for drive_file in files:
         from .services import get_receiver_share_for_file
@@ -307,12 +276,9 @@ def bulk_download_shared(request):
             messages.error(request, f'You do not have access to "{drive_file.file_name}".')
             return redirect("shared_with_me")
         try:
-            dek = unwrap_dek(bytes(drive_file.wrapped_dek), bytes(drive_file.dek_nonce), get_master_key())
-            aad = build_file_aad(owner_id=drive_file.owner_id, file_id=drive_file.id, version=drive_file.encryption_version)
-            with drive_file.file_path.open("rb") as stored_file:
-                plaintext = decrypt_bytes(stored_file.read(), bytes(drive_file.encryption_nonce), dek, aad)
-            if drive_file.hash_sha256 and not verify_sha256(plaintext, drive_file.hash_sha256):
-                raise ValueError("integrity")
+            if _download_block_reason(drive_file):
+                raise ValueError("File is not available for download.")
+            plaintext = _decrypt_file(drive_file)
             payloads.append((drive_file.file_name, plaintext))
         except Exception:
             messages.error(request, f'Could not prepare "{drive_file.file_name}" for download.')

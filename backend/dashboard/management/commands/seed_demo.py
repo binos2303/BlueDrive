@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+import os
 import uuid
 
 from django.contrib.auth import get_user_model
@@ -22,7 +23,6 @@ from security.hash_service import sha256_hex
 
 
 DEMO_PREFIX = "__DEMO__"
-DEFAULT_PASSWORD = "Demo12345!"
 USER_PREFIX = "demo_user_"
 USER_COUNT = 10
 
@@ -34,7 +34,7 @@ class Command(BaseCommand):
         size = parser.add_mutually_exclusive_group()
         size.add_argument("--small", action="store_true", help="Create about 30 files per user.")
         size.add_argument("--large", action="store_true", help="Create about 500 files per user.")
-        parser.add_argument("--password", default=DEFAULT_PASSWORD)
+        parser.add_argument("--password", default=None, help="Ưu tiên đặt BLUEDRIVE_DEMO_PASSWORD trong process env; không có mật khẩu mặc định.")
         parser.add_argument(
             "--clear-first",
             action="store_true",
@@ -43,7 +43,10 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         file_count = 500 if options["large"] else 30
-        password = options["password"]
+        password = options["password"] or os.environ.get("BLUEDRIVE_DEMO_PASSWORD", "")
+        # Dừng trước mọi thao tác clear/create nếu operator chưa cấp mật khẩu riêng.
+        if not password.strip():
+            raise CommandError("Cần đặt BLUEDRIVE_DEMO_PASSWORD trước khi tạo dữ liệu demo.")
 
         User = get_user_model()
         try:
@@ -193,7 +196,6 @@ class Command(BaseCommand):
         self.stdout.write(f"Users: {USER_COUNT}")
         self.stdout.write(f"Files: {total_files}")
         self.stdout.write(f"Folders: {total_folders}")
-        self.stdout.write(f"Password for all demo users: {password}")
         self.stdout.write(
             f"Usernames: {USER_PREFIX}01 ... {USER_PREFIX}{USER_COUNT:02d}"
         )

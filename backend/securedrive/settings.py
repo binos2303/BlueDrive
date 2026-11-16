@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from urllib.parse import urlsplit
 from corsheaders.defaults import default_headers
@@ -60,6 +61,7 @@ INSTALLED_APPS = [
     "logs",
     "sharing",
     "dashboard",
+    "infrastructure",
 ]
 
 MIDDLEWARE = [
@@ -69,6 +71,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "accounts.platform_admin_middleware.DedicatedPlatformAdminMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -83,6 +86,7 @@ CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 CORS_ALLOW_HEADERS = [
     *default_headers,
     "idempotency-key",
+    "x-workspace-id",
 ]
 
 CSRF_TRUSTED_ORIGINS = _env_list("CSRF_TRUSTED_ORIGINS") or [
@@ -154,10 +158,37 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+# Triển khai theo gate; khai báo cờ chưa đổi routing hoặc cấp quyền hạ tầng.
+SECUREDRIVE_STORAGE_CONTROL_CENTER_ENABLED = _env_bool("SECUREDRIVE_STORAGE_CONTROL_CENTER_ENABLED", False)
+SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED = _env_bool("SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED", False)
+SECUREDRIVE_STORAGE_AGENT_OPERATIONS_ENABLED = _env_bool("SECUREDRIVE_STORAGE_AGENT_OPERATIONS_ENABLED", False)
+SECUREDRIVE_STORAGE_DESTRUCTIVE_OPERATIONS_ENABLED = _env_bool("SECUREDRIVE_STORAGE_DESTRUCTIVE_OPERATIONS_ENABLED", False)
+SECUREDRIVE_STORAGE_LAB_PROBES_ENABLED = _env_bool("SECUREDRIVE_STORAGE_LAB_PROBES_ENABLED", False)
+SECUREDRIVE_STORAGE_RUNTIME_PROBES_ENABLED = _env_bool("SECUREDRIVE_STORAGE_RUNTIME_PROBES_ENABLED", False)
+SECUREDRIVE_STORAGE_TOPOLOGY_ENABLED = _env_bool("SECUREDRIVE_STORAGE_TOPOLOGY_ENABLED", False)
+SECUREDRIVE_STORAGE_MONITORING_ENABLED = _env_bool("SECUREDRIVE_STORAGE_MONITORING_ENABLED", False)
+# Chỉ dùng cho Platform Docker lab. API chỉ kết nối địa chỉ loopback đã xác thực.
+SECUREDRIVE_PLATFORM_SEAWEEDFS_MASTER_URL = os.getenv("SECUREDRIVE_PLATFORM_SEAWEEDFS_MASTER_URL", "http://127.0.0.1:9333")
+try:
+    SECUREDRIVE_STORAGE_MONITORING_PROFILES = json.loads(os.getenv('SECUREDRIVE_STORAGE_MONITORING_PROFILES','{}'))
+    if not isinstance(SECUREDRIVE_STORAGE_MONITORING_PROFILES,dict):
+        raise ValueError
+except (ValueError,TypeError):
+    raise RuntimeError('Storage monitoring profile registry must be a JSON object.') from None
+try:
+    SECUREDRIVE_STORAGE_CONNECTION_PROFILES = json.loads(os.getenv('SECUREDRIVE_STORAGE_CONNECTION_PROFILES', '{}'))
+    if not isinstance(SECUREDRIVE_STORAGE_CONNECTION_PROFILES, dict):
+        raise ValueError
+except (ValueError, TypeError):
+    raise RuntimeError('Invalid storage connection profile registry.') from None
+
 # S3-compatible storage is enabled when SECUREDRIVE_STORAGE_ENDPOINT_URL and the
 # bucket/credentials are configured. Legacy FileField routes remain for backwards
 # compatibility; the Next.js multipart API uses this adapter.
 SECUREDRIVE_STORAGE_ENDPOINT_URL = os.getenv("SECUREDRIVE_STORAGE_ENDPOINT_URL", "").strip()
+# Ký upload bằng đúng host trình duyệt truy cập; để trống thì dùng endpoint nội bộ.
+SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL = os.getenv("SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL", "").strip()
+SECUREDRIVE_DIRECT_DOWNLOAD_ENABLED = _env_bool("SECUREDRIVE_DIRECT_DOWNLOAD_ENABLED", False)
 SECUREDRIVE_STORAGE_BUCKET = os.getenv("SECUREDRIVE_STORAGE_BUCKET", "").strip()
 SECUREDRIVE_STORAGE_REGION = os.getenv("SECUREDRIVE_STORAGE_REGION", "us-east-1").strip()
 SECUREDRIVE_STORAGE_ADDRESSING_STYLE = os.getenv(
@@ -181,9 +212,22 @@ SECUREDRIVE_STORAGE_RETRY_MAX_SECONDS = _env_float(
 SECUREDRIVE_STORAGE_PRESIGN_MAX_SECONDS = _env_int(
     "SECUREDRIVE_STORAGE_PRESIGN_MAX_SECONDS", 300
 )
+SECUREDRIVE_DOWNLOAD_URL_SECONDS = _env_int("SECUREDRIVE_DOWNLOAD_URL_SECONDS", min(180, SECUREDRIVE_STORAGE_PRESIGN_MAX_SECONDS))
 SECUREDRIVE_STORAGE_SSE = os.getenv("SECUREDRIVE_STORAGE_SSE", "").strip()
 SECUREDRIVE_STORAGE_KMS_KEY_ID = os.getenv("SECUREDRIVE_STORAGE_KMS_KEY_ID", "").strip()
 SECUREDRIVE_UPLOAD_SCANNER = os.getenv("SECUREDRIVE_UPLOAD_SCANNER", "").strip()
+if SECUREDRIVE_DIRECT_DOWNLOAD_ENABLED and not 1 <= SECUREDRIVE_DOWNLOAD_URL_SECONDS <= SECUREDRIVE_STORAGE_PRESIGN_MAX_SECONDS:
+    raise RuntimeError("Download URL lifetime must be within the storage presign limit.")
+if SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL:
+    public_storage_endpoint = urlsplit(SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL)
+    if (
+        public_storage_endpoint.scheme not in {"http", "https"} or not public_storage_endpoint.hostname
+        or public_storage_endpoint.username or public_storage_endpoint.password
+        or public_storage_endpoint.query or public_storage_endpoint.fragment
+        or any(character.isspace() for character in SECUREDRIVE_STORAGE_PUBLIC_ENDPOINT_URL)
+        or (not DEBUG and public_storage_endpoint.scheme != "https")
+    ):
+        raise RuntimeError("Public storage endpoint must be a valid HTTP(S) URL, HTTPS in production.")
 if SECUREDRIVE_STORAGE_ENDPOINT_URL:
     storage_endpoint = urlsplit(SECUREDRIVE_STORAGE_ENDPOINT_URL)
     if storage_endpoint.scheme not in {"http", "https"} or not storage_endpoint.netloc:
@@ -263,3 +307,19 @@ LOGGING = {
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Dedicated administrator invitation is deliberately opt-in. Configure a real
+# authenticated EMAIL_BACKEND/SMTP transport before enabling in production.
+ADMIN_INVITES_ENABLED = os.getenv("ADMIN_INVITES_ENABLED", "false").lower() in ("true", "1", "yes")
+ADMIN_INVITE_TIMEOUT_SECONDS = min(7 * 86400, max(3600, int(os.getenv("ADMIN_INVITE_TIMEOUT_SECONDS", "86400"))))
+# Django's token generator consults PASSWORD_RESET_TIMEOUT.
+PASSWORD_RESET_TIMEOUT = ADMIN_INVITE_TIMEOUT_SECONDS
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "")
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "false").lower() in ("true", "1", "yes")
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() in ("true", "1", "yes")

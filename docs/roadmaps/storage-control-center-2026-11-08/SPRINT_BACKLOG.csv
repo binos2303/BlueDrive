@@ -1,0 +1,20 @@
+﻿Sprint,Order,Priority,Task,Proposed files/modules,Dependencies,Acceptance criteria,Status
+S0,1,P0,Inventory code & security scan,backend/files/models.py; frontend/app/(admin)/admin/infrastructure/topology/page.tsx,-,Baseline test+source map; no production mutations,PLANNED
+S0,2,P0,Confirm MinIO edition/license/topology,MinIO lab inventory,S0-1,Exact edition/version/license; scope LAB/prod,PLANNED
+S1,1,P0,Implement cluster/host inventory,backend/infrastructure/models.py; migrations,S0,"Tenant FK, constraints, migration back-compat",PLANNED
+S1,2,P0,RBAC Platform vs Organization,backend/accounts/access.py; infrastructure permissions,S1-1,Cross-tenant API denied; roles not implicitly content readers,PLANNED
+S1,3,P0,Scoped read-only API,backend/infrastructure/api.py; urls.py,S1-2,"Pagination, 404 cross tenant, no secrets",PLANNED
+S2,1,P0,Connect existing MinIO,backend/infrastructure/services.py; storage adapters,S1,"TLS/SSRF/credential handling, verify isolated S3",PLANNED
+S2,2,P0,Storage binding session-pinned,backend/files/models.py; upload_api.py; finalization.py; resolver,S2-1,"Active upload pinned target, old versions readable",PLANNED
+S3,1,P1,Build shared React Flow Canvas,frontend/components/storage; frontend/lib/storage-control-service.ts,S1,"Drag layout only, click inspector, zoom, keyboard",PLANNED
+S3,2,P1,Platform/Org routes reuse UI,frontend/app/(admin)/admin/infrastructure/topology; organization/admin,S3-1,"Same design system and scoped API, 320px responsive",PLANNED
+S4,1,P1,MinIO metrics collector,backend/infrastructure/monitoring.py; TSDB,S2,"Provider/version metrics, source and observed_at",PLANNED
+S4,2,P1,Node host metrics & SSE,agent prototype; api stream; frontend hook,S4-1,"Unknown on stale, reconnect and scoped streams",PLANNED
+S4,3,P1,Alerts and events,backend/infrastructure/alerts.py; storage UI,S4-2,Quorum/drive/stale alerts and audit,PLANNED
+S5,1,P0,Agent enrollment & mTLS,enterprise-agent; backend enrollment API,S4,"One-use token, tenant-bound identity, revoke/replay tests",PLANNED
+S5,2,P0,Read-only agent commands,enterprise-agent allowlist,S5-1,"No arbitrary shell, host inventory matches source",PLANNED
+S6,1,P1,Provisioning Wizard dry-run,frontend/components/storage/ClusterWizard; backend jobs,S5,Preflight/topology plan/explicit approval,PLANNED
+S6,2,P1,Lab-only deployment adapter,agent operations; operation job,S6-1,"Edition pinned, no actual prod changes; S3 checksum",PLANNED
+S7,1,P0,Maintenance/preflight quorum,backend/infrastructure/operations.py; agent,S6,Reject unsafe removal/restart; dry-run tests,PLANNED
+S7,2,P1,Pool expand/decommission,version-specific provider adapter,S7-1,Only if vendor-supported; reversible checkpoints,PLANNED
+S8,1,P0,"Backup/restore, telemetry SLO and canary",runbooks; integration tests,S7,"Restore drill, no tenant leaks, rollback tested",PLANNED

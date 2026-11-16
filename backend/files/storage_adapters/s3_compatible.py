@@ -50,7 +50,7 @@ _RETRYABLE_CODES = {
     "Throttling",
     "ThrottlingException",
 }
-_NOT_FOUND_CODES = {"NoSuchKey", "NotFound", "404"}
+_NOT_FOUND_CODES = {"NoSuchKey", "NoSuchVersion", "NotFound", "404"}
 _MISSING_UPLOAD_CODES = {"NoSuchUpload"}
 _ACCESS_CODES = {
     "AccessDenied",
@@ -83,6 +83,7 @@ class S3CompatibleStorageAdapter:
         *,
         endpoint_url: str,
         bucket: str,
+        public_endpoint_url: str = "",
         region: str = "us-east-1",
         addressing_style: str = "path",
         access_key_id: str = "",
@@ -97,6 +98,7 @@ class S3CompatibleStorageAdapter:
         max_presigned_url_seconds: int = 300,
         server_side_encryption: str = "",
         kms_key_id: str = "",
+        public_upload_endpoint: bool = False,
         client=None,
         sleep: Callable[[float], None] = time.sleep,
         random_uniform: Callable[[float, float], float] = random.uniform,
@@ -104,6 +106,14 @@ class S3CompatibleStorageAdapter:
         parsed = urlsplit(endpoint_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise StorageConfigurationError("Object storage endpoint must be an HTTP(S) URL.")
+        if public_endpoint_url:
+            public = urlsplit(public_endpoint_url)
+            if (
+                public.scheme not in {"http", "https"} or not public.hostname
+                or public.username or public.password or public.query or public.fragment
+                or any(character.isspace() for character in public_endpoint_url)
+            ):
+                raise StorageConfigurationError("Public storage endpoint must be an HTTP(S) URL without credentials or query.")
         if not bucket:
             raise StorageConfigurationError("Object storage bucket is required.")
         if addressing_style not in {"path", "virtual", "auto"}:
@@ -132,13 +142,10 @@ class S3CompatibleStorageAdapter:
         self._max_presigned_url_seconds = max_presigned_url_seconds
         self._sse = server_side_encryption
         self._kms_key_id = kms_key_id
+        self._public_upload_endpoint = public_upload_endpoint
         self._retry = _RetrySettings(max_attempts, retry_base_seconds, retry_max_seconds)
         self._sleep = sleep
         self._random_uniform = random_uniform
-
-        if client is not None:
-            self._client = client
-            return
 
         verify = ca_bundle or tls_verify
         client_args = {
@@ -159,24 +166,36 @@ class S3CompatibleStorageAdapter:
         if access_key_id:
             client_args["aws_access_key_id"] = access_key_id
             client_args["aws_secret_access_key"] = secret_access_key
-        self._client = boto3.client(**client_args)
+        self._client = client if client is not None else boto3.client(**client_args)
+        self._download_client = self._client
+        self._download_client_args = None
+        if public_endpoint_url and public_endpoint_url.rstrip("/") != self._endpoint_url:
+            # Ký bằng đúng endpoint công khai; không sửa hostname sau khi ký.
+            self._download_client = None
+            self._download_client_args = {
+                **client_args,
+                "endpoint_url": public_endpoint_url.rstrip("/"),
+                "use_ssl": urlsplit(public_endpoint_url).scheme == "https",
+            }
 
     def create_object_key(self, purpose: str) -> str:
         if not isinstance(purpose, str) or purpose not in _ALLOWED_KEY_PURPOSES:
             raise StorageNonRetryableError("Unsupported object key purpose.")
         return f"{purpose}/{uuid.uuid4().hex}"
 
-    def stat_object(self, object_key: str) -> ObjectStat:
-        self._validate_object_key(object_key)
+    def stat_object(self, object_key: str, *, version_id: str = "") -> ObjectStat:
+        params = self._object_parameters(object_key, version_id)
         response = self._call(
             "head_object",
             lambda: self._client.head_object(
-                Bucket=self._bucket,
-                Key=object_key,
+                **params,
                 ChecksumMode="ENABLED",
             ),
         )
-        return self._to_stat(response)
+        stat = self._to_stat(response)
+        if version_id and stat.version_id != version_id:
+            raise StorageIntegrityError("Storage returned an unexpected object version.")
+        return stat
 
     def verify_object(
         self,
@@ -184,9 +203,10 @@ class S3CompatibleStorageAdapter:
         *,
         expected_size: int,
         expected_sha256: str | None = None,
+        version_id: str = "",
     ) -> ObjectStat:
         self._validate_object_key(object_key)
-        stat = self.stat_object(object_key)
+        stat = self.stat_object(object_key, version_id=version_id) if version_id else self.stat_object(object_key)
         if stat.size_bytes != expected_size:
             raise StorageIntegrityError("Stored object size does not match the expected size.")
         if expected_sha256:
@@ -242,7 +262,8 @@ class S3CompatibleStorageAdapter:
         if not 1 <= part_number <= 10000:
             raise StorageNonRetryableError("Multipart part number is outside the allowed range.")
         try:
-            url = self._client.generate_presigned_url(
+            signer = self._public_signing_client() if self._public_upload_endpoint else self._client
+            url = signer.generate_presigned_url(
                 "upload_part",
                 Params={
                     "Bucket": self._bucket,
@@ -343,6 +364,17 @@ class S3CompatibleStorageAdapter:
             object_key, expected_size, expected_upload_session_id
         )
 
+    def list_uploaded_parts(self, object_key: str, upload_id: str) -> list[MultipartPart]:
+        """Read provider-confirmed part receipts for resume reconciliation.
+
+        These are not used as the completion manifest: the browser must retain
+        ETags returned by its own successful UploadPart calls.
+        """
+        self._validate_object_key(object_key)
+        if not upload_id:
+            raise StorageNonRetryableError("Multipart upload identifier is required.")
+        return self._list_all_parts(object_key, upload_id)
+
     def abort_multipart(self, object_key: str, upload_id: str) -> None:
         self._validate_object_key(object_key)
         if not upload_id:
@@ -363,36 +395,49 @@ class S3CompatibleStorageAdapter:
             raise
 
     def create_download_url(
-        self, object_key: str, *, expires_in: int, download_name: str | None = None
+        self, object_key: str, *, expires_in: int, download_name: str | None = None, version_id: str = ""
     ) -> PresignedRequest:
         self._validate_object_key(object_key)
         self._validate_expiry(expires_in)
-        params = {"Bucket": self._bucket, "Key": object_key}
-        if download_name:
-            safe_name = download_name.replace("\r", "").replace("\n", "")[:255]
-            params["ResponseContentDisposition"] = (
-                f"attachment; filename*=UTF-8''{quote(safe_name, safe='')}"
-            )
+        safe_name = re.sub(r"[\x00-\x1f\x7f/\\\\]", "_", download_name or "download")[:255]
+        params = {
+            **self._object_parameters(object_key, version_id),
+            "ResponseContentDisposition": f"attachment; filename*=UTF-8''{quote(safe_name, safe='')}",
+            "ResponseContentType": "application/octet-stream",
+            "ResponseCacheControl": "private, no-store",
+        }
         try:
-            url = self._client.generate_presigned_url(
+            url = self._public_signing_client().generate_presigned_url(
                 "get_object", Params=params, ExpiresIn=expires_in, HttpMethod="GET"
             )
             return PresignedRequest(url=url, method="GET")
         except BotoCoreError:
             raise StorageNonRetryableError("Could not create a download authorization.") from None
 
-    def open_object(self, object_key: str) -> BinaryIO:
-        self._validate_object_key(object_key)
+    def _public_signing_client(self):
+        if self._download_client is None:
+            self._download_client = boto3.client(**self._download_client_args)
+        return self._download_client
+
+    def open_object(self, object_key: str, *, version_id: str = "") -> BinaryIO:
+        params = self._object_parameters(object_key, version_id)
         response = self._call(
             "get_object",
-            lambda: self._client.get_object(Bucket=self._bucket, Key=object_key),
+            lambda: self._client.get_object(**params),
         )
+        if version_id and response.get("VersionId") != version_id:
+            response["Body"].close()
+            raise StorageIntegrityError("Storage returned an unexpected object version.")
         return response["Body"]
 
-    def download_to(self, object_key: str, destination: BinaryIO) -> ObjectStat:
+    def download_to(
+        self, object_key: str, destination: BinaryIO, *, max_bytes: int | None = None
+    ) -> ObjectStat:
         self._validate_object_key(object_key)
         if not destination.seekable():
             raise StorageNonRetryableError("Download destination must support safe retry reset.")
+        if max_bytes is not None and max_bytes < 0:
+            raise StorageNonRetryableError("Download size limit is invalid.")
         for attempt in range(1, self._retry.attempts + 1):
             body = None
             try:
@@ -400,13 +445,20 @@ class S3CompatibleStorageAdapter:
                 destination.truncate(0)
                 response = self._client.get_object(Bucket=self._bucket, Key=object_key)
                 body = response["Body"]
+                declared_size = int(response.get("ContentLength", -1))
+                if max_bytes is not None and (declared_size < 0 or declared_size > max_bytes):
+                    raise StorageIntegrityError("Downloaded object exceeds the allowed size.")
+                downloaded = 0
                 while True:
                     chunk = body.read(1024 * 1024)
                     if not chunk:
                         break
+                    downloaded += len(chunk)
+                    if max_bytes is not None and downloaded > max_bytes:
+                        raise StorageIntegrityError("Downloaded object exceeds the allowed size.")
                     destination.write(chunk)
                 destination.flush()
-                if destination.tell() != int(response.get("ContentLength", -1)):
+                if downloaded != declared_size:
                     raise StorageIntegrityError(
                         "Downloaded object length does not match storage metadata."
                     )
@@ -438,10 +490,24 @@ class S3CompatibleStorageAdapter:
         size_bytes: int,
         sha256_hex: str,
         content_type: str = "application/octet-stream",
+        metadata: dict[str, str] | None = None,
     ) -> ObjectStat:
         self._validate_object_key(object_key)
         if size_bytes < 0 or not _SHA256_HEX.fullmatch(sha256_hex):
             raise StorageNonRetryableError("Object size or checksum is invalid.")
+        if metadata is not None and (
+            not isinstance(metadata, dict)
+            or any(not isinstance(key, str) or not key or not isinstance(value, str)
+                   for key, value in metadata.items())
+        ):
+            raise StorageNonRetryableError("Object metadata is invalid.")
+        object_metadata = {key.lower(): value for key, value in (metadata or {}).items()}
+        if len(object_metadata) != len(metadata or {}):
+            raise StorageNonRetryableError("Object metadata keys must be unique ignoring case.")
+        if object_metadata.get("securedrive-sha256", sha256_hex).lower() != sha256_hex.lower():
+            raise StorageIntegrityError("Object metadata conflicts with its verified checksum.")
+        # Giữ metadata khi chuyển provider, nhưng checksum luôn gắn với bytes đã xác minh.
+        object_metadata["securedrive-sha256"] = sha256_hex.lower()
         params = {
             "Bucket": self._bucket,
             "Key": object_key,
@@ -449,12 +515,12 @@ class S3CompatibleStorageAdapter:
             "ContentLength": size_bytes,
             "ContentType": content_type or "application/octet-stream",
             "ChecksumSHA256": base64.b64encode(bytes.fromhex(sha256_hex)).decode("ascii"),
-            "Metadata": {"securedrive-sha256": sha256_hex.lower()},
+            "Metadata": object_metadata,
         }
         params.update(self._sse_parameters())
         # Do not replay an ambiguous body write; resolve its outcome with HeadObject below.
         try:
-            self._call("put_object", lambda: self._client.put_object(**params), idempotent=False)
+            written = self._call("put_object", lambda: self._client.put_object(**params), idempotent=False)
         except StorageRetryableError as write_error:
             # Resolve a lost response without replaying a possibly completed body write.
             try:
@@ -464,8 +530,87 @@ class S3CompatibleStorageAdapter:
             except StorageNotFoundError:
                 raise write_error
         return self.verify_object(
-            object_key, expected_size=size_bytes, expected_sha256=sha256_hex
+            object_key, expected_size=size_bytes, expected_sha256=sha256_hex,
+            version_id=written.get("VersionId", ""),
         )
+
+    def publish_verified_object(
+        self,
+        source_key: str,
+        destination_key: str,
+        *,
+        expected_size: int,
+        expected_sha256: str,
+        upload_session_id: str,
+        content_type: str = "application/octet-stream",
+        expected_source_etag: str = "",
+    ) -> ObjectStat:
+        """Publish a SHA-256-verified staging object using an S3-side copy.
+
+        SHA-256 is computed independently by the finalizer over GET data before
+        this call. CopyObject is *not* a replacement for that verification.
+        Source ETag is used only as an If-Match concurrency condition, not as a
+        content digest. The source is retained until the DB publication commits.
+        """
+        self._validate_object_key(source_key)
+        self._validate_object_key(destination_key)
+        if (
+            not source_key.startswith("staging/")
+            or not destination_key.startswith("primary/")
+            or source_key == destination_key
+            or expected_size < 0
+            or not _SHA256_HEX.fullmatch(expected_sha256)
+            or not upload_session_id
+        ):
+            raise StorageNonRetryableError("Invalid verified publication request.")
+
+        source = self.stat_object(source_key)
+        if (
+            source.size_bytes != expected_size
+            or source.metadata.get("securedrive-upload-id") != upload_session_id
+        ):
+            raise StorageIntegrityError("Staging object no longer matches its upload session.")
+        if not source.etag:
+            raise StorageIntegrityError("Staging object has no conditional-copy ETag.")
+        if expected_source_etag and source.etag != expected_source_etag:
+            raise StorageIntegrityError("Staging object changed after its checksum was verified.")
+
+        def verified_destination(version_id=""):
+            target = self.stat_object(destination_key, version_id=version_id) if version_id else self.stat_object(destination_key)
+            if (
+                target.size_bytes != expected_size
+                or target.metadata.get("securedrive-sha256") != expected_sha256.lower()
+                or target.metadata.get("securedrive-upload-id") != upload_session_id
+            ):
+                raise StorageIntegrityError("Published object metadata/size verification failed.")
+            return target
+
+        try:
+            copied = self._call(
+                "copy_object",
+                lambda: self._client.copy_object(
+                    Bucket=self._bucket,
+                    Key=destination_key,
+                    CopySource={"Bucket": self._bucket, "Key": source_key},
+                    CopySourceIfMatch=f'"{source.etag}"',
+                    MetadataDirective="REPLACE",
+                    Metadata={
+                        "securedrive-sha256": expected_sha256.lower(),
+                        "securedrive-upload-id": upload_session_id,
+                    },
+                    ContentType=content_type or "application/octet-stream",
+                    **self._sse_parameters(),
+                ),
+                idempotent=False,
+            )
+        except StorageRetryableError as copy_error:
+            # A lost CopyObject response is ambiguous. HEAD can reconcile a
+            # completed copy; otherwise retain staging for a bounded retry.
+            try:
+                return verified_destination()
+            except StorageNotFoundError:
+                raise copy_error
+        return verified_destination(copied.get("VersionId", ""))
 
     def quarantine_object(
         self,
@@ -521,11 +666,40 @@ class S3CompatibleStorageAdapter:
 
     def delete_object(self, object_key: str) -> None:
         self._validate_object_key(object_key)
-        # S3 DeleteObject is idempotent, including when the object is already absent.
-        self._call(
-            "delete_object",
-            lambda: self._client.delete_object(Bucket=self._bucket, Key=object_key),
-        )
+        # Xóa mọi phiên bản của đúng key, không chỉ tạo delete marker hoặc xóa key cùng prefix.
+        versions = []
+        markers = {}
+        seen = set()
+        while True:
+            response = self._call("list_object_versions", lambda: self._client.list_object_versions(
+                Bucket=self._bucket, Prefix=object_key, **markers,
+            ))
+            for item in [*response.get("Versions", []), *response.get("DeleteMarkers", [])]:
+                if item.get("Key") == object_key:
+                    version_id = item.get("VersionId")
+                    if not isinstance(version_id, str) or not version_id:
+                        raise StorageIntegrityError("Storage returned an invalid object version.")
+                    self._object_parameters(object_key, version_id)
+                    versions.append({"Key": object_key, "VersionId": version_id})
+            if not response.get("IsTruncated"):
+                break
+            marker = (response.get("NextKeyMarker"), response.get("NextVersionIdMarker"))
+            if (
+                not isinstance(marker[0], str) or not marker[0]
+                or (marker[1] is not None and not isinstance(marker[1], str)) or marker in seen
+            ):
+                raise StorageIntegrityError("Storage returned invalid version pagination.")
+            seen.add(marker)
+            markers = {"KeyMarker": marker[0]}
+            if marker[1]:
+                markers["VersionIdMarker"] = marker[1]
+        for offset in range(0, len(versions), 1000):
+            batch = versions[offset:offset + 1000]
+            result = self._call("delete_objects", lambda: self._client.delete_objects(
+                Bucket=self._bucket, Delete={"Objects": batch, "Quiet": True},
+            ))
+            if result.get("Errors"):
+                raise StorageNonRetryableError("Some stored object versions could not be removed.")
 
     def _list_all_parts(self, object_key: str, upload_id: str) -> list[MultipartPart]:
         parts = []
@@ -546,7 +720,13 @@ class S3CompatibleStorageAdapter:
             )
             if not response.get("IsTruncated"):
                 return parts
-            marker = response.get("NextPartNumberMarker")
+            next_marker = response.get("NextPartNumberMarker")
+            if (
+                not isinstance(next_marker, int)
+                or next_marker <= (marker or 0)
+            ):
+                raise StorageIntegrityError("Storage returned an invalid multipart pagination marker.")
+            marker = next_marker
 
     @staticmethod
     def _validate_manifest(parts: Sequence[MultipartPart]) -> list[MultipartPart]:
@@ -584,6 +764,7 @@ class S3CompatibleStorageAdapter:
             etag=str(response.get("ETag", "")).strip('"'),
             checksum_sha256=response.get("ChecksumSHA256", ""),
             checksum_type=response.get("ChecksumType", ""),
+            version_id=str(response.get("VersionId") or ""),
             metadata={
                 str(key).lower(): str(value)
                 for key, value in response.get("Metadata", {}).items()
@@ -614,6 +795,15 @@ class S3CompatibleStorageAdapter:
             self._retry.base_seconds * (2 ** (attempt - 1)),
         )
         return self._random_uniform(0, ceiling)
+
+    def _object_parameters(self, object_key, version_id=""):
+        self._validate_object_key(object_key)
+        if not isinstance(version_id, str) or len(version_id) > 1024 or any(ord(c) < 32 or ord(c) == 127 for c in version_id):
+            raise StorageNonRetryableError("Invalid stored object version.")
+        params = {"Bucket": self._bucket, "Key": object_key}
+        if version_id:
+            params["VersionId"] = version_id
+        return params
 
     @staticmethod
     def _validate_object_key(object_key: str) -> None:

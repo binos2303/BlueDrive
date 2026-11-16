@@ -1,8 +1,7 @@
-import io
-import zipfile
 from datetime import timedelta
 from cryptography.exceptions import InvalidTag
 from django.contrib import messages
+from django.conf import settings
 from django.db import transaction
 from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -19,6 +18,7 @@ from accounts.access import (
 )
 from securedrive.frontend_redirects import redirect_to_frontend
 
+from files.rename_service import rename_resource, RenameError
 from files.models import File
 from files.models import UploadSession
 from files.quota import (
@@ -44,6 +44,7 @@ from sharing.services import (
     can_edit_folder,
     can_edit_folder_tree,
     can_view_folder,
+    describe_resource_access,
     get_receiver_share_for_file,
     get_receiver_share_for_folder,
     is_descendant_or_same,
@@ -51,6 +52,7 @@ from sharing.services import (
 
 from .forms import FolderCreateForm
 from .models import Folder
+from .tree_service import folder_subtree
 from logs.models import ActivityLog
 from logs.services import get_last_activity, log_action
 
@@ -123,35 +125,15 @@ def folder_rename(request, folder_id):
         id=folder_id,
         deleted_at__isnull=True,
     )
-    if not can_edit_folder(folder, request.user):
-        messages.error(request, "You do not have permission to rename this folder.")
+    try:
+        changed = rename_resource(
+            resource=folder, actor=request.user,
+            name=request.POST.get("folder_name", ""),
+        )
+        messages.success(request, "Folder renamed successfully." if changed else "Name is unchanged.")
+    except RenameError as exc:
+        messages.error(request, exc.detail)
         return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-
-    folder_name = request.POST.get("folder_name", "").strip()
-    if not folder_name:
-        messages.error(request, "Folder name cannot be empty.")
-        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-    if len(folder_name) > 255:
-        messages.error(request, "Folder name is too long.")
-        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-
-    duplicate = Folder.objects.filter(
-        owner=folder.owner,
-        tenant=folder.tenant,
-        workspace=folder.workspace,
-        parent=folder.parent,
-        folder_name__iexact=folder_name,
-        deleted_at__isnull=True,
-    ).exclude(id=folder.id).exists()
-    if duplicate:
-        messages.error(request, "A folder with this name already exists here.")
-        return redirect(request.META.get("HTTP_REFERER", "dashboard"))
-
-    old_name = folder.folder_name
-    folder.folder_name = folder_name
-    folder.save(update_fields=["folder_name", "updated_at"])
-    log_action(request.user, ActivityLog.Action.RENAME, f"Renamed folder from {old_name} to {folder.folder_name}", obj=folder)
-    messages.success(request, "Folder renamed successfully.")
     return redirect("folder_open", folder_id=folder.parent_id) if folder.parent_id else redirect("shared_with_me" if folder.owner_id != request.user.id else "dashboard")
 
 
@@ -169,16 +151,15 @@ def folder_delete(request, folder_id):
         messages.error(request, "Editor access to this workspace is required.")
         return redirect(request.META.get("HTTP_REFERER", "dashboard"))
     deleted_time = timezone.now()
-    subtree = _subtree(folder, include_deleted=False)
+    subtree = folder_subtree(folder)
     folder_ids = [item.id for item in subtree]
 
     with transaction.atomic():
         Folder.objects.filter(
-            id__in=folder_ids, owner=request.user, tenant=folder.tenant,
+            id__in=folder_ids, tenant=folder.tenant,
             workspace=folder.workspace,
         ).update(deleted_at=deleted_time)
         File.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             folder_id__in=folder_ids,
@@ -209,14 +190,13 @@ def folder_restore(request, folder_id):
         messages.warning(request, "Restore the parent folder first.")
         return redirect("trash")
 
-    subtree = _subtree(folder, include_deleted=True)
+    subtree = folder_subtree(folder, include_deleted=True)
     folder_ids = [item.id for item in subtree]
 
     # Check every restored folder/file for live-name conflicts.
     restored_folder_ids = {item.id for item in subtree}
     for restored_folder in subtree:
         if Folder.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             parent=restored_folder.parent,
@@ -227,14 +207,12 @@ def folder_restore(request, folder_id):
             return redirect("trash")
 
     for restored_file in File.objects.filter(
-        owner=request.user,
         tenant=folder.tenant,
         workspace=folder.workspace,
         folder_id__in=restored_folder_ids,
         deleted_at__isnull=False,
     ):
         if File.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             folder=restored_file.folder,
@@ -246,11 +224,10 @@ def folder_restore(request, folder_id):
 
     with transaction.atomic():
         Folder.objects.filter(
-            id__in=folder_ids, owner=request.user, tenant=folder.tenant,
+            id__in=folder_ids, tenant=folder.tenant,
             workspace=folder.workspace,
         ).update(deleted_at=None)
         File.objects.filter(
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
             folder_id__in=folder_ids,
@@ -276,19 +253,9 @@ def folder_delete_permanently(request, folder_id):
         messages.error(request, "Editor access to this workspace is required.")
         return redirect("trash")
 
-    subtree = [folder]
-    index = 0
-    while index < len(subtree):
-        subtree.extend(Folder.objects.filter(
-            owner=request.user,
-            tenant=folder.tenant,
-            workspace=folder.workspace,
-            parent=subtree[index],
-        ))
-        index += 1
+    subtree = folder_subtree(folder, include_deleted=True)
     folder_ids = [item.id for item in subtree]
     nested_files = list(File.objects.filter(
-        owner=request.user,
         tenant=folder.tenant,
         workspace=folder.workspace,
         folder_id__in=folder_ids,
@@ -306,7 +273,6 @@ def folder_delete_permanently(request, folder_id):
         ).update(target_folder=None)
         Folder.objects.filter(
             id__in=folder_ids,
-            owner=request.user,
             tenant=folder.tenant,
             workspace=folder.workspace,
         ).delete()
@@ -323,6 +289,8 @@ def folder_delete_permanently(request, folder_id):
 @require_POST
 def folder_upload(request):
     """Upload a complete browser-selected directory tree (webkitdirectory)."""
+    if settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED:
+        return JsonResponse({'detail':'Upload from Drive to use the selected storage destination.','code':'resumable_upload_required'},status=409)
     uploaded_files = request.FILES.getlist("files")
     relative_paths = request.POST.getlist("relative_paths")
     parent_id = request.POST.get("parent") or None
@@ -696,70 +664,45 @@ def folder_create_api(request):
 
 @login_required
 def folder_download(request, folder_id):
-    """Download a shared folder as a ZIP. Owner and shared recipients are allowed."""
-    folder = get_object_or_404(Folder, id=folder_id)
-    is_owner = folder.owner_id == request.user.id
+    """Download accessible live folder contents as a private ZIP attachment."""
+    from .archive_service import FolderArchiveError, build_folder_archive
+
+    folder = get_object_or_404(Folder, id=folder_id, deleted_at__isnull=True)
     if not can_view_folder(folder, request.user):
         raise Http404
 
-    if not is_owner and get_receiver_share_for_folder(folder, request.user) is None:
-        raise Http404
+    try:
+        archive, file_count, size_bytes = build_folder_archive(folder, request.user)
+    except FolderArchiveError as exc:
+        response = JsonResponse({"detail": exc.detail}, status=exc.status)
+        response["Cache-Control"] = "private, no-store"
+        response["Referrer-Policy"] = "no-referrer"
+        return response
+    except Exception:
+        response = JsonResponse(
+            {"detail": "Folder ZIP could not be prepared. Retry later."}, status=503,
+        )
+        response["Cache-Control"] = "private, no-store"
+        response["Referrer-Policy"] = "no-referrer"
+        return response
 
-    tree = _subtree(folder, include_deleted=False)
-    folder_ids = [item.id for item in tree]
-
-    files = File.objects.filter(
-        owner=folder.owner,
-        tenant=folder.tenant,
-        workspace=folder.workspace,
-        folder_id__in=folder_ids,
-    ).order_by("folder_id", "file_name")
-
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for drive_file in files:
-            if drive_file.deleted_at is not None:
-                continue
-            if not drive_file.file_path or not drive_file.is_encrypted:
-                continue
-            try:
-                dek = unwrap_dek(
-                    bytes(drive_file.wrapped_dek),
-                    bytes(drive_file.dek_nonce),
-                    get_master_key(),
-                )
-                aad = build_file_aad(
-                    owner_id=drive_file.owner_id,
-                    file_id=drive_file.id,
-                    version=drive_file.encryption_version,
-                )
-                with drive_file.file_path.open("rb") as stored:
-                    plaintext = decrypt_bytes(
-                        stored.read(),
-                        bytes(drive_file.encryption_nonce),
-                        dek,
-                        aad,
-                    )
-                if drive_file.hash_sha256 and not verify_sha256(plaintext, drive_file.hash_sha256):
-                    raise ValueError("integrity")
-                current = drive_file.folder
-                parts = []
-                while current is not None and current.id != folder.id:
-                    parts.insert(0, current.folder_name)
-                    current = current.parent
-                archive_path = "/".join(parts + [drive_file.file_name])
-                archive.writestr(archive_path, plaintext)
-            except Exception:
-                continue
-
-    buffer.seek(0)
-    log_action(request.user, ActivityLog.Action.DOWNLOAD, f"Downloaded folder: {folder.folder_name}", obj=folder)
-    return FileResponse(
-        buffer,
-        as_attachment=True,
-        filename=f"{folder.folder_name}.zip",
-        content_type="application/zip",
-    )
+    try:
+        log_action(
+            request.user, ActivityLog.Action.DOWNLOAD,
+            f"Downloaded folder: {folder.folder_name}", obj=folder,
+            metadata={"file_count": file_count, "size_bytes": size_bytes},
+        )
+        response = FileResponse(
+            archive, as_attachment=True, filename=f"{folder.folder_name}.zip",
+            content_type="application/zip",
+        )
+    except Exception:
+        archive.close()
+        raise
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Cache-Control"] = "private, no-store"
+    response["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @login_required
@@ -780,28 +723,24 @@ def folder_open(request, folder_id):
 def folder_details(request, folder_id):
     folder = get_object_or_404(Folder, id=folder_id)
     is_owner = folder.owner_id == request.user.id
-    share = None
     if not can_view_folder(folder, request.user):
         raise Http404
+    from accounts.access import workspace_role_for_user
+    workspace_role = workspace_role_for_user(request.user, folder.workspace)
+    share = None if is_owner else get_receiver_share_for_folder(folder, request.user)
     # Recent uses this timestamp to represent opening a folder. Update it without
     # touching updated_at, which is reserved for content/metadata modifications.
     Folder.objects.filter(pk=folder.pk).update(last_accessed_at=timezone.now())
-    if not is_owner:
-        # A shared resource follows the same lifecycle rule as the drive view:
-        # once the owner moves it to Trash, recipients must lose all access,
-        # including metadata/details endpoints.
-        if folder.deleted_at is not None:
-            raise Http404
-        share = get_receiver_share_for_folder(folder, request.user)
-        if share is None:
-            raise Http404
+    if not is_owner and workspace_role is None and share is None:
+        raise Http404
 
+    access = describe_resource_access(folder, request.user, share=share)
     activity = get_last_activity(folder)
-    descendants = _subtree(folder, include_deleted=False)
+    # Authorization above covers the shared workspace tree, irrespective of creator.
+    descendants = folder_subtree(folder)
     descendant_ids = [item.id for item in descendants]
     folder_count = max(len(descendants) - 1, 0)
     file_count = File.objects.filter(
-        owner=folder.owner,
         tenant=folder.tenant,
         workspace=folder.workspace,
         folder_id__in=descendant_ids,
@@ -810,7 +749,7 @@ def folder_details(request, folder_id):
 
     ancestors = []
 
-    if is_owner or not share or share.folder_id != folder.id:
+    if is_owner or workspace_role is not None or not share or share.folder_id != folder.id:
         current = folder.parent
         reverse_ancestors = []
 
@@ -818,6 +757,7 @@ def folder_details(request, folder_id):
             # Preserve the existing shared-folder access boundary.
             if (
                 not is_owner
+                and workspace_role is None
                 and share
                 and current.id == share.folder_id
             ):
@@ -833,11 +773,11 @@ def folder_details(request, folder_id):
 
     parts = [item["name"] for item in ancestors]
 
-    location_root = "My Drive" if is_owner else "Shared with me"
+    location_root = "My Drive" if is_owner else (folder.workspace.name if workspace_role else "Shared with me")
     location = location_root + (
         " / " + " / ".join(parts) if parts else ""
     )
-    return JsonResponse({
+    response = JsonResponse({
         "type": "folder",
         "name": folder.folder_name,
         "owner": folder.owner.username,
@@ -847,10 +787,14 @@ def folder_details(request, folder_id):
         "ancestors": ancestors,
         "folder_count": folder_count,
         "file_count": file_count,
-        "access": "Owner" if is_owner else share.permission_label,
-        "shared_by": None if is_owner else share.owner.username,
+        "access": access["access"],
+        "permission": access["permission"],
+        "shared_by": access["shared_by"],
         "last_action": activity.get_action_display() if activity else "No recorded action",
     })
+    response["Cache-Control"] = "private, no-store"
+    return response
+
 
 @login_required
 def trash_folder_open(request, folder_id):

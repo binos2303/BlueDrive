@@ -1,0 +1,45 @@
+.container {
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.mobileOwner,
+.compactMetadata {
+  display: none;
+}
+
+@container (max-width: 959px) {
+  .modified,
+  .size {
+    display: none;
+  }
+
+  .compactMetadata {
+    display: block;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@container (max-width: 639px) {
+  .owner,
+  .dragHandle {
+    display: none;
+  }
+
+  .actions {
+    width: 4rem;
+  }
+
+  .mobileOwner {
+    display: block;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

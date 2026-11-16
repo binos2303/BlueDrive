@@ -1,11 +1,40 @@
 from django.urls import path
 
-from . import admin_api, api_views, settings_api, views, workspace_api
+from . import admin_api, admin_files_api, admin_logs_api, admin_permissions_api, admin_settings_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api
 
 
 urlpatterns = [
+    path("api/admin/administrators/invite/", platform_admin_provisioning.invite_platform_administrator_view, name="api-admin-invite"),
+    path("api/admin/administrators/<int:user_id>/disable/", platform_admin_provisioning.disable_platform_administrator_view, name="api-admin-disable"),
+    path("api/admin/administrators/<int:user_id>/reinvite/", platform_admin_provisioning.reinvite_platform_administrator_view, name="api-admin-reinvite"),
+    path("api/admin-invite/accept/", platform_admin_provisioning.accept_platform_administrator_invitation_view, name="api-admin-invite-accept"),
     path("api/admin/access/", admin_api.admin_access_view, name="api-admin-access"),
+    path("api/admin/permissions/", admin_permissions_api.admin_permissions_view, name="api-admin-permissions"),
+    path("api/admin/settings/", admin_settings_api.admin_settings_view, name="api-admin-settings"),
     path("api/admin/users/", admin_api.admin_users_view, name="api-admin-users"),
+    path("api/admin/files/", admin_files_api.admin_files_view, name="api-admin-files"),
+    path("api/admin/files/<int:file_id>/", admin_files_api.admin_file_detail_view, name="api-admin-file-detail"),
+    path("api/admin/files/<int:file_id>/actions/", admin_files_api.admin_file_action_view, name="api-admin-file-action"),
+    path("api/admin/users/<int:user_id>/suspend/", admin_api.admin_suspend_user_view, name="api-admin-user-suspend"),
+    path("api/admin/users/<int:user_id>/reactivate/", admin_api.admin_reactivate_user_view, name="api-admin-user-reactivate"),
+    path("api/admin/sessions/", admin_api.admin_sessions_view, name="api-admin-sessions"),
+    path("api/admin/sessions/<uuid:session_id>/revoke/", admin_api.admin_revoke_session_view, name="api-admin-session-revoke"),
+    path("api/admin/audit/", admin_logs_api.admin_audit_history_view, name="api-admin-audit"),
+    path("api/admin/activity/", admin_logs_api.admin_user_activity_view, name="api-admin-activity"),
+    path("api/admin/overview/", admin_api.admin_overview_view, name="api-admin-overview"),
+    path("api/admin/quotas/", quota_admin_api.quota_directory_view, name="api-admin-quotas"),
+    path("api/tenants/<uuid:tenant_id>/quota/", organization_quota_api.organization_quota_view, name="api-organization-quota"),
+    path("api/admin/quota-plans/", quota_admin_api.quota_plans_view, name="api-admin-quota-plans"),
+    path("api/admin/quotas/configuration-history/", quota_admin_api.quota_configuration_history_view, name="api-admin-quota-configuration-history"),
+    path("api/admin/quota-plans/create/", quota_admin_api.quota_plan_create_view, name="api-admin-quota-plan-create"),
+    path("api/admin/quota-plans/<slug:code>/", quota_admin_api.quota_plan_update_view, name="api-admin-quota-plan-update"),
+    path("api/admin/quota-plans/<slug:code>/delete/", quota_admin_api.quota_plan_delete_view, name="api-admin-quota-plan-delete"),
+    path("api/admin/quota-policy/", quota_admin_api.quota_policy_view, name="api-admin-quota-policy"),
+    path("api/admin/quota-policy/update/", quota_admin_api.quota_policy_update_view, name="api-admin-quota-policy-update"),
+    path("api/admin/quotas/history/", quota_admin_api.quota_history_view, name="api-admin-quota-history"),
+    path("api/admin/quotas/<uuid:quota_id>/", quota_admin_api.quota_update_view, name="api-admin-quota-update"),
+    path("api/admin/organizations/", admin_api.admin_organizations_view, name="api-admin-organizations"),
+    path("api/admin/workspaces/", admin_api.admin_workspaces_view, name="api-admin-workspaces"),
     path("register/", views.register_view, name="register"),
     path("login/", views.login_view, name="login"),
     path("logout/", views.logout_view, name="logout"),
@@ -14,6 +43,10 @@ urlpatterns = [
     path("api/register/", api_views.register_api_view, name="api-register"),
     path("api/login/", api_views.login_api_view, name="api-login"),
     path("api/me/", api_views.current_account_view, name="api-current-account"),
+    path("api/me/security/password/", account_security_api.change_password_view, name="api-me-change-password"),
+    path("api/me/security/sessions/", account_security_api.my_sessions_view, name="api-me-sessions"),
+    path("api/me/security/sessions/revoke-others/", account_security_api.revoke_other_sessions_view, name="api-me-revoke-other-sessions"),
+    path("api/me/security/sessions/<uuid:session_id>/", account_security_api.revoke_my_session_view, name="api-me-revoke-session"),
     path("api/me/quota/", settings_api.my_quota_view, name="api-my-quota"),
     path("api/me/activity/", settings_api.my_activity_view, name="api-my-activity"),
     path("api/me/search-history/", settings_api.my_search_history_view, name="api-my-search-history"),
@@ -24,6 +57,16 @@ urlpatterns = [
         "api/workspaces/<uuid:workspace_id>/",
         workspace_api.my_workspace_detail_view,
         name="api-my-workspace-detail",
+    ),
+    path(
+        "api/workspaces/<uuid:workspace_id>/members/",
+        workspace_api.my_workspace_members_view,
+        name="api-my-workspace-members",
+    ),
+    path(
+        "api/workspaces/<uuid:workspace_id>/members/<uuid:assignment_id>/",
+        workspace_api.my_workspace_member_detail_view,
+        name="api-my-workspace-member-detail",
     ),
     path(
         "api/workspaces/<uuid:workspace_id>/invites/",
@@ -69,36 +112,6 @@ urlpatterns = [
         "api/tenants/<uuid:tenant_id>/workspaces/<uuid:workspace_id>/members/<uuid:membership_id>/",
         workspace_api.workspace_member_detail_view,
         name="api-workspace-member-detail",
-    ),
-    path(
-        "api/tenants/<uuid:tenant_id>/workspaces/<uuid:workspace_id>/groups/",
-        workspace_api.workspace_groups_view,
-        name="api-workspace-groups",
-    ),
-    path(
-        "api/tenants/<uuid:tenant_id>/workspaces/<uuid:workspace_id>/groups/<uuid:group_id>/",
-        workspace_api.workspace_group_detail_view,
-        name="api-workspace-group-detail",
-    ),
-    path(
-        "api/tenants/<uuid:tenant_id>/groups/",
-        workspace_api.groups_view,
-        name="api-organization-groups",
-    ),
-    path(
-        "api/tenants/<uuid:tenant_id>/groups/<uuid:group_id>/",
-        workspace_api.group_detail_view,
-        name="api-organization-group-detail",
-    ),
-    path(
-        "api/tenants/<uuid:tenant_id>/groups/<uuid:group_id>/members/",
-        workspace_api.group_members_view,
-        name="api-group-members",
-    ),
-    path(
-        "api/tenants/<uuid:tenant_id>/groups/<uuid:group_id>/members/<uuid:membership_id>/",
-        workspace_api.group_member_detail_view,
-        name="api-group-member-detail",
     ),
     path(
         "api/tenants/<uuid:tenant_id>/memberships/<uuid:membership_id>/suspend/",

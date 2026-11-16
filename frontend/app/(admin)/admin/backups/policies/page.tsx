@@ -19,7 +19,7 @@ export default function BackupPoliciesPage() {
         </button>
       </div>
 
-      <div className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+      <div className="mb-5 flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning-soft p-4 text-warning">
         <AlertTriangle size={18} className="mt-0.5 shrink-0" />
         <p className="text-sm">Policy controls are unavailable.</p>
       </div>
@@ -51,7 +51,7 @@ export default function BackupPoliciesPage() {
         <label className="block text-sm font-medium">
           Backup destination
           <select disabled value={destination} onChange={(event) => setDestination(event.target.value)} className="mt-2 h-11 w-full rounded-xl border border-border bg-background px-3 text-sm disabled:opacity-70">
-            <option>Primary storage</option><option>Secondary storage</option><option>MinIO</option>
+            <option>Primary storage</option><option>Secondary storage</option><option>Object storage</option>
           </select>
         </label>
 
