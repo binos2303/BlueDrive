@@ -1,8 +1,18 @@
 diff --git a/.github/workflows/verify.yml b/.github/workflows/verify.yml
-index 987fc45..9e602e1 100644
+index 987fc45..a2e077b 100644
 --- a/.github/workflows/verify.yml
 +++ b/.github/workflows/verify.yml
-@@ -44,7 +44,7 @@ jobs:
+@@ -14,7 +14,8 @@ concurrency:
+ 
+ jobs:
+   repository-safety:
+-    runs-on: ubuntu-latest
++    # CPython 3.12.10 có binary cho Ubuntu 24.04; ubuntu-latest đã chuyển sang 26.04.
++    runs-on: ubuntu-24.04
+     timeout-minutes: 5
+     steps:
+       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+@@ -44,7 +45,7 @@ jobs:
            persist-credentials: false
        - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
          with:
@@ -11,7 +21,25 @@ index 987fc45..9e602e1 100644
            cache: npm
            cache-dependency-path: frontend/package-lock.json
        - run: npm ci --ignore-scripts
-@@ -81,6 +81,7 @@ jobs:
+@@ -54,7 +55,7 @@ jobs:
+       - name: Frontend unit regression
+         shell: bash
+         run: |
+-          mapfile -t test_files < <(rg --files components lib -g '*.test.mts')
++          mapfile -d '' -t test_files < <(find components lib -type f -name '*.test.mts' -print0)
+           if ((${#test_files[@]} == 0)); then
+             echo 'FAIL: no frontend unit tests discovered'
+             exit 1
+@@ -63,7 +64,7 @@ jobs:
+       - run: npm run build
+ 
+   backend:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-24.04
+     timeout-minutes: 30
+     services:
+       postgres:
+@@ -81,6 +82,7 @@ jobs:
            --health-retries 12
      env:
        DJANGO_SETTINGS_MODULE: securedrive.test_settings
@@ -19,7 +47,7 @@ index 987fc45..9e602e1 100644
        BLUEDRIVE_TEST_DB_HOST: 127.0.0.1
        BLUEDRIVE_TEST_DB_PORT: '5432'
        BLUEDRIVE_TEST_DB_NAME: bluedrive_test_control
-@@ -100,6 +101,14 @@ jobs:
+@@ -100,6 +102,14 @@ jobs:
          run: python -m pip install -r backend/requirements.txt
        - name: Dependency compatibility
          run: python -m pip check
@@ -34,7 +62,7 @@ index 987fc45..9e602e1 100644
        - name: Test repository and harness guards
          run: python -X utf8 -m unittest discover -s backend/tools -p 'test_*.py' -v
        - name: Inspect source and index
-@@ -112,6 +121,8 @@ jobs:
+@@ -112,6 +122,8 @@ jobs:
            python -X utf8 backend/manage.py makemigrations --check --dry-run --settings securedrive.test_settings
        - name: Full PostgreSQL regression
          run: python -X utf8 infra/seaweedfs/regression.py
@@ -651,14 +679,14 @@ index 0c23239..aa3ec70 100644
  - Lệnh `seed_demo` không còn password mặc định và không in password; operator phải cấp `BLUEDRIVE_DEMO_PASSWORD` qua process env khi chủ động seed môi trường demo riêng. Giữ tùy chọn `--password` để tương thích lời gọi cũ nhưng không khuyến nghị truyền secret trên command line. Thiếu password dừng trước clear/create; harness không chạy seed hoặc đổi mật khẩu tài khoản đã tồn tại. Các tài khoản demo đã tạo trước đây cần đánh giá riêng nếu từng dùng default cũ, không suy rằng sửa source đã đổi credential đang hoạt động.
 diff --git a/docs/REFACTOR_P1_1_HANDOFF_2026-11-16.csv b/docs/REFACTOR_P1_1_HANDOFF_2026-11-16.csv
 new file mode 100644
-index 0000000..b3e4855
+index 0000000..71986a6
 --- /dev/null
 +++ b/docs/REFACTOR_P1_1_HANDOFF_2026-11-16.csv
 @@ -0,0 +1,675 @@
 +﻿path,git_state,scope,before_p11_sha256,candidate_sha256,commit_group,git_action,commit_decision,review_reason
 +.agents/skills/bluedrive-api-review/SKILL.md,untracked source,preexisting preserved,f27e9ddbeb5e8e18e6e6fb68d96170a746cc12ec4808b2427f6170a96f620d55,f27e9ddbeb5e8e18e6e6fb68d96170a746cc12ec4808b2427f6170a96f620d55,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
 +.agents/skills/bluedrive-storage-validation/SKILL.md,untracked source,preexisting preserved,8979de7739f6381316d2205faa6765e0824087ac892237587dd4832647b7bc92,8979de7739f6381316d2205faa6765e0824087ac892237587dd4832647b7bc92,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
-+.github/workflows/verify.yml,untracked source,P1.1 modified,5b67b5c5dad5a0e565d0af3dd03bd6d73b0d25bb27c9b6e4be1d71564fd2db50,93a0296fffdd01f494669a064e40105d61e89f2afe0c18f71b2c5caf5f93bbad,G3_VERIFICATION,ADD,INCLUDE,Harness/CI/fixtures và coverage bắt buộc của baseline; không bỏ app tests hoặc gate source.
++.github/workflows/verify.yml,untracked source,P1.1 modified,5b67b5c5dad5a0e565d0af3dd03bd6d73b0d25bb27c9b6e4be1d71564fd2db50,e27feba097a3fe245f625903ce7d015c7f028f45e2cee097fec3541f7e578c76,G3_VERIFICATION,ADD,INCLUDE,Harness/CI/fixtures và coverage bắt buộc của baseline; không bỏ app tests hoặc gate source.
 +.gitignore,tracked working tree,preexisting preserved,88703af2df4bd1164cd8d8d877620609ae3b5b02067281a2aaaecd9433dcca43,88703af2df4bd1164cd8d8d877620609ae3b5b02067281a2aaaecd9433dcca43,G0_REPOSITORY,MODIFY,INCLUDE,Giữ quy tắc loại trừ secrets/dependencies/output của checkout.
 +.impeccable/critique/2026-11-07T06-25-28Z__frontend.md,untracked source,preexisting preserved,6412a7e4806d09ecb3e19917633d36b9f7bcf75766cbcaf06f9c9d31cd0bd2c2,6412a7e4806d09ecb3e19917633d36b9f7bcf75766cbcaf06f9c9d31cd0bd2c2,X_LOCAL,ADD,EXCLUDE,"Thay đổi máy cá nhân/công cụ thiết kế; giữ working tree, không cần cho checkout ứng dụng/CI."
 +.impeccable/critique/2026-11-08T01-14-09Z__frontend.md,untracked source,preexisting preserved,842bc72bbdc08f4c7b9f458953f40c263262b7840a293f7917abb41940fbddd3,842bc72bbdc08f4c7b9f458953f40c263262b7840a293f7917abb41940fbddd3,X_LOCAL,ADD,EXCLUDE,"Thay đổi máy cá nhân/công cụ thiết kế; giữ working tree, không cần cho checkout ứng dụng/CI."
@@ -971,7 +999,7 @@ index 0000000..b3e4855
 +docs/README_VERIFICATION_2026-11-08.md,untracked source,preexisting preserved,0369c78f5ca7e19009f4cad930b56aa555b32dbe36ad81faaa21d43745854d19,0369c78f5ca7e19009f4cad930b56aa555b32dbe36ad81faaa21d43745854d19,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
 +docs/RECENT_SEVEN_DAYS_2026-11-08.md,untracked source,preexisting preserved,2740763fda8fa252d0eabc23a6b033a9bac51c5810d6a34f8fd19b605f91e8b4,2740763fda8fa252d0eabc23a6b033a9bac51c5810d6a34f8fd19b605f91e8b4,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
 +docs/REFACTOR_P0_BASELINE_2026-11-16.md,untracked source,preexisting preserved,6b4da44a179d408722bbf761b173f68760fa07d0d962d193324aa93ec71f3ebe,6b4da44a179d408722bbf761b173f68760fa07d0d962d193324aa93ec71f3ebe,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
-+docs/REFACTOR_P1_BASELINE_2026-11-16.md,untracked source,P1.1 modified,22292b351f34c1e0d61bf67c723b17dbfc57913455e27457e487ebabe4c9f4f2,2c894ac305197538d653d47d27772d5543859d974eca42e8f737ec5344d1c9c4,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
++docs/REFACTOR_P1_BASELINE_2026-11-16.md,untracked source,P1.1 modified,22292b351f34c1e0d61bf67c723b17dbfc57913455e27457e487ebabe4c9f4f2,91fcd4947382bc95e74b9c4ac81c208fa0d08339161715243eb2795fc15bd23c,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
 +docs/REFACTOR_P1_CHANGES_2026-11-16.patch,untracked source,preexisting preserved,b35b124a2a42e1a0ce111d72bc37c5a93fc3aea4290b578230f041237112022b,b35b124a2a42e1a0ce111d72bc37c5a93fc3aea4290b578230f041237112022b,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
 +docs/REFACTOR_P1_FAILURE_CLASSIFICATION_2026-11-16.csv,untracked source,preexisting preserved,4a61713f5c46b8205a3a17786751149861aa7e8b8c95f128426cb66b9e0821bd,4a61713f5c46b8205a3a17786751149861aa7e8b8c95f128426cb66b9e0821bd,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
 +docs/ROADMAP_APPRAISAL_2026-11-08.md,untracked source,preexisting preserved,456d82aad2a581489a9bc22d0af605e966c213445b4915a96aff693a0d7ca542,456d82aad2a581489a9bc22d0af605e966c213445b4915a96aff693a0d7ca542,G5_CONTEXT,ADD,INCLUDE,"Context P0/P1/P1.1, ADR/runbook/nguồn bằng chứng đã là source; không chạy lệnh vận hành trong tài liệu."
@@ -1331,10 +1359,10 @@ index 0000000..b3e4855
 +infra/seaweedfs/test_configure.py,untracked source,preexisting preserved,94adfe8e58cc1eef3e459102925b38b37336efb100b8845c62f9ca63e963af16,94adfe8e58cc1eef3e459102925b38b37336efb100b8845c62f9ca63e963af16,G4_INFRASTRUCTURE,ADD,INCLUDE,Source hạ tầng/operator đã tồn tại hoặc deletion baseline; không cấp quyền deploy/provision/cutover.
 +infra/seaweedfs/test_smoke.py,untracked source,preexisting preserved,ed64facec6044d7c5e2c43074fce9ee3dff3d1e637d132fa676a7264396c07d2,ed64facec6044d7c5e2c43074fce9ee3dff3d1e637d132fa676a7264396c07d2,G4_INFRASTRUCTURE,ADD,INCLUDE,Source hạ tầng/operator đã tồn tại hoặc deletion baseline; không cấp quyền deploy/provision/cutover.
 diff --git a/docs/REFACTOR_P1_BASELINE_2026-11-16.md b/docs/REFACTOR_P1_BASELINE_2026-11-16.md
-index 5836852..018f7a3 100644
+index 5836852..b21a642 100644
 --- a/docs/REFACTOR_P1_BASELINE_2026-11-16.md
 +++ b/docs/REFACTOR_P1_BASELINE_2026-11-16.md
-@@ -174,3 +174,456 @@ Source snapshot ngoài 15 file P1 có **627 file giữ nguyên hash**; HEAD khô
+@@ -174,3 +174,460 @@ Source snapshot ngoài 15 file P1 có **627 file giữ nguyên hash**; HEAD khô
  Ngoại lệ formatting có bằng chứng: `frontend/app/fonts/poppins/OFL.txt:21` có trailing whitespace nguyên bản upstream; giữ nguyên license với SHA-256 đã xác minh trong font README. Không có whitespace/encoding finding ở source hoặc tài liệu P1 tự viết. Scan cuối: working tree **657 text/5 binary chưa scan, 0 findings/blocked**; index **419 text/1 binary chưa scan, 0 findings/blocked**. Binary fonts có provenance/checksum, không được gọi là đã secret-scan text.
  
  Test service `bluedrive-tests-postgres-1` được dừng riêng sau khi số test DB còn lại là 0; tmpfs `/var/lib/postgresql` đã xác minh, không xóa Docker volumes. Runtime serving/Filer/SeaweedFS không bị restart hoặc cleanup. Không commit/push/deploy hoặc thực thi P2–P8. Gate GitHub Actions remote vẫn **BLOCKED / NOT RUN** theo ranh giới nhiệm vụ.
@@ -1791,6 +1819,10 @@ index 5836852..018f7a3 100644
 +Nhóm tài liệu có một trailing space đơn ở roadmap Windows, đã bỏ đúng ký tự đó. Hai patch evidence giữ nguyên context/removed-line whitespace để không làm hỏng patch; kiểm tính đúng bằng apply-check trên các review copies, không trim nội dung patch như source. Source/index security vẫn kiểm toàn bộ artifacts, không miễn trừ credential scanner.
 +
 +**Current acceptance: PENDING REMOTE CI.** Tái sử dụng local evidence §12.7 (595 PASS/19 SKIP full, 72 enabled, 6 auth fixtures, 30 guards, 2 no-DB; frontend §12.4). Chạy source/index security phù hợp trước publish; không lặp lại regression đã đạt cho thay đổi tài liệu. Chưa có remote PASS/SHA/PR evidence ở thời điểm quyết định này. Chỉ chuyển FINAL ACCEPTED khi repository-safety, backend và frontend PASS trên cùng SHA thực tế. P2 chỉ triển khai sau gate đó; không bắt đầu migration serving hoặc provisioning storage.
++
++**Remote CI lần đầu đã chạy:** bốn commits theo nhóm đã push lên `refactor/p1-baseline-acceptance`, tip `d86987086fe3000e9cdc54cd59a34417480b14d1`, [Draft PR #1](https://github.com/binos2303/BlueDrive/pull/1). [Run 43899445763](https://github.com/binos2303/BlueDrive/actions/runs/43899445763) FAIL có log thực tế: safety/backend dừng ở setup-python vì Ubuntu 26.04 không có binary 3.12.10; frontend lint/typegen/TypeScript đã qua, unit discovery dừng với `rg: command not found`, chưa thực thi tests/build. Đây không phải application assertion failure và skipped downstream steps không tính PASS.
++
++Fix CI tối thiểu: pin hai Python jobs vào `ubuntu-24.04`, giữ Python 3.12.10/dependencies và mọi security/test gate; frontend dùng `find` + NUL-delimited Bash array thay dependency `rg` không có trên runner. Giữ zero-discovery failure và cùng toàn bộ test files; không thêm apt/npm dependency hoặc tắt test. Đối chiếu [manifest binary Python chính thức](https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json) xác nhận build linux-x64 24.04 có sẵn. Sau fix phải chờ ba jobs PASS trên SHA mới; P1 vẫn PENDING trước evidence đó.
 diff --git a/docs/roadmaps/storage-control-center-2026-11-08/00_START_HERE_WINDOWS.md b/docs/roadmaps/storage-control-center-2026-11-08/00_START_HERE_WINDOWS.md
 index 2f100ac..2ef8a5c 100644
 --- a/docs/roadmaps/storage-control-center-2026-11-08/00_START_HERE_WINDOWS.md

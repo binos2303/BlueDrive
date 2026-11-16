@@ -14,7 +14,8 @@ concurrency:
 
 jobs:
   repository-safety:
-    runs-on: ubuntu-latest
+    # CPython 3.12.10 có binary cho Ubuntu 24.04; ubuntu-latest đã chuyển sang 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,7 +55,7 @@ jobs:
       - name: Frontend unit regression
         shell: bash
         run: |
-          mapfile -t test_files < <(rg --files components lib -g '*.test.mts')
+          mapfile -d '' -t test_files < <(find components lib -type f -name '*.test.mts' -print0)
           if ((${#test_files[@]} == 0)); then
             echo 'FAIL: no frontend unit tests discovered'
             exit 1
@@ -63,7 +64,7 @@ jobs:
       - run: npm run build
 
   backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
