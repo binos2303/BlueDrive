@@ -4,6 +4,7 @@ export type AccountType = "individual" | "business" | "unclassified";
 
 export type AccountSnapshot = {
   is_platform_admin?: boolean;
+  myDrive?: { tenantId: string; workspaceId: string; ownership: "organization" | "personal" };
   profile: {
     username: string;
     email: string;

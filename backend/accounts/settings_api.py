@@ -6,7 +6,7 @@ from rest_framework.decorators import api_view, authentication_classes, permissi
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from accounts.access import get_default_tenant, get_default_workspace, resolve_request_workspace
+from accounts.access import get_default_tenant, get_default_workspace, get_organization_identity, resolve_request_workspace
 from accounts.models import QuotaAccount, Tenant
 from accounts.services import get_personal_tenant
 from files.models import File
@@ -17,8 +17,8 @@ from logs.models import ActivityLog, SearchHistory
 
 def _selected_workspace(request):
     try:
-        tenant = get_default_tenant(request.user)
-        workspace = resolve_request_workspace(request, tenant)
+        workspace = resolve_request_workspace(request)
+        tenant = workspace.tenant if workspace is not None else None
     except Exception:
         return None, None
     if workspace is None:
@@ -36,7 +36,7 @@ def my_quota_view(request):
 
     # Shared workspaces have a separate quota, visible to authorized members;
     # do not reveal personal My Drive usage to collaborators.
-    if not workspace.is_default:
+    if not workspace.is_my_drive:
         from accounts.access import can_access_workspace
         if not can_access_workspace(request.user, workspace):
             return Response({"detail": "Workspace unavailable."}, status=404)
@@ -253,6 +253,8 @@ def my_search_history_view(request):
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def delete_my_drive_data_view(request):
+    if get_organization_identity(request.user) is not None:
+        return Response({"detail": "Organization data is retained; self-service permanent deletion is unavailable."}, status=403)
     if not isinstance(request.data, dict) or set(request.data) != {"confirmation", "password"}:
         return Response({"detail": "Confirmation and current password are required."}, status=400)
     if request.data.get("confirmation") != "DELETE MY DRIVE":

@@ -158,8 +158,8 @@ def create_upload(request):
         workspace = folder.workspace
     else:
         try:
-            tenant = get_default_tenant(request.user)
-            workspace = resolve_request_workspace(request, tenant, data)
+            workspace = resolve_request_workspace(request, payload=data)
+            tenant = workspace.tenant if workspace is not None else None
             if workspace is None:
                 return Response(
                     {"detail": "Workspace is unavailable or not accessible."},

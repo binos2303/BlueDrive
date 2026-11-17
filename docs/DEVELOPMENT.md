@@ -37,6 +37,8 @@ The path above matches the current workstation; adapt it on other machines.
 
 **Storage caution:** `docs/MINIO_STORAGE_ADAPTER.md` and the MinIO cutover sections of earlier runbooks are historical; some referenced commands/config files no longer exist in the P0 working tree. Use the SeaweedFS/Enterprise runbooks for source configuration and P0 for current gaps. **Never run `docker compose down -v`, delete volumes, or remove a bind mount as a cleanup step.** Validate instructions against the actual deployment before approved operations.
 
+**P2 Organization accounts (development):** xem [ADR-0012](ADR-0012-organization-managed-identities-and-private-my-drive.md) và [API contract](API_CONTRACT_V1.md#p2-organization-provisioning--2026-11-17). Không convert account hiện hữu hoặc chạy migration P2 trên database phục vụ nếu chưa được phê duyệt. Provisioning mới yêu cầu invitation/email gate hiện có và finite Tenant/Member quotas; không bật flag, đổi email credentials hoặc tự bind Enterprise storage để chữa lỗi test. Các test `accounts.test_organization_identity` và `accounts.test_organization_provisioning` dùng PostgreSQL test riêng, locmem email và account fixture. Shared context/quota changes yêu cầu full regression; UI mocked E2E không chứng nhận invitation delivery hoặc provider thật.
+
 ## 3. Start the application
 
 Run these from separate PowerShell terminals. Use the repository-root `.venv` for Django and local npm for Next.js.

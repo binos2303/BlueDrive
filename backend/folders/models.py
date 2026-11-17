@@ -111,9 +111,9 @@ class Folder(models.Model):
                 ).values_list("workspace_id", flat=True).first()
             if self.workspace_id is None:
                 from accounts.models import Tenant
-                from accounts.access import get_default_workspace
+                from accounts.access import resource_default_workspace
                 tenant = Tenant.objects.get(pk=self.tenant_id)
-                self.workspace_id = get_default_workspace(tenant).pk
+                self.workspace_id = resource_default_workspace(self.owner, tenant).pk
         super().save(*args, **kwargs)
 
     def __str__(self):

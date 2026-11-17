@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from accounts.api_views import require_csrf
+from accounts.access import active_membership
 from accounts.models import Membership, QuotaAccount, QuotaAuditEvent, Tenant, Workspace
 from accounts.quota_admin_api import MAX_BYTES, _summary
 
@@ -17,11 +18,8 @@ def _administrator(user, tenant_id):
     ).first()
     if tenant is None or not getattr(user, "is_active", False):
         return None
-    member = Membership.objects.filter(
-        tenant=tenant, user=user, status=Membership.Status.ACTIVE,
-        role__in=[Membership.Role.OWNER, Membership.Role.ADMIN],
-    ).first()
-    return tenant if member is not None else None
+    member = active_membership(user, tenant.pk)
+    return tenant if member is not None and member.role in (Membership.Role.OWNER, Membership.Role.ADMIN) else None
 
 
 @require_csrf
@@ -77,7 +75,7 @@ def organization_quota_view(request, tenant_id):
             )
         else:
             try:
-                workspace = Workspace.objects.filter(pk=target, tenant=tenant, is_default=False).first()
+                workspace = Workspace.objects.filter(pk=target, tenant=tenant, is_default=False, owned_identity__isnull=True).first()
             except (ValueError, ValidationError):
                 return Response({"detail": "Invalid workspace ID."}, status=400)
             if workspace is None:

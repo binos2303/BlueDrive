@@ -21,11 +21,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from logs.models import ActivityLog
+from .api_views import require_csrf
 from .access import (
     active_membership,
     can_access_workspace,
     can_manage_workspace,
     get_default_workspace,
+    get_organization_identity,
     workspace_role_for_user,
 )
 from .models import (
@@ -74,6 +76,7 @@ def _workspace_context(request, tenant_id, workspace_id, *, require_manager=Fals
     workspace = Workspace.objects.filter(
         pk=workspace_id,
         tenant=tenant,
+        owned_identity__isnull=True,
     ).first()
     if workspace is None:
         return None, None, Response(
@@ -171,30 +174,26 @@ def _serialize_workspace(workspace, user):
     }
 
 
-@api_view(["GET"])
+@require_csrf
+@api_view(["GET", "POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def organization_members_view(request, tenant_id):
+    from .organization_api import create_employee_response, member_capabilities, member_data
+
     tenant, _actor_membership, error = _tenant_context(
         request, tenant_id, require_admin=True
     )
     if error:
         return error
-    rows = Membership.objects.filter(tenant=tenant).select_related("user").order_by(
+    if request.method == "POST":
+        return create_employee_response(request, tenant_id)
+    rows = Membership.objects.filter(tenant=tenant).select_related("user__organization_identity__my_drive").order_by(
         "user__username", "id"
     )
     return Response({
-        "members": [
-            {
-                "membershipId": str(row.pk),
-                "userId": row.user_id,
-                "username": row.user.get_username(),
-                "email": row.user.email,
-                "role": row.role,
-                "status": row.status,
-            }
-            for row in rows
-        ]
+        "members": [member_data(row) for row in rows],
+        "capabilities": member_capabilities(request.user, tenant),
     })
 
 
@@ -212,7 +211,7 @@ def workspaces_view(request, tenant_id):
         # Ensure legacy tenants created after the migration still acquire a
         # default workspace without creating a second tenant abstraction.
         get_default_workspace(tenant)
-        rows = Workspace.objects.filter(tenant=tenant).order_by("-is_default", "name")
+        rows = Workspace.objects.filter(tenant=tenant, owned_identity__isnull=True).order_by("-is_default", "name")
         if actor_membership.role not in ADMIN_ROLES:
             accessible_ids = set(
                 WorkspaceMembership.objects.filter(
@@ -437,7 +436,7 @@ def _managed_workspace(request, workspace_id):
         tenant__status=Tenant.Status.ACTIVE,
         status=Workspace.Status.ACTIVE,
     ).first()
-    if workspace is None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
+    if workspace is None or workspace.owned_identity_id is not None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
         return None, Response({"detail": "Workspace is unavailable."}, status=404)
     if active_membership(request.user, workspace.tenant_id) is None or not can_access_workspace(request.user, workspace):
         return None, Response({"detail": "Workspace is unavailable."}, status=404)
@@ -543,7 +542,7 @@ def my_workspace_member_detail_view(request, workspace_id, assignment_id):
             tenant__status=Tenant.Status.ACTIVE,
             status=Workspace.Status.ACTIVE,
         ).first()
-        if workspace is None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
+        if workspace is None or workspace.owned_identity_id is not None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
             return Response({"detail": "Workspace is unavailable."}, status=404)
         if active_membership(request.user, workspace.tenant_id) is None or not can_access_workspace(request.user, workspace):
             return Response({"detail": "Workspace is unavailable."}, status=404)
@@ -605,6 +604,7 @@ def my_workspaces_view(request):
             tenant__memberships__status=Membership.Status.ACTIVE,
             tenant__status=Tenant.Status.ACTIVE,
             status=Workspace.Status.ACTIVE,
+            owned_identity__isnull=True,
         ).select_related("tenant", "tenant__personal_owner", "created_by").distinct()
         workspaces = []
         for workspace in rows:
@@ -633,6 +633,8 @@ def my_workspaces_view(request):
         return Response({"detail": "Default member role must be viewer or editor."}, status=400)
 
     try:
+        if get_organization_identity(request.user) is not None:
+            return Response({"detail": "Create organization workspaces through organization administration."}, status=403)
         tenant = get_personal_tenant(request.user)
         owner_membership = active_membership(request.user, tenant.pk)
         if owner_membership is None or tenant.personal_owner_id != request.user.pk:
@@ -676,7 +678,7 @@ def my_workspace_detail_view(request, workspace_id):
         pk=workspace_id,
         tenant__status=Tenant.Status.ACTIVE,
     ).first()
-    if workspace is None:
+    if workspace is None or workspace.owned_identity_id is not None:
         return Response({"detail": "Workspace is unavailable."}, status=404)
     if not can_manage_workspace(request.user, workspace):
         return Response({"detail": "Workspace administrator access is required."}, status=403)
@@ -731,7 +733,7 @@ def create_workspace_invite_view(request, workspace_id):
         tenant__status=Tenant.Status.ACTIVE,
         status=Workspace.Status.ACTIVE,
     ).first()
-    if workspace is None:
+    if workspace is None or workspace.owned_identity_id is not None:
         return Response({"detail": "Workspace is unavailable."}, status=404)
     if not can_manage_workspace(request.user, workspace):
         return Response({"detail": "Only workspace managers can invite members."}, status=403)
@@ -818,6 +820,7 @@ def _invite_is_usable(invitation):
         and invitation.accepted_at is None
         and invitation.expires_at > timezone.now()
         and invitation.workspace.status == Workspace.Status.ACTIVE
+        and invitation.workspace.owned_identity_id is None
         and invitation.workspace.tenant.status == Tenant.Status.ACTIVE
     )
 

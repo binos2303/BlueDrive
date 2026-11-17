@@ -135,8 +135,8 @@ def file_upload(request):
                 continue
         else:
             try:
-                tenant = get_default_tenant(request.user)
-                workspace = resolve_request_workspace(request, tenant)
+                workspace = resolve_request_workspace(request)
+                tenant = workspace.tenant if workspace is not None else None
                 if workspace is not None:
                     tenant = workspace.tenant
             except Exception:

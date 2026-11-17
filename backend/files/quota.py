@@ -78,7 +78,7 @@ def reserve_upload_quota(upload_session_id, user):
         raise QuotaStateError("Upload has no workspace scope.")
     if upload.workspace.status != "active":
         raise QuotaStateError("Workspace is not active.")
-    if upload.workspace.is_default:
+    if upload.workspace.is_my_drive:
         requested_accounts = QuotaAccount.objects.filter(
             tenant_id=upload.tenant_id, scope=QuotaAccount.Scope.TENANT,
         )
@@ -100,7 +100,7 @@ def reserve_upload_quota(upload_session_id, user):
         .filter(pk__in=requested_accounts.values("pk"))
         .order_by("pk")
     }
-    if upload.workspace.is_default:
+    if upload.workspace.is_my_drive:
         if not any(account.scope == QuotaAccount.Scope.TENANT for account in accounts_by_id.values()):
             raise QuotaStateError("The My Drive quota is not configured.")
         if upload.tenant.kind == Tenant.Kind.BUSINESS and not any(

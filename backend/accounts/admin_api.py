@@ -24,6 +24,7 @@ def active_collaboration_workspaces():
     """
     return Workspace.objects.filter(
         is_default=False,
+        owned_identity__isnull=True,
         status=Workspace.Status.ACTIVE,
         tenant__status=Tenant.Status.ACTIVE,
     )
@@ -186,11 +187,16 @@ def _requested_page(request):
         return 1
 
 
-@api_view(["GET"])
+@require_csrf
+@api_view(["GET", "POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsPlatformAdmin])
 def admin_organizations_view(request):
-    """Read-only organization directory; never exposes tenant-owned content."""
+    """Quản lý Organization và identity mới; không cấp quyền đọc nội dung tenant."""
+    from .organization_api import create_organization_response
+    from .organization_provisioning import invitation_available, organization_row
+    if request.method == "POST":
+        return create_organization_response(request)
     queryset = Tenant.objects.filter(kind=Tenant.Kind.BUSINESS)
     query = str(request.query_params.get("q", "")).strip()[:100]
     if query:
@@ -200,6 +206,7 @@ def admin_organizations_view(request):
         filter=Q(
             status=Tenant.Status.ACTIVE,
             workspaces__is_default=False,
+            workspaces__owned_identity__isnull=True,
             workspaces__status=Workspace.Status.ACTIVE,
         ),
         distinct=True,
@@ -207,12 +214,10 @@ def admin_organizations_view(request):
     page = _requested_page(request)
     count = queryset.count()
     results = queryset.order_by("-created_at", "pk")[(page - 1) * 20:page * 20]
-    return Response({"count": count, "page": page, "page_size": 20, "results": [
-        {"id": str(tenant.pk), "name": tenant.name, "status": tenant.status,
-         "workspaces": tenant.workspace_count,
-         "created_at": tenant.created_at.isoformat()}
-        for tenant in results
-    ]})
+    ready = invitation_available()
+    return Response({"count": count, "page": page, "page_size": 20,
+                     "results": [organization_row(tenant) for tenant in results],
+                     "capabilities": {"createOrganization": ready, "reinviteOrganization": ready}})
 
 
 @api_view(["GET"])

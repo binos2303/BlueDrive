@@ -20,7 +20,7 @@ class Command(BaseCommand):
         parser.add_argument("--apply", action="store_true", help="Commit changes after offline maintenance checks.")
 
     def handle(self, *args, **options):
-        workspace_qs = Workspace.objects.filter(is_default=False).order_by("tenant_id", "id")
+        workspace_qs = Workspace.objects.filter(is_default=False, owned_identity__isnull=True).order_by("tenant_id", "id")
         missing = workspace_qs.exclude(quota_accounts__scope=QuotaAccount.Scope.WORKSPACE)
         count = missing.count()
         self.stdout.write(f"Legacy workspaces without dedicated accounts: {count}")

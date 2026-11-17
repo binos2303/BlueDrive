@@ -1,6 +1,6 @@
 from django.db import transaction
 
-from accounts.models import Membership, QuotaAccount, StoragePlan, Tenant, WorkspaceMembership
+from accounts.models import Membership, OrganizationIdentity, QuotaAccount, StoragePlan, Tenant, Workspace, WorkspaceMembership
 from accounts.access import get_default_workspace
 from accounts.platform_admin import is_platform_admin
 
@@ -33,6 +33,8 @@ def get_personal_tenant(user):
 
     if user.is_staff or user.is_superuser or is_platform_admin(user):
         raise PermissionError("Platform administrators cannot provision personal drives.")
+    if OrganizationIdentity.objects.filter(user_id=user.pk).exists():
+        raise PermissionError("Organization-managed accounts cannot provision personal drives.")
 
     tenant, _ = Tenant.objects.get_or_create(
         personal_owner=user,
@@ -77,3 +79,20 @@ def get_personal_tenant(user):
         )
 
     return tenant
+
+
+@transaction.atomic
+def provision_organization_drive(identity):
+    """Cấp ngăn riêng trước activation; không mượn quota/cấu hình storage Personal."""
+    identity = OrganizationIdentity.objects.select_for_update().select_related("tenant", "user").get(pk=identity.pk)
+    identity.clean()
+    existing = Workspace.objects.filter(owned_identity=identity).first()
+    if existing is not None:
+        return existing
+    slug = f"my-drive-{identity.user_id}"
+    if Workspace.objects.filter(tenant=identity.tenant, slug=slug).exists():
+        raise ValueError("My Drive slug conflicts with an existing workspace.")
+    return Workspace.objects.create(
+        tenant=identity.tenant, owned_identity=identity, name="My Drive", slug=slug,
+        is_default=False, created_by=identity.invited_by,
+    )

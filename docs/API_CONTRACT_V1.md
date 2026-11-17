@@ -4,7 +4,7 @@
 
 > Historical baseline note: the contract below describes the pre-tenant API review. The B upload endpoints currently implemented by the repository are unversioned Django routes and are documented in the implementation addendum at the end; this file's proposed `/api/v1` namespace is not an implemented route prefix.
 
-**Status:** v1 remains a contract proposal. The unversioned account-authentication routes listed in §4 have been implemented; they are not yet the versioned v1 endpoints.
+**Status:** v1 remains a contract proposal. Unversioned implementation addenda, including P2 below, describe the repository behavior; they do not implement the proposed versioned namespace.
 
 **Versioned namespace:** `/api/v1`. Existing Django routes remain legacy routes until a separately reviewed migration/compatibility plan is approved.
 
@@ -403,3 +403,24 @@ Telemetry metrics are allowlisted numbers in bytes/seconds/percent/bytes-per-sec
 SSE sends `event: resync`, `data: {}` and `id: {cluster_uuid}:{revision}:{0|1 stale}`; the client refetches one scoped snapshot. No per-node fetch loop. Last-Event-ID must have the same cluster UUID, bounded numeric revision and stale bit, otherwise400. Initial cursor mismatch triggers resync; matching cursor waits for a change. Heartbeat5s, finite stream~60s, native reconnect/cursor, no URL token, no-transform and X-Accel-Buffering=no. Session, password hash and grants are checked each tick; `event: access_revoked` closes access. Browser keeps30s snapshot reconciliation and client-side expiry even during SSE failure. This behavior is code/fixture verified; reverse-proxy deployment remains G4.
 
 ACK200 returns `{alert,unchanged}`. Acknowledging an already acknowledged incident is idempotent. A different active version or resolved unacknowledged incident409 alert_revision_conflict; malformed body400; foreign alert404. ACK does not resolve an incident or restore health. Fresh verified samples resolve conditions; source failure preserves existing critical incidents. Generation/profile revision fencing and row locks prevent late collector results replacing newer state. Raw metric history remains upstream TSDB. See ADR-0005 and the S4 runbook.
+
+## P2 Organization provisioning — 2026-11-17
+
+Phạm vi development theo [ADR-0012](ADR-0012-organization-managed-identities-and-private-my-drive.md). Các route dưới đây giữ session/CSRF và namespace hiện có. Schema chỉ được kiểm chứng trên PostgreSQL test riêng; không chứng nhận đã rollout serving. Tenant business là Organization, không có Organization model thứ hai.
+
+| Route | Actor, input và kết quả |
+| --- | --- |
+| GET/POST `/accounts/api/admin/organizations/` | Platform Admin. GET giữ directory/pagination, thêm `capabilities` và `pendingAdministratorInvitation`. POST chỉ nhận `{name,slug,admin:{username,email},limit_bytes,member_limit_bytes,reason}` cùng UUID `Idempotency-Key`; tạo Tenant, initial OWNER invited và My Drive riêng. |
+| GET/POST `/accounts/api/tenants/{tenant}/members/` | Active Org OWNER/ADMIN. GET giữ `members`, thêm `managed`, `myDriveWorkspaceId` và capabilities. POST chỉ nhận `{username,email,limit_bytes,reason}` cùng UUID `Idempotency-Key`; chỉ tạo MEMBER mới trong đúng Organization. |
+| POST `/accounts/api/admin/organizations/{tenant}/reinvite/` | Platform Admin; `{reason}`; chỉ initial managed administrator còn pending. |
+| POST `/accounts/api/tenants/{tenant}/memberships/{membership}/reinvite/` | Org OWNER/ADMIN; `{reason}`; chỉ managed MEMBER pending trong đúng Tenant. |
+| POST `/accounts/api/organization-invite/accept/` | Public, bắt buộc CSRF; `{uid,token,password1,password2}`; token còn hiệu lực, account pending và password hợp lệ thì trả `{activated:true}`. Không tự đăng nhập. |
+| POST `/accounts/api/tenants/{tenant}/memberships/{membership}/{suspend|restore}/` | Org OWNER/ADMIN; giữ API MEMBER hiện có, không nhận reason. Managed account suspend chặn login, restore chỉ cho account đã activation; bảo toàn identity, content, quota và audit. |
+
+Creation trả `201`, replay cùng actor/payload trả `200`, conflict trả `409`; response `{member,myDrive:{tenantId,workspaceId,ownership:"organization"},storageReady}` và thêm `organization` khi tạo Organization. API không trả password hoặc activation link. Replay vẫn kiểm quyền hiện hành; không tạo thêm account, quota hoặc email. Không attach, promote hoặc đổi password tài khoản đã tồn tại. Limits là số nguyên hữu hạn không âm, member limit không vượt Tenant limit; `reason` dài 8–500 ký tự. Field errors dùng `fieldErrors` với keys phẳng, gồm `admin.username`/`admin.email`.
+
+Invitation reuse `ADMIN_INVITES_ENABLED` và email gate hiện có; chưa cấu hình thì creation trả `503`, không tạo identity dang dở. Không dùng console/file/dummy mail backend để tránh ghi token. Người nhận inactive, non-staff, password unusable cho tới activation; reinvite chỉ pending và làm link cũ mất hiệu lực. Frontend `/organization-invite` nhận `uid`/`token` trong URL fragment và xóa fragment ngay, không dùng query hoặc browser persistence. Locmem chỉ phục vụ fixture test; không gửi email thật trong nghiệm thu development.
+
+`GET /accounts/api/me/` trả thêm `myDrive` home pointer, độc lập current selected Workspace. Không có selector, managed employee dùng own My Drive trong Organization; selector explicit phải được authorize trước lookup mặc định. Missing/revoked home membership hoặc thiếu private drive bị deny, không fallback Personal/General. Personal account hiện hữu giữ behavior cũ. Owned My Drive không nằm trong collaborative Workspace directory hoặc API invite/archive/membership thông thường. Org/Platform Admin không có quyền nội dung ngầm; explicit share vẫn theo policy hiện có. Business My Drive tính Tenant + Member quota, không nhận Workspace starter quota.
+
+`storageReady` là kiểm tra metadata binding/revision phù hợp tại thời điểm response, không phải provider health hoặc nghiệm thu storage thật. P2 không tạo/bind cluster, đổi routing, key hoặc credentials. Thiếu Enterprise binding tiếp tục fail closed cho upload. Không convert tài khoản hoặc di chuyển dữ liệu cũ; migration/rollout serving cần phê duyệt riêng.

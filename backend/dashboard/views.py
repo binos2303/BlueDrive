@@ -146,10 +146,7 @@ def drive_items_api(request):
         tenant = folder.tenant
         workspace = folder.workspace
     else:
-        tenant = get_default_tenant(request.user)
-        if tenant is None:
-            raise Http404
-        workspace = resolve_request_workspace(request, tenant)
+        workspace = resolve_request_workspace(request)
         if workspace is None:
             raise Http404
         tenant = workspace.tenant
@@ -520,10 +517,7 @@ def bulk_action(request):
     file_ids = _parse_ids(request, "file_ids")
     folder_ids = _parse_ids(request, "folder_ids")
     current_folder_id = request.POST.get("current_folder_id") or None
-    tenant = get_default_tenant(request.user)
-    if tenant is None:
-        raise Http404
-    workspace = resolve_request_workspace(request, tenant)
+    workspace = resolve_request_workspace(request)
     if workspace is None:
         raise Http404("Workspace is unavailable or not accessible.")
     tenant = workspace.tenant
@@ -659,10 +653,7 @@ def bulk_paste(request):
         return file_paste(request)
 
     destination_id = request.POST.get("folder_id") or None
-    tenant = get_default_tenant(request.user)
-    if tenant is None:
-        raise Http404
-    workspace = resolve_request_workspace(request, tenant)
+    workspace = resolve_request_workspace(request)
     if workspace is None:
         raise Http404("Workspace is unavailable or not accessible.")
     tenant = workspace.tenant
