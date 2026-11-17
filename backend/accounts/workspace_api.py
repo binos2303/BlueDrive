@@ -10,10 +10,12 @@ import hashlib
 import secrets
 
 from django.core.exceptions import ValidationError
+from django.contrib.auth import get_user_model
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
+from django.views.decorators.debug import sensitive_variables
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -36,6 +38,7 @@ from .models import (
     Workspace,
     WorkspaceInvite,
     WorkspaceMembership,
+    WorkspaceRemovalRequest,
 )
 from .services import get_personal_tenant
 
@@ -133,6 +136,24 @@ def _audit(request, tenant, action, description, **metadata):
         description=description[:500],
         metadata=metadata,
     )
+
+
+def _member_removal_capabilities(user, workspace):
+    """Quản lý Workspace không thay quyền phê duyệt nhân sự của Organization."""
+    member = active_membership(user, workspace.tenant_id)
+    manager = bool(member and can_manage_workspace(user, workspace))
+    organization = workspace.tenant.kind == Tenant.Kind.BUSINESS
+    organization_admin = bool(member and member.role in ADMIN_ROLES)
+    return {
+        "removeMembers": manager and (not organization or organization_admin),
+        "requestMemberRemoval": manager and organization and not organization_admin,
+    }
+
+
+def _pending_removal_ids(workspace):
+    return {str(assignment): str(pk) for assignment, pk in WorkspaceRemovalRequest.objects.filter(
+        workspace=workspace, status=WorkspaceRemovalRequest.Status.PENDING,
+    ).values_list("assignment_id", "pk")}
 
 
 def _serialize_workspace(workspace, user):
@@ -328,6 +349,7 @@ def workspace_members_view(request, tenant_id, workspace_id):
         return error
 
     if request.method == "GET":
+        pending = _pending_removal_ids(workspace)
         rows = WorkspaceMembership.objects.filter(workspace=workspace).select_related(
             "membership__user"
         ).order_by("membership__user__username")
@@ -341,10 +363,19 @@ def workspace_members_view(request, tenant_id, workspace_id):
                 "organizationRole": row.membership.role,
                 "workspaceRole": row.role,
                 "status": row.status,
+                "pendingRemovalRequestId": pending.get(str(row.pk)),
             }
             for row in rows
-        ]})
+        ], "capabilities": _member_removal_capabilities(request.user, workspace)})
 
+    return _assign_workspace_member(request, tenant, workspace)
+
+
+@transaction.atomic
+def _assign_workspace_member(request, tenant, workspace):
+    workspace, error = _locked_member_workspace(request, workspace.pk)
+    if error is not None:
+        return error
     membership_id = request.data.get("membership_id") if isinstance(request.data, dict) else None
     role = request.data.get("role", WorkspaceMembership.Role.VIEWER) if isinstance(request.data, dict) else None
     if (
@@ -359,7 +390,7 @@ def workspace_members_view(request, tenant_id, workspace_id):
         return Response({"detail": "Invalid workspace role."}, status=400)
     if workspace.status != Workspace.Status.ACTIVE:
         return Response({"detail": "Archived workspaces cannot receive members."}, status=409)
-    target = Membership.objects.filter(
+    target = Membership.objects.select_for_update(of=("self",)).filter(
         pk=membership_id,
         tenant=tenant,
         status=Membership.Status.ACTIVE,
@@ -367,6 +398,12 @@ def workspace_members_view(request, tenant_id, workspace_id):
     ).select_related("user").first()
     if target is None:
         return Response({"detail": "Active organization member not found."}, status=404)
+    existing = WorkspaceMembership.objects.select_for_update().filter(workspace=workspace, membership=target).first()
+    if existing is not None and existing.status == WorkspaceMembership.Status.ACTIVE and role != existing.role:
+        if target.user_id == request.user.pk:
+            return Response({"detail": "You cannot change your own workspace role."}, status=409)
+        if role != WorkspaceMembership.Role.ADMIN and not _can_remove_workspace_admin(workspace, existing):
+            return Response({"detail": "The workspace must retain at least one manager."}, status=409)
     assignment, created = WorkspaceMembership.objects.update_or_create(
         workspace=workspace,
         membership=target,
@@ -398,32 +435,28 @@ def workspace_members_view(request, tenant_id, workspace_id):
     }}, status=201 if created else 200)
 
 
+@require_csrf
 @api_view(["DELETE"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def workspace_member_detail_view(request, tenant_id, workspace_id, membership_id):
-    tenant, workspace, error = _workspace_context(
-        request, tenant_id, workspace_id, require_manager=True
-    )
-    if error:
-        return error
-    assignment = WorkspaceMembership.objects.filter(
-        workspace=workspace,
-        membership_id=membership_id,
-        status=WorkspaceMembership.Status.ACTIVE,
-    ).select_related("membership__user").first()
-    if assignment is None:
-        return Response({"detail": "Workspace membership not found."}, status=404)
-    assignment.status = WorkspaceMembership.Status.REVOKED
-    assignment.save(update_fields=["status", "updated_at"])
-    _audit(
-        request,
-        tenant,
-        ActivityLog.Action.REMOVE_WORKSPACE_MEMBER,
-        f"Removed {assignment.membership.user.get_username()} from workspace {workspace.name}",
-        workspace_id=str(workspace.pk),
-        membership_id=str(assignment.membership_id),
-    )
+    with transaction.atomic():
+        tenant, workspace, error = _workspace_context(request, tenant_id, workspace_id, require_manager=True)
+        if error is not None:
+            return error
+        workspace, error = _locked_member_workspace(request, workspace.pk)
+        if error is not None:
+            return error
+        assignment = WorkspaceMembership.objects.select_for_update(of=("self",)).select_related("membership__user").filter(
+            workspace=workspace, membership_id=membership_id, status=WorkspaceMembership.Status.ACTIVE,
+            membership__status=Membership.Status.ACTIVE, membership__user__is_active=True,
+        ).first()
+        if assignment is None:
+            return Response({"detail": "Workspace membership not found."}, status=404)
+        error = _direct_removal_error(request.user, workspace, assignment)
+        if error is not None:
+            return error
+        _revoke_workspace_assignment(request, workspace, assignment)
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -445,7 +478,7 @@ def _managed_workspace(request, workspace_id):
     return workspace, None
 
 
-def _serialize_managed_member(assignment, viewer):
+def _serialize_managed_member(assignment, viewer, pending=None):
     member = assignment.membership
     protected = member.role in ADMIN_ROLES
     return {
@@ -459,6 +492,7 @@ def _serialize_managed_member(assignment, viewer):
         "status": assignment.status,
         "isSelf": member.user_id == viewer.pk,
         "isProtected": protected,
+        "pendingRemovalRequestId": (pending or {}).get(str(assignment.pk)),
     }
 
 
@@ -484,7 +518,8 @@ def my_workspace_members_view(request, workspace_id):
     ).select_related("membership__user").order_by("membership__user__username", "pk")
     total = rows.count()
     start = (page - 1) * size
-    members = [_serialize_managed_member(row, request.user) for row in rows[start:start + size]]
+    pending = _pending_removal_ids(workspace)
+    members = [_serialize_managed_member(row, request.user, pending) for row in rows[start:start + size]]
     result = Response({
         "workspaceId": str(workspace.pk),
         "workspaceName": workspace.name,
@@ -493,6 +528,7 @@ def my_workspace_members_view(request, workspace_id):
         "page": page,
         "pageSize": size,
         "hasNext": start + size < total,
+        "capabilities": _member_removal_capabilities(request.user, workspace),
     })
     result["Cache-Control"] = "private, no-store"
     return result
@@ -519,6 +555,55 @@ def _can_remove_workspace_admin(workspace, assignment):
     ).exclude(pk=assignment.pk).exists()
 
 
+def _locked_member_workspace(request, workspace_id):
+    initial = Workspace.objects.filter(pk=workspace_id).values("tenant_id").first()
+    tenant = Tenant.objects.select_for_update().filter(pk=initial["tenant_id"], status=Tenant.Status.ACTIVE).first() if initial else None
+    if tenant is None:
+        return None, Response({"detail": "Workspace is unavailable."}, status=404)
+    workspace = Workspace.objects.select_for_update(of=("self",)).select_related("tenant").filter(
+        pk=workspace_id, tenant=tenant, status=Workspace.Status.ACTIVE,
+    ).first()
+    if workspace is None or workspace.owned_identity_id is not None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
+        return None, Response({"detail": "Workspace is unavailable."}, status=404)
+    actor = get_user_model().objects.select_for_update().get(pk=request.user.pk)
+    if active_membership(actor, workspace.tenant_id) is None or not can_access_workspace(actor, workspace):
+        return None, Response({"detail": "Workspace is unavailable."}, status=404)
+    if not can_manage_workspace(actor, workspace):
+        return None, Response({"detail": "Workspace manager access is required."}, status=403)
+    return workspace, None
+
+
+def _removal_target_error(user, workspace, assignment):
+    if assignment.membership.user_id == user.pk:
+        return Response({"detail": "You cannot change or revoke your own workspace access."}, status=409)
+    if assignment.membership.role in ADMIN_ROLES:
+        return Response({"detail": "Organization owners and administrators must be managed at organization level."}, status=403)
+    if not _can_remove_workspace_admin(workspace, assignment):
+        return Response({"detail": "The workspace must retain at least one manager."}, status=409)
+    return None
+
+
+def _direct_removal_error(user, workspace, assignment):
+    error = _removal_target_error(user, workspace, assignment)
+    if error is not None:
+        return error
+    if not _member_removal_capabilities(user, workspace)["removeMembers"]:
+        return Response({"detail": "Request organization administrator approval to remove this member.",
+                         "code": "removal_approval_required"}, status=403)
+    return None
+
+
+def _revoke_workspace_assignment(request, workspace, assignment, removal_request=None):
+    assignment.status = WorkspaceMembership.Status.REVOKED
+    assignment.save(update_fields=["status", "updated_at"])
+    _audit(request, workspace.tenant, ActivityLog.Action.REMOVE_WORKSPACE_MEMBER,
+           f"Removed {assignment.membership.user.get_username()} from workspace {workspace.name}",
+           workspace_id=str(workspace.pk), membership_id=str(assignment.membership_id),
+           operation="revoked", previous_role=assignment.role,
+           removal_request_id=str(removal_request.pk) if removal_request else None)
+
+
+@require_csrf
 @api_view(["PATCH", "DELETE"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
@@ -537,17 +622,9 @@ def my_workspace_member_detail_view(request, workspace_id, assignment_id):
     # All member mutations through this API serialize on the Workspace row,
     # keeping last-manager checks correct under concurrent requests.
     with transaction.atomic():
-        workspace = Workspace.objects.select_for_update(of=("self",)).select_related("tenant").filter(
-            pk=workspace_id,
-            tenant__status=Tenant.Status.ACTIVE,
-            status=Workspace.Status.ACTIVE,
-        ).first()
-        if workspace is None or workspace.owned_identity_id is not None or (workspace.is_default and workspace.tenant.kind == Tenant.Kind.PERSONAL):
-            return Response({"detail": "Workspace is unavailable."}, status=404)
-        if active_membership(request.user, workspace.tenant_id) is None or not can_access_workspace(request.user, workspace):
-            return Response({"detail": "Workspace is unavailable."}, status=404)
-        if not can_manage_workspace(request.user, workspace):
-            return Response({"detail": "Workspace manager access is required."}, status=403)
+        workspace, error = _locked_member_workspace(request, workspace_id)
+        if error is not None:
+            return error
         assignment = WorkspaceMembership.objects.select_for_update(of=("self",)).select_related(
             "membership", "membership__user"
         ).filter(
@@ -579,21 +656,159 @@ def my_workspace_member_detail_view(request, workspace_id, assignment_id):
             )
             return Response({"member": _serialize_managed_member(assignment, request.user), "changed": True})
 
-        if not _can_remove_workspace_admin(workspace, assignment):
-            return Response({"detail": "The workspace must retain at least one manager."}, status=409)
-        assignment.status = WorkspaceMembership.Status.REVOKED
-        assignment.save(update_fields=["status", "updated_at"])
-        _audit(
-            request, workspace.tenant, ActivityLog.Action.REMOVE_WORKSPACE_MEMBER,
-            f"Removed {assignment.membership.user.get_username()} from workspace {workspace.name}",
-            workspace_id=str(workspace.pk), membership_id=str(assignment.membership_id),
-            operation="revoked", previous_role=assignment.role,
-        )
+        error = _direct_removal_error(request.user, workspace, assignment)
+        if error is not None:
+            return error
+        _revoke_workspace_assignment(request, workspace, assignment)
     return Response(status=204)
 
 
 # Personal SaaS workspace lifecycle. These routes use a workspace UUID as the
 # selector and then re-check the caller's tenant membership and workspace role.
+def _removal_reason(data):
+    reason = data.get("reason") if isinstance(data, dict) else None
+    return reason.strip() if isinstance(reason, str) and 8 <= len(reason.strip()) <= 500 else None
+
+
+def _serialize_removal_request(row):
+    return {
+        "id": str(row.pk), "workspaceId": str(row.workspace_id), "workspaceName": row.workspace.name,
+        "assignmentId": str(row.assignment_id), "membershipId": str(row.assignment.membership_id),
+        "targetUsername": row.assignment.membership.user.get_username(),
+        "requestedByUsername": row.requested_by.get_username(), "reason": row.reason,
+        "status": row.status, "createdAt": row.created_at, "decidedAt": row.decided_at,
+    }
+
+
+@require_csrf
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def request_workspace_member_removal_view(request, workspace_id, assignment_id):
+    data = request.data
+    reason = _removal_reason(data)
+    if not isinstance(data, dict) or set(data) != {"reason"} or reason is None:
+        return Response({"detail": "Provide only a reason of 8–500 characters."}, status=400)
+    with transaction.atomic():
+        workspace, error = _locked_member_workspace(request, workspace_id)
+        if error is not None:
+            return error
+        if not _member_removal_capabilities(request.user, workspace)["requestMemberRemoval"]:
+            return Response({"detail": "Removal requests are for organization workspace managers."}, status=403)
+        assignment = WorkspaceMembership.objects.select_for_update(of=("self", "membership")).select_related("membership__user").filter(
+            pk=assignment_id, workspace=workspace, status=WorkspaceMembership.Status.ACTIVE,
+            membership__status=Membership.Status.ACTIVE, membership__user__is_active=True,
+        ).first()
+        if assignment is None:
+            return Response({"detail": "Active workspace member not found."}, status=404)
+        error = _removal_target_error(request.user, workspace, assignment)
+        if error is not None:
+            return error
+        pending = WorkspaceRemovalRequest.objects.filter(assignment=assignment, status=WorkspaceRemovalRequest.Status.PENDING).first()
+        if pending is not None:
+            if (pending.requested_by_id == request.user.pk and pending.reason == reason
+                    and pending.expected_assignment_updated_at == assignment.updated_at
+                    and pending.expected_membership_updated_at == assignment.membership.updated_at):
+                return Response({"request": _serialize_removal_request(pending)}, status=200)
+            return Response({"detail": "This member already has a pending removal request."}, status=409)
+        row = WorkspaceRemovalRequest.objects.create(
+            workspace=workspace, assignment=assignment, requested_by=request.user, reason=reason,
+            expected_assignment_updated_at=assignment.updated_at,
+            expected_membership_updated_at=assignment.membership.updated_at,
+        )
+        _audit(request, workspace.tenant, ActivityLog.Action.REQUEST_WORKSPACE_REMOVAL,
+               "Requested organization approval to remove a workspace member.",
+               workspace_id=str(workspace.pk), membership_id=str(assignment.membership_id),
+               removal_request_id=str(row.pk), reason=reason)
+    return Response({"request": _serialize_removal_request(row)}, status=201)
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def organization_workspace_removal_requests_view(request, tenant_id):
+    tenant, _membership, error = _tenant_context(request, tenant_id, require_admin=True)
+    if error is not None:
+        return error
+    try:
+        page = int(request.query_params.get("page", "1"))
+    except (TypeError, ValueError):
+        page = 0
+    if not 1 <= page <= 100000:
+        return Response({"detail": "page must be 1–100000."}, status=400)
+    rows = WorkspaceRemovalRequest.objects.filter(
+        workspace__tenant=tenant, status=WorkspaceRemovalRequest.Status.PENDING,
+    ).select_related("workspace", "assignment__membership__user", "requested_by").order_by("created_at", "pk")
+    count, start = rows.count(), (page - 1) * 20
+    response = Response({"requests": [_serialize_removal_request(row) for row in rows[start:start + 20]],
+                         "count": count, "page": page, "pageSize": 20, "hasNext": start + 20 < count})
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+@require_csrf
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def decide_workspace_member_removal_view(request, tenant_id, request_id):
+    data, reason = request.data, _removal_reason(request.data)
+    if not isinstance(data, dict) or set(data) != {"decision", "reason"} or data.get("decision") not in {"approve", "reject"} or reason is None:
+        return Response({"detail": "Provide approve/reject and a reason of 8–500 characters."}, status=400)
+    with transaction.atomic():
+        # Cùng thứ tự Tenant → Membership → User với offboarding/provisioning P2.
+        tenant = Tenant.objects.select_for_update().filter(pk=tenant_id, kind=Tenant.Kind.BUSINESS, status=Tenant.Status.ACTIVE).first()
+        actor_membership = Membership.objects.select_for_update().filter(tenant=tenant, user_id=request.user.pk, status=Membership.Status.ACTIVE).first() if tenant else None
+        if actor_membership is None or actor_membership.role not in ADMIN_ROLES:
+            return Response({"detail": "Organization administrator access is unavailable."}, status=404)
+        initial = WorkspaceRemovalRequest.objects.filter(pk=request_id, workspace__tenant=tenant).values("workspace_id", "requested_by_id").first()
+        if initial is None:
+            return Response({"detail": "Removal request is unavailable."}, status=404)
+        # PK cố định giữ thứ tự khóa; NO KEY UPDATE vẫn cho audit giữ FK KEY SHARE.
+        users = {user.pk: user for user in get_user_model().objects.select_for_update(no_key=True).filter(
+            pk__in={request.user.pk, initial["requested_by_id"]},
+        ).order_by("pk")}
+        actor = users.get(request.user.pk)
+        if actor is None or active_membership(actor, tenant.pk) is None:
+            return Response({"detail": "Organization administrator access is unavailable."}, status=404)
+        workspace = Workspace.objects.select_for_update().get(pk=initial["workspace_id"], tenant=tenant)
+        row = WorkspaceRemovalRequest.objects.select_for_update(of=("self",)).get(pk=request_id, workspace=workspace)
+        if row.requested_by_id != initial["requested_by_id"] or row.requested_by_id not in users:
+            return Response({"detail": "Removal request changed. Reload before deciding."}, status=409)
+        row.requested_by = users[row.requested_by_id]
+        if row.status != WorkspaceRemovalRequest.Status.PENDING:
+            return Response({"detail": "This removal request has already been processed."}, status=409)
+        if row.requested_by_id == actor.pk:
+            return Response({"detail": "You cannot decide your own removal request."}, status=403)
+        assignment = WorkspaceMembership.objects.select_for_update(of=("self", "membership")).select_related("membership__user").get(pk=row.assignment_id, workspace=workspace)
+        row.assignment = assignment
+        if data["decision"] == "approve":
+            if (workspace.status != Workspace.Status.ACTIVE or workspace.owned_identity_id is not None
+                    or assignment.status != WorkspaceMembership.Status.ACTIVE
+                    or assignment.membership.status != Membership.Status.ACTIVE or not assignment.membership.user.is_active
+                    or assignment.updated_at != row.expected_assignment_updated_at
+                    or assignment.membership.updated_at != row.expected_membership_updated_at):
+                return Response({"detail": "Membership changed after the request. Reject it and submit a new request."}, status=409)
+            if not can_manage_workspace(row.requested_by, workspace):
+                return Response({"detail": "The requesting manager no longer has workspace authority."}, status=409)
+            error = _removal_target_error(actor, workspace, assignment)
+            if error is not None:
+                return error
+            row.status = WorkspaceRemovalRequest.Status.APPROVED
+            action = ActivityLog.Action.APPROVE_WORKSPACE_REMOVAL
+        else:
+            # Từ chối vẫn đóng được yêu cầu cũ khi target hoặc requester đã mất quyền.
+            row.status = WorkspaceRemovalRequest.Status.REJECTED
+            action = ActivityLog.Action.REJECT_WORKSPACE_REMOVAL
+        row.decided_by, row.decided_at, row.decision_reason = actor, timezone.now(), reason
+        row.save(update_fields=["status", "decided_by", "decided_at", "decision_reason"])
+        _audit(request, tenant, action, "Decided an organization workspace member removal request.",
+               workspace_id=str(workspace.pk), membership_id=str(assignment.membership_id),
+               removal_request_id=str(row.pk), reason=reason, decision=data["decision"])
+        if row.status == WorkspaceRemovalRequest.Status.APPROVED:
+            _revoke_workspace_assignment(request, workspace, assignment, row)
+    return Response({"request": _serialize_removal_request(row)})
+
+
 @api_view(["GET", "POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
@@ -727,6 +942,7 @@ def my_workspace_detail_view(request, workspace_id):
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
+@sensitive_variables("data", "raw_token", "token_hash")
 def create_workspace_invite_view(request, workspace_id):
     workspace = Workspace.objects.select_related("tenant", "tenant__personal_owner").filter(
         pk=workspace_id,
@@ -792,8 +1008,8 @@ def create_workspace_invite_view(request, workspace_id):
         role=role,
         expires_at=invitation.expires_at.isoformat(),
     )
-    # The raw token is returned once for a copyable invitation URL; only its hash is stored.
-    return Response({
+    # Token chỉ trả một lần; response không được lưu cache hoặc dùng làm referrer.
+    response = Response({
         "invitationId": str(invitation.pk),
         "email": email,
         "role": role,
@@ -802,8 +1018,12 @@ def create_workspace_invite_view(request, workspace_id):
         "inviteToken": raw_token,
         "expiresAt": invitation.expires_at,
     }, status=201)
+    response["Cache-Control"] = "private, no-store"
+    response["Referrer-Policy"] = "no-referrer"
+    return response
 
 
+@sensitive_variables("raw_token", "token_hash")
 def _workspace_invite_for_token(raw_token):
     if not isinstance(raw_token, str) or not raw_token.strip() or len(raw_token) > 256:
         return None
@@ -825,11 +1045,20 @@ def _invite_is_usable(invitation):
     )
 
 
-@api_view(["GET"])
+@require_csrf
+@api_view(["GET", "POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
+@sensitive_variables("raw_token")
 def preview_workspace_invite_view(request):
-    invitation = _workspace_invite_for_token(request.query_params.get("token"))
+    if request.method == "POST":
+        if not isinstance(request.data, dict) or set(request.data) != {"token"}:
+            return Response({"detail": "A single invitation token is required."}, status=400)
+        raw_token = request.data.get("token")
+    else:
+        # Link cũ còn hiệu lực; frontend mới chuyển token sang POST body ngay.
+        raw_token = request.query_params.get("token")
+    invitation = _workspace_invite_for_token(raw_token)
     if invitation is None:
         return Response({"detail": "Invitation not found."}, status=404)
     if not _invite_is_usable(invitation):
@@ -837,7 +1066,7 @@ def preview_workspace_invite_view(request):
     if not request.user.email or request.user.email.strip().lower() != invitation.email.lower():
         return Response({"detail": "Sign in with the email address this invitation was sent to."}, status=403)
     creator = invitation.invited_by.get_username() if invitation.invited_by_id else "A workspace manager"
-    return Response({
+    response = Response({
         "workspaceId": str(invitation.workspace_id),
         "workspaceName": invitation.workspace.name,
         "workspaceDescription": invitation.workspace.description,
@@ -846,11 +1075,15 @@ def preview_workspace_invite_view(request):
         "invitedBy": creator,
         "expiresAt": invitation.expires_at,
     })
+    response["Cache-Control"] = "private, no-store"
+    response["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
+@sensitive_variables("data", "raw_token", "token_hash")
 def accept_workspace_invite_view(request):
     data = request.data
     if not isinstance(data, dict) or set(data) != {"token"}:
