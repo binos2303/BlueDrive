@@ -1,26 +1,31 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Building2, FolderKanban, Plus, RefreshCw, Users } from "lucide-react";
 import { useAccount } from "@/components/account/AccountProvider";
 import Button from "@/components/ui/Button";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import DataTable from "@/components/ui/DataTable";
 import Dialog from "@/components/ui/Dialog";
+import Input from "@/components/ui/Input";
 import { AccountServiceError } from "@/lib/account-service";
 import {
   addWorkspaceMember,
   createWorkspace,
   getOrganizationAdminData,
   getWorkspaceMembers,
+  inviteOrganizationMember,
+  manageOrganizationMember,
   removeWorkspaceMember,
   updateWorkspace,
   type OrganizationMember,
+  type OrganizationAccountCapabilities,
   type WorkspaceMemberAssignment,
 } from "@/lib/organization-admin-service";
 import type { OrganizationWorkspace } from "@/lib/workspace-service";
 import { isWorkspaceRole } from "@/lib/workspace-member-policy";
 import { WORKSPACES_UPDATED_EVENT } from "@/lib/workspace-context";
+import { finiteQuotaBytes } from "@/lib/organization-account-policy";
 
 type AdminTab = "workspaces" | "members";
 type WorkspaceRole = WorkspaceMemberAssignment["workspaceRole"];
@@ -53,6 +58,15 @@ export default function OrganizationAdminPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<OrganizationAccountCapabilities>({ inviteAccounts: false, manageAccounts: false });
+  const [memberFormOpen, setMemberFormOpen] = useState(false);
+  const [memberForm, setMemberForm] = useState({ username: "", email: "", quota: "0", reason: "" });
+  const [memberError, setMemberError] = useState<string | null>(null);
+  const [memberFieldErrors, setMemberFieldErrors] = useState<Record<string, string[]>>({});
+  const [memberAction, setMemberAction] = useState<{ member: OrganizationMember; action: "suspend" | "restore" | "reinvite" } | null>(null);
+  const [memberReason, setMemberReason] = useState("");
+  const memberMutation = useRef(false);
+  const memberAttempt = useRef<{ payload: string; key: string } | null>(null);
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<OrganizationWorkspace | null>(null);
@@ -86,6 +100,7 @@ export default function OrganizationAdminPage() {
       const data = await getOrganizationAdminData(tenantId);
       setWorkspaces(data.workspaces);
       setMembers(data.members);
+      setCapabilities(data.capabilities);
       setError(null);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -104,6 +119,7 @@ export default function OrganizationAdminPage() {
         if (!active) return;
         setWorkspaces(data.workspaces);
         setMembers(data.members);
+        setCapabilities(data.capabilities);
         setError(null);
       })
       .catch((cause: unknown) => {
@@ -235,6 +251,49 @@ export default function OrganizationAdminPage() {
     if (success) setPendingMemberChange(null);
   }
 
+  function openMemberForm() {
+    setMemberForm({ username: "", email: "", quota: "0", reason: "" }); setMemberError(null);
+    setMemberFieldErrors({}); memberAttempt.current = null; setMemberFormOpen(true);
+  }
+
+  async function inviteMember(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!tenantId || !capabilities.inviteAccounts || memberMutation.current) return;
+    memberMutation.current = true; setSaving(true); setMemberError(null); setMemberFieldErrors({});
+    try {
+      const input = { username: memberForm.username.trim(), email: memberForm.email.trim(),
+        limit_bytes: finiteQuotaBytes(memberForm.quota), reason: memberForm.reason.trim() };
+      const payload = `${tenantId}:${JSON.stringify(input)}`;
+      // Retry cùng tenant và payload giữ key để không tạo nhân viên trùng.
+      if (memberAttempt.current?.payload !== payload) memberAttempt.current = { payload, key: crypto.randomUUID() };
+      const result = await inviteOrganizationMember(tenantId, input, memberAttempt.current.key);
+      setMemberFormOpen(false); memberAttempt.current = null;
+      await load();
+      setNotice(`Employee invitation sent.${result.storageReady ? "" : " Storage is not ready; uploads remain unavailable."}`);
+    } catch (cause) {
+      setMemberError(errorMessage(cause));
+      if (cause instanceof AccountServiceError) setMemberFieldErrors(cause.fieldErrors);
+    } finally { memberMutation.current = false; setSaving(false); }
+  }
+
+  async function changeMember(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    if (!tenantId || !memberAction || memberMutation.current) return;
+    if (memberAction.action === "reinvite" ? !capabilities.inviteAccounts : !capabilities.manageAccounts) return;
+    memberMutation.current = true; setSaving(true); setMemberError(null);
+    try {
+      await manageOrganizationMember(tenantId, memberAction.member.membershipId, memberAction.action, memberReason.trim());
+      setNotice(memberAction.action === "reinvite" ? "Invitation sent. Previous invitation links are no longer valid."
+        : memberAction.action === "suspend" ? "Membership suspended." : "Membership restored.");
+      setMemberAction(null); await load();
+    } catch (cause) { setMemberError(errorMessage(cause)); }
+    finally { memberMutation.current = false; setSaving(false); }
+  }
+
+  function openMemberAction(member: OrganizationMember, action: "suspend" | "restore" | "reinvite") {
+    setMemberAction({ member, action }); setMemberReason(""); setMemberError(null);
+  }
+
   if (state.status === "loading") return <div className="p-8 text-muted">Loading account…</div>;
   if (!isBusiness || !tenant) {
     return <div className="p-8 text-muted">Select a business organization to manage workspaces.</div>;
@@ -268,6 +327,7 @@ export default function OrganizationAdminPage() {
           <Button variant={tab === "members" ? "primary" : "ghost"} size="sm" onClick={() => setTab("members")}><Users size={15} /> Members</Button>
           <div className="flex-1" />
           {tab === "workspaces" && <Button size="sm" onClick={() => openForm()}><Plus size={15} /> New workspace</Button>}
+          {tab === "members" && capabilities.inviteAccounts && <Button size="sm" disabled={saving} onClick={openMemberForm}><Plus size={15} /> Invite employee</Button>}
         </div>
 
         {loading ? <p className="p-6 text-sm text-muted">Loading organization data…</p> : tab === "workspaces" ? (
@@ -288,9 +348,15 @@ export default function OrganizationAdminPage() {
           </DataTable>
         ) : (
           <DataTable>
-            <thead><tr className="text-xs text-muted"><th className="p-3">Member</th><th className="p-3">Organization role</th><th className="p-3">Status</th></tr></thead>
+            <thead><tr className="text-xs text-muted"><th className="p-3">Member</th><th className="p-3">Organization role</th><th className="p-3">Status</th>{(capabilities.inviteAccounts || capabilities.manageAccounts) && <th className="p-3">Actions</th>}</tr></thead>
             <tbody>{members.map((member) => (
-              <tr key={member.membershipId}><td className={tableCellClass}>{member.username}<p className="text-xs text-muted">{member.email}</p></td><td className={tableCellClass}>{formatRole(member.role)}</td><td className={tableCellClass}>{formatRole(member.status)}</td></tr>
+              <tr key={member.membershipId}><td className={tableCellClass}>{member.username}<p className="text-xs text-muted">{member.email}</p></td><td className={tableCellClass}>{formatRole(member.role)}</td><td className={tableCellClass}>{formatRole(member.status)}</td>
+                {(capabilities.inviteAccounts || capabilities.manageAccounts) && <td className={tableCellClass}>{member.managed && member.role === "member" && <div className="flex flex-wrap gap-2">
+                  {member.status === "invited" && capabilities.inviteAccounts && <Button variant="secondary" size="sm" disabled={saving} onClick={() => openMemberAction(member, "reinvite")}>Resend invitation</Button>}
+                  {member.status === "active" && capabilities.manageAccounts && <Button variant="ghost" size="sm" disabled={saving} onClick={() => openMemberAction(member, "suspend")}>Suspend</Button>}
+                  {member.status === "suspended" && capabilities.manageAccounts && <Button variant="secondary" size="sm" disabled={saving} onClick={() => openMemberAction(member, "restore")}>Restore</Button>}
+                </div>}</td>}
+              </tr>
             ))}</tbody>
           </DataTable>
         )}
@@ -304,6 +370,35 @@ export default function OrganizationAdminPage() {
           <div className="flex justify-end gap-2"><Button variant="secondary" disabled={saving} onClick={() => setFormOpen(false)}>Cancel</Button><Button type="submit" loading={saving} disabled={!name.trim()}>Save</Button></div>
         </form>
       </Dialog>
+
+      <Dialog open={memberFormOpen} title="Invite employee" description="Create an organization-owned account. The employee sets their own password using an emailed invitation." onClose={() => setMemberFormOpen(false)} closeDisabled={saving}>
+        <form className="space-y-4" onSubmit={(event) => void inviteMember(event)}>
+          {memberError && <p role="alert" className="text-sm text-danger">{memberError}</p>}
+          {([['username', 'Username', 'text', 'username'], ['email', 'Email', 'email', 'email'], ['quota', 'My Drive storage limit (GiB)', 'number', 'limit_bytes']] as const).map(([key, label, type, errorKey]) => <div key={key}>
+            <label htmlFor={`employee-${key}`} className="block text-sm font-medium">{label}</label>
+            <Input id={`employee-${key}`} required className="mt-1" type={type} min={type === 'number' ? 0 : undefined} step={type === 'number' ? 1 : undefined} maxLength={type === 'email' ? 254 : 150} autoComplete={key === 'email' ? 'email' : key === 'username' ? 'username' : 'off'} disabled={saving} value={memberForm[key]} invalid={Boolean(memberFieldErrors[errorKey])} aria-describedby={memberFieldErrors[errorKey] ? `employee-${key}-error` : undefined} onChange={(event) => setMemberForm({ ...memberForm, [key]: event.target.value })} />
+            {memberFieldErrors[errorKey] && <p id={`employee-${key}-error`} className="mt-1 text-xs text-danger">{memberFieldErrors[errorKey].join(' ')}</p>}
+          </div>)}
+          <p className="text-xs leading-5 text-muted">My Drive belongs to this organization and is private to the employee. 0 blocks uploads until storage is allocated.</p>
+          <label className="block text-sm font-medium">Reason<textarea required minLength={8} maxLength={500} value={memberForm.reason} disabled={saving} onChange={(event) => setMemberForm({ ...memberForm, reason: event.target.value })} className="mt-1 min-h-20 w-full rounded-xl border border-border-strong bg-surface px-3 py-2 text-sm" /></label>
+          {memberFieldErrors.reason && <p className="text-xs text-danger">{memberFieldErrors.reason.join(' ')}</p>}
+          <div className="flex justify-end gap-2"><Button variant="secondary" disabled={saving} onClick={() => setMemberFormOpen(false)}>Cancel</Button><Button type="submit" loading={saving} disabled={memberForm.reason.trim().length < 8}>Send invitation</Button></div>
+        </form>
+      </Dialog>
+      <Dialog open={memberAction?.action === 'reinvite'} title="Resend employee invitation" description={`${memberAction?.member.username ?? 'Employee'} · ${tenant.name}`} onClose={() => setMemberAction(null)} closeDisabled={saving}>
+        <form className="space-y-4" onSubmit={(event) => void changeMember(event)}>
+          {memberError && <p role="alert" className="text-sm text-danger">{memberError}</p>}
+          <p className="text-sm text-muted">Send a fresh invitation. Previous invitation links will stop working.</p>
+          <label className="block text-sm font-medium">Reason<textarea required minLength={8} maxLength={500} value={memberReason} disabled={saving} onChange={(event) => setMemberReason(event.target.value)} className="mt-1 min-h-20 w-full rounded-xl border border-border-strong bg-surface px-3 py-2 text-sm" /></label>
+          <div className="flex justify-end gap-2"><Button variant="secondary" disabled={saving} onClick={() => setMemberAction(null)}>Cancel</Button><Button type="submit" loading={saving} disabled={memberReason.trim().length < 8}>Send invitation</Button></div>
+        </form>
+      </Dialog>
+      <ConfirmDialog open={Boolean(memberAction && memberAction.action !== 'reinvite')}
+        title={memberAction?.action === 'suspend' ? 'Suspend employee' : 'Restore employee'}
+        description={memberAction?.action === 'suspend' ? `Suspend ${memberAction.member.username}'s organization access?` : `Restore ${memberAction?.member.username ?? 'this employee'}'s organization membership?`}
+        confirmLabel={memberAction?.action === 'suspend' ? 'Suspend employee' : 'Restore employee'}
+        destructive={memberAction?.action === 'suspend'} pending={saving} error={memberError}
+        onClose={() => setMemberAction(null)} onConfirm={() => void changeMember()} />
 
       <Dialog open={Boolean(selectedWorkspace)} title={selectedWorkspace ? `${selectedWorkspace.name} members` : "Workspace access"} description="Assign access directly to organization members." onClose={closeAccess} closeDisabled={saving} className="w-[min(calc(100%_-_2rem),50rem)]">
         {selectedWorkspace && <div className="space-y-4">

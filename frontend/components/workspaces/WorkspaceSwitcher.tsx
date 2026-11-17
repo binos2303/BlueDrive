@@ -62,6 +62,10 @@ export default function WorkspaceSwitcher({ onWorkspaceChange, onNavigate }: {
   const personalDriveRoute = !routeWorkspaceId && (pathname === "/drive" || pathname.startsWith("/drive/"));
   const { state: accountState } = useAccount();
   const account = accountState.status === "loaded" ? accountState.account : null;
+  const organizationDrive = account?.myDrive?.ownership === "organization";
+  const driveOrganizationName = organizationDrive
+    ? account.memberships.find((membership) => membership.id === account.myDrive?.tenantId)?.name ?? "Organization-owned"
+    : null;
   const username = account?.profile.username ?? "";
   const ownInitials = initials(username || account?.profile.email || "User");
 
@@ -259,7 +263,7 @@ export default function WorkspaceSwitcher({ onWorkspaceChange, onNavigate }: {
         }}
         className="ui-control flex min-h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-border px-3 text-left transition-colors hover:bg-background">
         <Layers size={18} className="shrink-0 text-brand-contrast" />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={selectedWorkspace?.name}>{selectedWorkspace?.name || "Workspaces"}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={selectedWorkspace?.name ?? driveOrganizationName ?? undefined}>{selectedWorkspace?.name || (organizationDrive ? `My Drive · ${driveOrganizationName}` : "Workspaces")}</span>
         {loading ? <LoaderCircle size={15} className="shrink-0 animate-spin text-muted" /> : <ChevronDown size={15} className={`shrink-0 text-muted transition-transform ${expanded ? "rotate-180" : ""}`} />}
       </button>
       <div ref={popoverRef} id={popoverId} popover="auto" onToggle={(event) => setExpanded(event.newState === "open")} style={position}
@@ -268,7 +272,7 @@ export default function WorkspaceSwitcher({ onWorkspaceChange, onNavigate }: {
           loadRequestId.current += 1; setLoading(false); setSelectedWorkspaceId("");
           clearActiveWorkspaceSelection(); popoverRef.current?.hidePopover(); onNavigate?.(); router.push("/drive");
         }} aria-pressed={!selectedWorkspaceId} className={`flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left ${!selectedWorkspaceId ? "bg-brand-soft" : "hover:bg-background"}`}>
-          <HardDrive size={20} className="shrink-0 text-brand-contrast" /><span className="flex-1 text-sm font-semibold">My Drive</span>
+          <HardDrive size={20} className="shrink-0 text-brand-contrast" /><span className="min-w-0 flex-1 text-sm font-semibold">My Drive{organizationDrive && <span className="block truncate text-xs font-normal text-muted">{driveOrganizationName}</span>}</span>
           {!selectedWorkspaceId && <Check size={16} className="text-brand-contrast" />}
         </button>
         <div className="my-2 grid grid-cols-2 gap-2 border-y border-border py-3">
