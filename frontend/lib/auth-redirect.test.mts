@@ -27,13 +27,19 @@ test("avoids redirecting to the public auth forms", () => {
   assert.equal(safeInternalRedirect("/register"), "/drive");
 });
 
-test("invitation continuation survives login to registration and back", () => {
+test("invitation destination survives authentication without forwarding its credential", () => {
   const invitation = "/workspace-invite?token=invitation-123";
   const register = new URL(authFormHref("register", invitation), "https://bluedrive.invalid");
   assert.equal(register.pathname, "/register");
   const login = new URL(authFormHref("login", register.searchParams.get("next")), register.origin);
   assert.equal(login.pathname, "/login");
-  assert.equal(safeInternalRedirect(login.searchParams.get("next")), invitation);
+  assert.equal(safeInternalRedirect(login.searchParams.get("next")), "/workspace-invite");
+  assert.equal(register.href.includes("invitation-123"), false);
+  assert.equal(login.href.includes("invitation-123"), false);
+  assert.equal(safeInternalRedirect("/admin-invite#uid=user&token=fixture"), "/admin-invite");
+  assert.equal(safeInternalRedirect("/organization-invite#uid=user&token=fixture"), "/organization-invite");
+  assert.equal(safeInternalRedirect("/workspace-invite/?token=fixture"), "/workspace-invite");
+  assert.equal(safeInternalRedirect("/%77orkspace-invite?token=fixture"), "/workspace-invite");
 });
 
 test("auth continuation does not preserve external or recursive destinations", () => {

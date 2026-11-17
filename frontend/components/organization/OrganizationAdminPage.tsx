@@ -14,6 +14,8 @@ import {
   createWorkspace,
   getOrganizationAdminData,
   getWorkspaceMembers,
+  getWorkspaceRemovalRequests,
+  decideWorkspaceRemoval,
   inviteOrganizationMember,
   manageOrganizationMember,
   removeWorkspaceMember,
@@ -21,13 +23,14 @@ import {
   type OrganizationMember,
   type OrganizationAccountCapabilities,
   type WorkspaceMemberAssignment,
+  type WorkspaceRemovalRequests,
 } from "@/lib/organization-admin-service";
-import type { OrganizationWorkspace } from "@/lib/workspace-service";
+import type { OrganizationWorkspace, WorkspaceRemovalRequest } from "@/lib/workspace-service";
 import { isWorkspaceRole } from "@/lib/workspace-member-policy";
 import { WORKSPACES_UPDATED_EVENT } from "@/lib/workspace-context";
 import { finiteQuotaBytes } from "@/lib/organization-account-policy";
 
-type AdminTab = "workspaces" | "members";
+type AdminTab = "workspaces" | "members" | "requests";
 type WorkspaceRole = WorkspaceMemberAssignment["workspaceRole"];
 const roles: WorkspaceRole[] = ["viewer", "editor", "admin"];
 const inputClass = "min-h-10 w-full rounded-xl border border-border-strong bg-surface px-3 py-2 text-sm text-foreground";
@@ -86,10 +89,30 @@ export default function OrganizationAdminPage() {
     member: WorkspaceMemberAssignment;
     role?: WorkspaceRole;
   } | null>(null);
+  const [removalPage, setRemovalPage] = useState(1);
+  const [removalRefresh, setRemovalRefresh] = useState(0);
+  const [removalList, setRemovalList] = useState<{ tenantId: string; data: WorkspaceRemovalRequests } | null>(null);
+  const [removalLoading, setRemovalLoading] = useState(true);
+  const [removalError, setRemovalError] = useState<string | null>(null);
+  const [removalAction, setRemovalAction] = useState<{ tenantId: string; request: WorkspaceRemovalRequest; decision: "approve" | "reject" } | null>(null);
+  const [removalReason, setRemovalReason] = useState("");
+  const decidingRemoval = useRef(false);
 
   const activeMembers = useMemo(() => members.filter((member) => member.status === "active"), [members]);
   const assignedIds = new Set(assignments.filter((item) => item.status === "active").map((item) => item.membershipId));
   const availableMembers = activeMembers.filter((member) => !assignedIds.has(member.membershipId));
+  const visibleRemovals = removalList?.tenantId === tenantId && removalList.data.page === removalPage ? removalList.data : null;
+
+  useEffect(() => {
+    if (tab !== "requests" || !canManage || !tenantId) return;
+    let active = true;
+    void Promise.resolve().then(() => { if (active) { setRemovalLoading(true); setRemovalError(null); } });
+    void getWorkspaceRemovalRequests(tenantId, removalPage)
+      .then((data) => { if (active) setRemovalList({ tenantId, data }); })
+      .catch((cause: unknown) => { if (active) { setRemovalList(null); setRemovalError(errorMessage(cause)); } })
+      .finally(() => { if (active) setRemovalLoading(false); });
+    return () => { active = false; };
+  }, [tab, canManage, tenantId, removalPage, removalRefresh]);
 
   useEffect(() => () => { accessRequestId.current += 1; }, [tenantId]);
 
@@ -294,6 +317,21 @@ export default function OrganizationAdminPage() {
     setMemberAction({ member, action }); setMemberReason(""); setMemberError(null);
   }
 
+  async function decideRemoval(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!tenantId || removalAction?.tenantId !== tenantId || decidingRemoval.current || removalReason.trim().length < 8) return;
+    const requestId = accessRequestId.current;
+    decidingRemoval.current = true; setSaving(true); setRemovalError(null);
+    try {
+      await decideWorkspaceRemoval(tenantId, removalAction.request.id, removalAction.decision, removalReason.trim());
+      if (requestId !== accessRequestId.current) return;
+      setNotice(removalAction.decision === "approve" ? "Removal approved and workspace access revoked." : "Removal request rejected. Workspace access is unchanged.");
+      setRemovalAction(null); setRemovalPage(1); setRemovalRefresh((value) => value + 1);
+      window.dispatchEvent(new Event(WORKSPACES_UPDATED_EVENT));
+    } catch (cause) { setRemovalError(errorMessage(cause)); }
+    finally { decidingRemoval.current = false; setSaving(false); }
+  }
+
   if (state.status === "loading") return <div className="p-8 text-muted">Loading account…</div>;
   if (!isBusiness || !tenant) {
     return <div className="p-8 text-muted">Select a business organization to manage workspaces.</div>;
@@ -310,7 +348,7 @@ export default function OrganizationAdminPage() {
           <h1 className="mt-2 text-2xl font-semibold">{tenant.name}</h1>
           <p className="mt-1 text-sm text-muted">Manage workspaces and grant access to individual members.</p>
         </div>
-        <Button variant="secondary" loading={loading} onClick={() => void load()}><RefreshCw size={16} /> Refresh</Button>
+        <Button variant="secondary" loading={tab === "requests" ? removalLoading : loading} onClick={() => tab === "requests" ? setRemovalRefresh((value) => value + 1) : void load()}><RefreshCw size={16} /> Refresh</Button>
       </header>
 
       {error && !formOpen && !archiveTarget && <p role="alert" className="rounded-xl border border-danger/30 p-3 text-sm text-danger">{error}</p>}
@@ -325,12 +363,22 @@ export default function OrganizationAdminPage() {
         <div className="flex flex-wrap items-center gap-2 border-b border-border p-3">
           <Button variant={tab === "workspaces" ? "primary" : "ghost"} size="sm" onClick={() => setTab("workspaces")}><FolderKanban size={15} /> Workspaces</Button>
           <Button variant={tab === "members" ? "primary" : "ghost"} size="sm" onClick={() => setTab("members")}><Users size={15} /> Members</Button>
+          <Button variant={tab === "requests" ? "primary" : "ghost"} size="sm" onClick={() => setTab("requests")}>Removal requests</Button>
           <div className="flex-1" />
           {tab === "workspaces" && <Button size="sm" onClick={() => openForm()}><Plus size={15} /> New workspace</Button>}
           {tab === "members" && capabilities.inviteAccounts && <Button size="sm" disabled={saving} onClick={openMemberForm}><Plus size={15} /> Invite employee</Button>}
         </div>
 
-        {loading ? <p className="p-6 text-sm text-muted">Loading organization data…</p> : tab === "workspaces" ? (
+        {tab === "requests" ? <div className="p-4 sm:p-5">
+          <h2 className="text-base font-semibold">Workspace removal requests</h2>
+          <p className="mt-1 text-sm text-muted">Review the current membership before approving. A requester cannot decide their own request.</p>
+          {removalError && !removalAction && <p role="alert" className="mt-4 text-sm text-danger">{removalError}</p>}
+          {removalLoading ? <p className="mt-5 text-sm text-muted">Loading removal requests…</p> : !visibleRemovals ? <p className="mt-5 text-sm text-muted">Unable to load requests. <button type="button" onClick={() => setRemovalRefresh((value) => value + 1)} className="ui-control rounded text-brand-contrast underline">Retry</button></p> : visibleRemovals.requests.length === 0 ? <p className="mt-5 text-sm text-muted">No removal requests.</p> : <ul className="mt-4 divide-y divide-border">{visibleRemovals.requests.map((request) => <li key={request.id} className="flex flex-wrap items-start justify-between gap-3 py-4">
+            <div className="min-w-0 flex-1"><p className="wrap-break-word text-sm font-semibold">{request.targetUsername} · {request.workspaceName}</p><p className="mt-1 wrap-break-word text-sm text-muted">Requested by {request.requestedByUsername}: {request.reason}</p><p className="mt-1 text-xs capitalize text-muted">{request.status}</p></div>
+            {request.status === "pending" && <div className="flex gap-2">{(["approve", "reject"] as const).map((decision) => <Button key={decision} variant={decision === "approve" ? "primary" : "secondary"} size="sm" disabled={saving || request.requestedByUsername === snapshot?.profile.username} onClick={() => { setRemovalAction({ tenantId: tenant.id, request, decision }); setRemovalReason(""); setRemovalError(null); }}>{decision === "approve" ? "Approve" : "Reject"}</Button>)}</div>}
+          </li>)}</ul>}
+          {visibleRemovals && (visibleRemovals.count > visibleRemovals.pageSize || removalPage > 1) && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"><span className="text-xs text-muted">Page {removalPage} · {visibleRemovals.count} requests</span><div className="flex gap-2"><Button variant="secondary" disabled={removalLoading || removalPage === 1} onClick={() => setRemovalPage((value) => value - 1)}>Previous</Button><Button variant="secondary" disabled={removalLoading || !visibleRemovals.hasNext} onClick={() => setRemovalPage((value) => value + 1)}>Next</Button></div></div>}
+        </div> : loading ? <p className="p-6 text-sm text-muted">Loading organization data…</p> : tab === "workspaces" ? (
           <DataTable>
             <thead><tr className="text-xs text-muted"><th className="p-3">Workspace</th><th className="p-3">Members</th><th className="p-3">Status</th><th className="p-3">Actions</th></tr></thead>
             <tbody>{workspaces.map((workspace) => (
@@ -361,6 +409,15 @@ export default function OrganizationAdminPage() {
           </DataTable>
         )}
       </section>
+
+      <Dialog open={removalAction?.tenantId === tenantId} title={removalAction?.decision === "approve" ? "Approve member removal" : "Reject removal request"} description={removalAction ? `${removalAction.request.targetUsername} · ${removalAction.request.workspaceName}` : undefined} onClose={() => setRemovalAction(null)} closeDisabled={saving}>
+        <form className="space-y-4" onSubmit={(event) => void decideRemoval(event)}>
+          {removalError && <p role="alert" className="text-sm text-danger">{removalError}</p>}
+          <p className="text-sm text-muted">{removalAction?.decision === "approve" ? "Approval immediately revokes this Workspace assignment. Organization membership and stored data are retained." : "Rejection closes this request and keeps the existing Workspace assignment."}</p>
+          <label className="block text-sm font-medium">Decision reason<textarea required minLength={8} maxLength={500} value={removalReason} disabled={saving} onChange={(event) => setRemovalReason(event.target.value)} className="mt-2 min-h-24 w-full rounded-xl border border-border bg-background p-3 text-sm" /></label>
+          <div className="flex justify-end gap-2"><Button variant="secondary" disabled={saving} onClick={() => setRemovalAction(null)}>Cancel</Button><Button type="submit" loading={saving} disabled={removalReason.trim().length < 8}>{removalAction?.decision === "approve" ? "Approve removal" : "Reject request"}</Button></div>
+        </form>
+      </Dialog>
 
       <Dialog open={formOpen} title={editing ? "Edit workspace" : "Create workspace"} onClose={() => setFormOpen(false)} closeDisabled={saving}>
         <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void saveWorkspace(); }}>

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { drivePath, workspaceIdFromPathname } from "@/lib/drive-paths";
+import { workspaceInviteToken } from "@/lib/organization-account-policy";
 import {
   Check,
   ChevronDown,
@@ -46,7 +47,7 @@ function tokenFromInput(value: string): string {
   if (!trimmed) return "";
   try {
     const url = new URL(trimmed, window.location.origin);
-    return url.searchParams.get("token") ?? trimmed;
+    return workspaceInviteToken(url.hash, url.search) ?? (url.search || url.hash ? "" : trimmed);
   } catch {
     return trimmed;
   }
@@ -336,7 +337,7 @@ export default function WorkspaceSwitcher({ onWorkspaceChange, onNavigate }: {
         <form className="space-y-4" onSubmit={handleJoin}>
           <label className="block space-y-1.5">
             <span className="text-xs font-semibold text-foreground">Invitation link or token</span>
-            <textarea required rows={3} value={joinInput} onChange={(event) => setJoinInput(event.currentTarget.value)} placeholder="https://your-domain/workspace-invite?token=…" className="w-full resize-y rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-brand" />
+            <textarea required rows={3} value={joinInput} onChange={(event) => setJoinInput(event.currentTarget.value)} placeholder="https://your-domain/workspace-invite#token=…" className="w-full resize-y rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-brand" />
           </label>
           {formError && <p role="alert" className="text-xs leading-5 text-danger">{formError}</p>}
           <div className="flex justify-end gap-2">

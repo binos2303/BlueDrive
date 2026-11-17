@@ -213,11 +213,11 @@ test("Light and dark layouts fit viewport and expose readable status tokens", as
   }
 });
 
-test("Login to registration preserves the invitation continuation", async ({ page }, info) => {
+test("Login to registration preserves the invitation destination without its token", async ({ page }, info) => {
   await page.goto("/login?next=%2Fworkspace-invite%3Ftoken%3Dfixture");
   await page.getByRole("link", { name: "Create account", exact: true }).click();
   await expect(page).toHaveURL(/\/register\?next=/);
-  expect(new URL(page.url()).searchParams.get("next")).toBe("/workspace-invite?token=fixture");
+  expect(new URL(page.url()).searchParams.get("next")).toBe("/workspace-invite");
   await page.screenshot({ path: info.outputPath("register.png"), fullPage: true });
 });
 

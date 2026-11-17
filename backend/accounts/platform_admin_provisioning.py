@@ -21,6 +21,7 @@ from django.forms import EmailField
 from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from django.views.decorators.debug import sensitive_variables
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny, BasePermission
@@ -49,11 +50,12 @@ def _reason_from(body):
     return reason if 8 <= len(reason) <= 500 else None
 
 
+@sensitive_variables("token", "uid", "link")
 def _email_administrator_invitation(user):
-    """Send only by an explicitly configured email backend; never return tokens."""
+    """Fragment giữ activation token ngoài HTTP query và referrer của lời mời mới."""
     token = default_token_generator.make_token(user)
     uid = urlsafe_base64_encode(force_str(user.pk).encode())
-    link = f"{settings.NEXTJS_FRONTEND_URL}/admin-invite?{urlencode({'uid': uid, 'token': token})}"
+    link = f"{settings.NEXTJS_FRONTEND_URL}/admin-invite#{urlencode({'uid': uid, 'token': token})}"
     send_mail(
         subject="Activate your BlueDrive Platform Administrator account",
         message=(
@@ -73,13 +75,13 @@ def _email_configuration_error():
         return Response({"detail": "Administrator invitations are not configured."}, status=503)
     if not getattr(settings, "NEXTJS_FRONTEND_URL", "") or not getattr(settings, "DEFAULT_FROM_EMAIL", ""):
         return Response({"detail": "Administrator invitation email settings are incomplete."}, status=503)
-    if not settings.DEBUG and settings.EMAIL_BACKEND in {
+    # Backend debug cũng không được ghi activation token ra terminal hoặc file.
+    if settings.EMAIL_BACKEND in {
         "django.core.mail.backends.console.EmailBackend",
         "django.core.mail.backends.filebased.EmailBackend",
-        "django.core.mail.backends.locmem.EmailBackend",
         "django.core.mail.backends.dummy.EmailBackend",
-    }:
-        return Response({"detail": "A secure email transport is required in production."}, status=503)
+    } or (not settings.DEBUG and settings.EMAIL_BACKEND == "django.core.mail.backends.locmem.EmailBackend"):
+        return Response({"detail": "A secure email transport is required for invitations."}, status=503)
     return None
 
 
@@ -191,6 +193,7 @@ def reinvite_platform_administrator_view(request, user_id):
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
+@sensitive_variables("body", "uid", "token", "password1", "password2")
 def accept_platform_administrator_invitation_view(request):
     body = request.data
     if not isinstance(body, dict) or set(body) != {"uid", "token", "password1", "password2"}:

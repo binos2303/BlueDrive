@@ -8,6 +8,7 @@ from django.utils import timezone
 from accounts.services import get_personal_tenant
 from accounts.access import get_default_tenant, get_organization_identity
 from .models import File, UploadSession
+from .storage_routing import require_legacy_destination
 from .quota import (
     finalize_upload_quota,
     reserve_upload_quota,
@@ -72,6 +73,8 @@ def unique_copy_name(model, field_name, original_name, *, folder=None, owner=Non
 
 def _clone_encrypted_file(source_file, *, owner, folder, file_name, tenant=None):
     """Clone a SecureDrive file with a fresh file ID, DEK and nonce."""
+    destination = folder.tenant if folder is not None else tenant or source_file.tenant
+    require_legacy_destination(destination)
     if (
         not source_file.is_encrypted
         or not source_file.encryption_nonce
@@ -179,6 +182,8 @@ def clone_encrypted_file_with_quota(
         raise ValueError("A file copy cannot cross tenant boundaries.")
     if folder is not None and folder.tenant_id != tenant.pk:
         raise ValueError("The destination folder belongs to another tenant.")
+
+    require_legacy_destination(tenant)
 
     upload = UploadSession.objects.create(
         tenant=tenant,

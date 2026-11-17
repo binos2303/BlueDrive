@@ -247,6 +247,7 @@ def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_f
     from files.storage_routing import adapter_for_upload, upload_target
     from files.views import _decrypt_file
 
+    target = upload_target(tenant, target_folder.workspace if target_folder is not None else workspace)
     plaintext = _decrypt_file(source_file)
     session = UploadSession.objects.create(
         tenant=tenant,
@@ -258,7 +259,7 @@ def _duplicate_encrypted_file(source_file, *, actor, tenant, workspace, target_f
         expected_sha256=hashlib.sha256(plaintext).hexdigest(),
         expires_at=timezone.now() + timedelta(hours=1),
         state=UploadSession.State.INITIATED,
-        **upload_target(tenant,(target_folder.workspace if target_folder is not None else workspace)),
+        **target,
     )
     reserved = False
     try:
@@ -335,6 +336,8 @@ def drive_items_duplicate_api(request):
         return error
     _file_ids, _folder_ids, direct_files, top_folders = selected
 
+    from files.storage_adapters.base import StorageConfigurationError
+
     created_object_keys = []
     created_count = 0
     try:
@@ -399,6 +402,9 @@ def drive_items_duplicate_api(request):
                 )
                 created_object_keys.append(object_key)
                 created_count += 1
+    except StorageConfigurationError as error:
+        _cleanup_duplicate_objects(created_object_keys)
+        return JsonResponse({'detail': 'Object storage is not available.', 'code': getattr(error, 'code', 'storage_unavailable')}, status=503)
     except (QuotaExceeded, QuotaStateError):
         _cleanup_duplicate_objects(created_object_keys)
         return JsonResponse({"detail": "The workspace or member quota does not allow this duplicate."}, status=409)

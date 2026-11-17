@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { finiteQuotaBytes, organizationInviteFragment } from "./organization-account-policy.ts";
+import { finiteQuotaBytes, organizationInviteFragment, workspaceInviteToken } from "./organization-account-policy.ts";
 
 test("finite quotas include zero and preserve the largest whole GiB safe integer", () => {
   assert.equal(finiteQuotaBytes("0"), 0);
@@ -20,5 +20,16 @@ test("organization invitation accepts one fragment credential pair only", () => 
   assert.deepEqual(organizationInviteFragment("#uid=fixture-user&token=fixture-invitation"), { uid: "fixture-user", token: "fixture-invitation" });
   for (const fragment of ["", "#uid=fixture-user", "?uid=fixture-user&token=fixture-invitation", "#uid=a&uid=b&token=fixture", "#uid=a&token=a&token=b", "#uid=a%0A&token=b", `#uid=${"x".repeat(129)}&token=b`, `#uid=a&token=${"x".repeat(257)}`]) {
     assert.equal(organizationInviteFragment(fragment), null);
+  }
+});
+
+test("legacy invitation selectors remain usable only when explicitly read and unambiguous", () => {
+  assert.deepEqual(organizationInviteFragment("", "?uid=fixture-user&token=fixture-invitation"), { uid: "fixture-user", token: "fixture-invitation" });
+  assert.equal(organizationInviteFragment("#uid=a&token=b", "?uid=a&token=b"), null);
+  assert.equal(organizationInviteFragment("", "?uid=a&uid=b&token=c"), null);
+  assert.equal(workspaceInviteToken("#token=fixture-invitation"), "fixture-invitation");
+  assert.equal(workspaceInviteToken("", "?token=legacy-invitation"), "legacy-invitation");
+  for (const [fragment, query] of [["#token=a", "?token=b"], ["", "?token=a&token=b"], ["#token=a%0A", ""], [`#token=${"a".repeat(257)}`, ""], ["", ""]]) {
+    assert.equal(workspaceInviteToken(fragment, query), null);
   }
 });

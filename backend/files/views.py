@@ -58,6 +58,7 @@ from .services import (
     unique_copy_name,
     unique_upload_name,
 )
+from .storage_routing import OrganizationStorageRequired, require_legacy_destination
 from logs.models import ActivityLog
 from logs.services import get_last_activity, log_action
 from .quota import (
@@ -146,6 +147,11 @@ def file_upload(request):
                 failed_count += 1
                 messages.error(request, f"{uploaded.name}: editor access to an active workspace is required.")
                 continue
+
+        try:
+            require_legacy_destination(tenant)
+        except OrganizationStorageRequired as error:
+            return JsonResponse({'detail': str(error), 'code': error.code}, status=503)
 
         upload_name = unique_upload_name(
             File,
@@ -1233,6 +1239,8 @@ def file_paste(request):
                     file_name=copy_name,
                     tenant=source_file.tenant,
                 )
+            except OrganizationStorageRequired as error:
+                return JsonResponse({'detail': str(error), 'code': error.code}, status=503)
             except (QuotaExceeded, QuotaStateError):
                 messages.error(request, "The workspace or member quota does not allow this file copy.")
                 return redirect(request.META.get("HTTP_REFERER", "dashboard"))

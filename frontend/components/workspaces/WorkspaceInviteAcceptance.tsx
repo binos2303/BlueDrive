@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { CheckCircle2, LoaderCircle, Users } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -9,10 +9,11 @@ import Button from "@/components/ui/Button";
 import { setActiveWorkspaceSelection, WORKSPACES_UPDATED_EVENT } from "@/lib/workspace-context";
 import { acceptWorkspaceInvite, previewWorkspaceInvite } from "@/lib/workspace-service";
 import { drivePath } from "@/lib/drive-paths";
+import { workspaceInviteToken } from "@/lib/organization-account-policy";
 
 type InvitePreview = Awaited<ReturnType<typeof previewWorkspaceInvite>>;
 
-export default function WorkspaceInviteAcceptance({ token }: { token: string }) {
+export default function WorkspaceInviteAcceptance() {
   const router = useRouter();
   const { state: accountState } = useAccount();
   const account = accountState.status === "loaded" ? accountState.account : null;
@@ -22,6 +23,19 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
   const [joined, setJoined] = useState(false);
   const [joinedWorkspaceId, setJoinedWorkspaceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [token, setToken] = useState("");
+  const [ready, setReady] = useState(false);
+  const consumed = useRef(false);
+  const submitting = useRef(false);
+
+  useEffect(() => {
+    if (consumed.current) return;
+    consumed.current = true;
+    const value = workspaceInviteToken(window.location.hash, window.location.search);
+    // Link query cũ còn dùng được, nhưng không gửi tiếp credential qua URL khác.
+    window.history.replaceState(null, "", "/workspace-invite");
+    void Promise.resolve().then(() => { setToken(value ?? ""); setReady(true); });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,6 +50,8 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
   }, [token]);
 
   async function handleJoin() {
+    if (!token || submitting.current) return;
+    submitting.current = true;
     setJoining(true);
     setError(null);
     try {
@@ -49,16 +65,18 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
       }
       window.dispatchEvent(new Event(WORKSPACES_UPDATED_EVENT));
       setJoined(true);
+      setToken("");
       setJoinedWorkspaceId(result.workspace.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not join the workspace.");
     } finally {
+      submitting.current = false;
       setJoining(false);
     }
   }
 
-  const displayLoading = Boolean(token) && loading;
-  const displayError = !token
+  const displayLoading = !ready || (Boolean(token) && loading);
+  const displayError = !token && !joined
     ? "This invitation link is missing its token."
     : error;
 
@@ -79,8 +97,8 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
           <>
             <h1 className="mt-5 text-xl font-semibold text-foreground">Invitation unavailable</h1>
             <p role="alert" className="mt-2 text-sm leading-6 text-danger">{displayError}</p>
-            <p className="mt-3 text-sm leading-6 text-muted">Sign in with the invited email address, then reopen this link. Invitations expire after seven days.</p>
-            <Link href={`/login?next=${encodeURIComponent(`/workspace-invite?token=${token}`)}`} className="mt-5 inline-flex h-10 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-on-accent hover:bg-brand-hover">Sign in</Link>
+            <p className="mt-3 text-sm leading-6 text-muted">Sign in with the invited email address, then reopen the original invitation. Invitations expire after seven days.</p>
+            <Link href="/login?next=%2Fworkspace-invite" className="mt-5 inline-flex h-10 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-on-accent hover:bg-brand-hover">Sign in</Link>
           </>
         ) : preview ? (
           <>
@@ -94,7 +112,7 @@ export default function WorkspaceInviteAcceptance({ token }: { token: string }) 
             {account ? (
               <Button className="mt-6 w-full" loading={joining} onClick={() => { void handleJoin(); }}>Accept invitation</Button>
             ) : (
-              <Link href={`/login?next=${encodeURIComponent(`/workspace-invite?token=${token}`)}`} className="mt-6 inline-flex h-11 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-on-accent hover:bg-brand-hover">Sign in to accept</Link>
+              <div className="mt-6"><p className="mb-3 text-sm text-muted">Sign in, then reopen the original invitation to accept it.</p><Link href="/login?next=%2Fworkspace-invite" className="inline-flex h-11 w-full items-center justify-center rounded-xl bg-brand-contrast px-4 text-sm font-semibold text-on-accent hover:bg-brand-hover">Sign in to accept</Link></div>
             )}
           </>
         ) : null}

@@ -41,11 +41,8 @@ def _invalid(field, message):
 
 def invitation_available():
     from .platform_admin_provisioning import _email_configuration_error
-    # Không đưa activation token ra console/file kể cả ở môi trường development.
-    blocked = {'django.core.mail.backends.console.EmailBackend',
-               'django.core.mail.backends.filebased.EmailBackend',
-               'django.core.mail.backends.dummy.EmailBackend'}
-    return settings.EMAIL_BACKEND not in blocked and _email_configuration_error() is None
+    # Platform và Organization dùng cùng gate để không lệch chính sách giữ kín token.
+    return _email_configuration_error() is None
 
 
 def _require_delivery():

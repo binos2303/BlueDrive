@@ -25,6 +25,11 @@ export function safeInternalRedirect(
     if (destination.pathname === "/login" || destination.pathname === "/register") {
       return fallback;
     }
+    // Đăng nhập lại yêu cầu mở invitation gốc; không mang credential vào query `next`.
+    const invitationPath = decodeURIComponent(destination.pathname).replace(/\/+$/, "");
+    if (["/workspace-invite", "/admin-invite", "/organization-invite"].includes(invitationPath)) {
+      return invitationPath;
+    }
     return `${destination.pathname}${destination.search}${destination.hash}`;
   } catch {
     return fallback;

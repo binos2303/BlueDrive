@@ -7,22 +7,50 @@ from files.models import StorageConfig
 from files.storage_adapters.base import StorageConfigurationError
 
 
+class OrganizationStorageRequired(StorageConfigurationError):
+    code = 'organization_storage_unavailable'
+
+
+class StorageBindingUnavailable(StorageConfigurationError):
+    code = 'storage_binding_unavailable'
+
+
+class StorageScopeMismatch(StorageConfigurationError):
+    code = 'storage_scope_mismatch'
+
+
+def requires_organization_storage(tenant):
+    """Ownership bền vững, không vai trò người upload, xác định kho Enterprise."""
+    if tenant.kind != Tenant.Kind.BUSINESS:
+        return False
+    return bool(tenant.provisioning_key) or tenant.organization_identities.exists()
+
+
+def require_legacy_destination(tenant):
+    """Đường legacy không biết binding nên không được ghi dữ liệu Organization."""
+    if requires_organization_storage(tenant):
+        raise OrganizationStorageRequired('Organization uploads require a verified storage connection.')
+
+
 def _check_owner(connection, tenant):
     cluster = connection.cluster
     if tenant.kind == 'business' and (cluster.kind != 'enterprise' or cluster.tenant_id != tenant.pk):
-        raise StorageConfigurationError('Pinned storage ownership is unavailable.')
+        raise StorageScopeMismatch('Pinned storage ownership is unavailable.')
     if tenant.kind == 'personal' and cluster.kind != 'platform':
-        raise StorageConfigurationError('Pinned storage ownership is unavailable.')
+        raise StorageScopeMismatch('Pinned storage ownership is unavailable.')
 
 
 @transaction.atomic
 def upload_target(tenant, workspace):
+    if workspace.tenant_id != tenant.pk:
+        raise StorageScopeMismatch('Storage destination is unavailable.')
     if not settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED:
+        require_legacy_destination(tenant)
         return {}
     from infrastructure.models import PlatformStorageBinding, StorageBinding
     locked = Tenant.objects.select_for_update().get(pk=tenant.pk)
     if locked.status != 'active' or workspace.tenant_id != locked.pk:
-        raise StorageConfigurationError('Storage destination is unavailable.')
+        raise StorageScopeMismatch('Storage destination is unavailable.')
     bindings = StorageBinding.objects.filter(tenant=locked,state='active').select_related('connection__cluster','storage_config')
     binding = bindings.filter(scope='workspace',workspace=workspace).first() or bindings.filter(scope='tenant').first()
     if binding is not None:
@@ -35,13 +63,13 @@ def upload_target(tenant, workspace):
     else:
         connection = config = None
     if connection is None or connection.state != 'ready' or connection.last_error_code or not connection.verified_at or connection.cluster.state != 'ready':
-        raise StorageConfigurationError('No verified storage binding is available for new uploads.')
+        raise StorageBindingUnavailable('No verified storage binding is available for new uploads.')
     _check_owner(connection,locked)
     if config is None:
         config, _ = StorageConfig.objects.get_or_create(tenant=locked,provider=connection.cluster.provider,
             defaults={'endpoint':connection.endpoint_url,'status':'active'})
     if config.status != 'active' or config.tenant_id != locked.pk:
-        raise StorageConfigurationError('Storage destination is not writable.')
+        raise StorageBindingUnavailable('Storage destination is not writable.')
     return {'storage_config':config,'storage_connection':connection,'endpoint_config_version':connection.revision}
 
 
@@ -50,6 +78,8 @@ def adapter_for_upload(session, *, fallback, cleanup=False):
         # Bật routing thì mọi phiên upload phải ghim revision; không đọc kho mặc định.
         if settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED:
             raise StorageConfigurationError('Upload has no verified storage connection.')
+        if not cleanup and getattr(session, 'tenant', None) is not None:
+            require_legacy_destination(session.tenant)
         _check_legacy_endpoint(session.storage_config if session.storage_config_id else None)
         return fallback()
     from files.storage_adapters import get_storage_adapter

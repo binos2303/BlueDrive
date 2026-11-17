@@ -28,6 +28,7 @@ from files.quota import (
     reserve_upload_quota,
 )
 from files.services import clone_encrypted_file_with_quota, unique_copy_name
+from files.storage_routing import OrganizationStorageRequired, require_legacy_destination
 from files.forms import FileUploadForm
 from security.aes_service import (
     build_file_aad,
@@ -314,6 +315,11 @@ def folder_upload(request):
             messages.error(request, "Editor access to an active workspace is required.")
             return redirect("dashboard")
         tenant = workspace.tenant
+
+    try:
+        require_legacy_destination(tenant)
+    except OrganizationStorageRequired as error:
+        return JsonResponse({'detail': str(error), 'code': error.code}, status=503)
 
     if not uploaded_files or len(uploaded_files) != len(relative_paths):
         messages.error(request, "The selected folder could not be read correctly.")
@@ -920,6 +926,10 @@ def folder_paste(request):
         return redirect(request.META.get("HTTP_REFERER", "shared_with_me"))
 
     tenant = destination.tenant if destination is not None else source.tenant
+    try:
+        require_legacy_destination(tenant)
+    except OrganizationStorageRequired as error:
+        return JsonResponse({'detail': str(error), 'code': error.code}, status=503)
     root_name = _unique_folder_name(source.owner, tenant, destination, source.folder_name, workspace=source.workspace)
     created_files = []
     try:

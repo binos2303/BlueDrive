@@ -22,6 +22,14 @@ Giống hồ sơ nhân sự và ngăn tủ: công ty sở hữu hồ sơ, mỗi 
 
 ## Phương án so sánh
 
+### P2 security và business hardening — 17/11/2026
+
+- **Storage theo destination ownership.** Tenant business có `provisioning_key` hoặc durable `OrganizationIdentity` phải dùng binding/revision Enterprise đã xác minh. Routing OFF hoặc thiếu binding trả structured 503 trước adapter/quota/metadata/object write. Business legacy chưa có provenance này và Platform Personal/SaaS giữ behavior cũ. Legacy upload/copy không biết pin binding nên từ chối destination managed; cut/move metadata không bị đổi. Session/location đã ghim tiếp tục dùng đúng revision, không resolve binding mới; reader/cleanup legacy không bị chuyển endpoint.
+- **Removal là workflow riêng cho Workspace thuộc business Tenant.** Workspace Manager giữ quyền thêm thành viên nhưng phải gửi yêu cầu removal; Org OWNER/ADMIN hiện hành duyệt hoặc từ chối. Personal SaaS giữ direct removal. Một request pending cho mỗi assignment, có snapshot assignment/membership để phát hiện revoke/regrant/đổi quyền; approve và revoke diễn ra trong một transaction, audit request/decision/execution và giữ mọi account/content. Không tự duyệt, không xử lý trùng, không vượt Tenant hoặc bỏ bảo vệ manager cuối cùng; request stale vẫn có thể bị từ chối để đóng lại. Dùng một model additive, không tạo approval engine.
+- **Invitation không mang token trong URL mới gửi tới server.** Admin/Organization/Workspace links dùng fragment, frontend đọc rồi xóa trước các request của flow. Preview Workspace mới dùng POST body có session/CSRF; GET query cũ giữ compatibility. Shared mail gate chặn console/file/dummy kể cả DEBUG, locmem chỉ dùng fixture development. Legacy query links vẫn hợp lệ nhưng request HTTP đầu tiên có thể đã tới access log upstream; ứng dụng không thể thu hồi log đó. Frontend đặt no-referrer trên ba invite pages, scrub URL và không đưa token vào `next`/browser storage; sau sign-in người nhận mở lại lời mời gốc. Expiry, one-time và quyền backend giữ nguyên.
+
+Approval khóa actor/requester theo PK cố định sau Tenant/Membership để tránh khóa chéo hai Organization. Dùng `NO KEY UPDATE` giữ chặn thay active/password nhưng cho audit lấy FK `KEY SHARE`, theo [ma trận khóa PostgreSQL 18](https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS); không thay workflow offboarding của P2.
+
 | Phương án | Đánh đổi / kết luận |
 | --- | --- |
 | Cờ managed trên Membership | Ít cột nhưng mất marker khi membership bị xóa; cần nhiều guard ngầm. Chọn identity ownership bền vững. |

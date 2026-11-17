@@ -62,7 +62,7 @@ export async function installMockApi(page: Page): Promise<MockApi> {
       { id: 2, action: "UPLOAD", actionLabel: "Uploaded later", description: "Later fixture event", createdAt: "2026-11-07T05:00:00Z", metadata: {} },
     ], hasMore: false });
     if (path === "/accounts/api/me/search-history/") return json({ items: [], hasMore: false });
-    if (/^\/accounts\/api\/workspaces\/[^/]+\/members\/$/.test(path)) return json({ workspaceId: path.split("/")[4], workspaceName: "Workspace A", members: [], total: 0, page: 1, pageSize: 20, hasNext: false });
+    if (/^\/accounts\/api\/workspaces\/[^/]+\/members\/$/.test(path)) return json({ workspaceId: path.split("/")[4], workspaceName: "Workspace A", members: [], total: 0, page: 1, pageSize: 20, hasNext: false, capabilities: { removeMembers: true, requestMemberRemoval: false } });
     if (/^\/accounts\/api\/workspaces\/[^/]+\/activity\/$/.test(path)) return json({ events: [] });
     if (path === "/accounts/api/admin/access/") return json({ allowed: true, username: "ui_test", email: "ui-test@example.invalid", can_manage_admins: true });
     if (path === "/accounts/api/admin/settings/") return json({ display_name: "Platform console", revision: 0, can_edit: true, effective: {} });

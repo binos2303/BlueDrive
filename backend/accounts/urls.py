@@ -71,6 +71,21 @@ urlpatterns = [
         name="api-my-workspace-member-detail",
     ),
     path(
+        "api/workspaces/<uuid:workspace_id>/members/<uuid:assignment_id>/removal-requests/",
+        workspace_api.request_workspace_member_removal_view,
+        name="api-workspace-member-removal-request",
+    ),
+    path(
+        "api/tenants/<uuid:tenant_id>/workspace-removal-requests/",
+        workspace_api.organization_workspace_removal_requests_view,
+        name="api-organization-workspace-removal-requests",
+    ),
+    path(
+        "api/tenants/<uuid:tenant_id>/workspace-removal-requests/<uuid:request_id>/decision/",
+        workspace_api.decide_workspace_member_removal_view,
+        name="api-workspace-member-removal-decision",
+    ),
+    path(
         "api/workspaces/<uuid:workspace_id>/invites/",
         workspace_api.create_workspace_invite_view,
         name="api-create-workspace-invite",

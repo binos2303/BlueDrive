@@ -5,11 +5,13 @@ import Link from "next/link";
 import { ArrowLeft, Clock3, Copy, RefreshCw, Trash2 } from "lucide-react";
 import Button from "@/components/ui/Button";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import Dialog from "@/components/ui/Dialog";
 import {
   changeWorkspaceMemberRole,
   createWorkspaceInvite,
   getWorkspaceMembersPage,
   revokeWorkspaceMember,
+  requestWorkspaceMemberRemoval,
   type InviteRole,
   type WorkspaceMember,
   type WorkspaceMembersResult,
@@ -21,7 +23,7 @@ import { drivePath } from "@/lib/drive-paths";
 
 type PendingAction =
   | { kind: "role"; member: WorkspaceMember; role: WorkspaceRole }
-  | { kind: "revoke"; member: WorkspaceMember };
+  | { kind: "revoke" | "request"; member: WorkspaceMember };
 
 function displayError(error: unknown): string {
   return error instanceof Error ? error.message : "The operation could not be completed.";
@@ -36,6 +38,7 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
   const [success, setSuccess] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [saving, setSaving] = useState(false);
+  const [removalReason, setRemovalReason] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<InviteRole>("viewer");
   const [inviteUrl, setInviteUrl] = useState("");
@@ -54,7 +57,7 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
 
 
   async function confirmMutation() {
-    if (!pending || saving) return;
+    if (!pending || saving || (pending.kind === "request" && removalReason.trim().length < 8)) return;
     setSaving(true);
     setError(null);
     setSuccess(null);
@@ -62,6 +65,9 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
       if (pending.kind === "role") {
         const response = await changeWorkspaceMemberRole(workspaceId, pending.member.assignmentId, pending.role);
         setSuccess(response.changed ? "Member role updated." : "The member already has that role.");
+      } else if (pending.kind === "request") {
+        await requestWorkspaceMemberRemoval(workspaceId, pending.member.assignmentId, removalReason.trim());
+        setSuccess("Removal requested. An organization administrator must approve it before access changes.");
       } else {
         await revokeWorkspaceMember(workspaceId, pending.member.assignmentId);
         setSuccess("Workspace access revoked.");
@@ -71,7 +77,7 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
       window.dispatchEvent(new Event(WORKSPACES_UPDATED_EVENT));
     } catch (reason) {
       setError(displayError(reason));
-      setPending(null);
+      if (pending.kind !== "request") setPending(null);
     } finally {
       setSaving(false);
     }
@@ -86,7 +92,7 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
     try {
       const invite = await createWorkspaceInvite(workspaceId, { email: inviteEmail.trim(), role: inviteRole });
       const link = new URL("/workspace-invite", window.location.origin);
-      link.searchParams.set("token", invite.inviteToken);
+      link.hash = new URLSearchParams({ token: invite.inviteToken }).toString();
       setInviteUrl(link.toString());
       setSuccess("Invitation created. Copy the link and send it to the recipient.");
     } catch (reason) {
@@ -98,6 +104,8 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
 
   // Never render a cached list from a different workspace or pagination page.
   const visibleResult = result?.workspaceId === workspaceId && result.page === page ? result : null;
+  const canRemove = visibleResult?.capabilities?.removeMembers === true;
+  const canRequestRemoval = visibleResult?.capabilities?.requestMemberRemoval === true;
 
   const description = pending?.kind === "role"
     ? `Change ${pending.member.username}'s role from ${pending.member.workspaceRole} to ${pending.role}?`
@@ -137,7 +145,7 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
                       </select>
                       {member.isProtected && <p className="mt-1 text-[11px] text-muted">Managed by organization</p>}
                     </td>
-                    <td className="px-5 py-3 text-right"><button type="button" disabled={!editable || saving} title={editable ? "Revoke workspace membership" : "Cannot modify your own or an organization administrator's membership"} aria-label={`Remove ${member.username}`} onClick={() => setPending({ kind: "revoke", member })} className="ui-control inline-flex h-10 w-9 items-center justify-center rounded-lg text-muted hover:bg-background hover:text-danger disabled:opacity-30"><Trash2 size={16} /></button></td>
+                    <td className="px-5 py-3 text-right">{canRequestRemoval ? <Button variant="ghost" size="sm" disabled={!editable || saving || Boolean(member.pendingRemovalRequestId)} onClick={() => { setRemovalReason(""); setPending({ kind: "request", member }); }}>{member.pendingRemovalRequestId ? "Requested" : "Request removal"}</Button> : <button type="button" disabled={!editable || saving || !canRemove} title={editable && canRemove ? "Revoke workspace membership" : "Cannot remove this workspace membership"} aria-label={`Remove ${member.username}`} onClick={() => setPending({ kind: "revoke", member })} className="ui-control inline-flex h-10 w-9 items-center justify-center rounded-lg text-muted hover:bg-background hover:text-danger disabled:opacity-30"><Trash2 size={16} /></button>}</td>
                   </tr>
                 );
               })}</tbody>
@@ -157,7 +165,14 @@ export default function WorkspaceMembersPage({ workspaceId }: { workspaceId: str
         </form>
         {inviteUrl && <div className="mt-4 flex flex-wrap gap-2"><input aria-label="Invitation link" readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} className="h-10 min-w-50 flex-1 rounded-lg border border-border bg-background px-3 text-xs text-foreground" /><Button variant="secondary" onClick={() => { void navigator.clipboard.writeText(inviteUrl).catch(() => setError("Copy failed. Select and copy the link manually.")); }}><Copy size={14} /> Copy link</Button></div>}
       </div>
-      <ConfirmDialog open={pending !== null} title={pending?.kind === "role" ? "Confirm role change" : "Remove workspace member"} description={description} confirmLabel={pending?.kind === "role" ? "Change role" : "Remove member"} destructive={pending?.kind === "revoke"} pending={saving} onConfirm={() => { void confirmMutation(); }} onClose={() => { if (!saving) setPending(null); }} />
+      <Dialog open={pending?.kind === "request"} title="Request member removal" description={`Ask an organization administrator to remove ${pending?.member.username ?? "this member"} from this workspace. Access stays unchanged until approval.`} onClose={() => setPending(null)} closeDisabled={saving}>
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void confirmMutation(); }}>
+          {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+          <label className="block text-sm font-medium">Reason<textarea required minLength={8} maxLength={500} value={removalReason} disabled={saving} onChange={(event) => setRemovalReason(event.target.value)} className="mt-2 min-h-24 w-full rounded-xl border border-border bg-background p-3 text-sm" /></label>
+          <div className="flex justify-end gap-2"><Button variant="secondary" disabled={saving} onClick={() => setPending(null)}>Cancel</Button><Button type="submit" loading={saving} disabled={removalReason.trim().length < 8}>Request removal</Button></div>
+        </form>
+      </Dialog>
+      <ConfirmDialog open={pending !== null && pending.kind !== "request"} title={pending?.kind === "role" ? "Confirm role change" : "Remove workspace member"} description={description} confirmLabel={pending?.kind === "role" ? "Change role" : "Remove member"} destructive={pending?.kind === "revoke"} pending={saving} onConfirm={() => { void confirmMutation(); }} onClose={() => { if (!saving) setPending(null); }} />
     </section>
   );
 }

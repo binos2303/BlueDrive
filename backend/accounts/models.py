@@ -382,6 +382,47 @@ class WorkspaceMembership(models.Model):
         super().save(*args, **kwargs)
 
 
+class WorkspaceRemovalRequest(models.Model):
+    """Đề xuất chỉ giữ ảnh chụp quyền; Org Admin phải kiểm lại trước khi thu hồi."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT, related_name="removal_requests")
+    assignment = models.ForeignKey(WorkspaceMembership, on_delete=models.PROTECT, related_name="removal_requests")
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="workspace_removals_requested")
+    reason = models.CharField(max_length=500)
+    expected_assignment_updated_at = models.DateTimeField()
+    expected_membership_updated_at = models.DateTimeField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="workspace_removals_decided")
+    decision_reason = models.CharField(max_length=500, blank=True, default="")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["assignment"], condition=Q(status="pending"), name="workspace_removal_pending_uniq"),
+            models.CheckConstraint(
+                condition=(Q(status="pending", decided_by__isnull=True, decided_at__isnull=True, decision_reason="")
+                           | (Q(status__in=["approved", "rejected"], decided_by__isnull=False, decided_at__isnull=False) & ~Q(decision_reason=""))),
+                name="workspace_removal_decision_valid",
+            ),
+        ]
+        ordering = ["created_at", "id"]
+
+    def clean(self):
+        if self.assignment_id and self.workspace_id and self.assignment.workspace_id != self.workspace_id:
+            raise ValidationError({"assignment": "Removal request must use its assignment's workspace."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+
 class WorkspaceInvite(models.Model):
     """Single-use, expiring invitation to join one workspace."""
 
