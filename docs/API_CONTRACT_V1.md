@@ -424,3 +424,19 @@ Invitation reuse `ADMIN_INVITES_ENABLED` và email gate hiện có; chưa cấu 
 `GET /accounts/api/me/` trả thêm `myDrive` home pointer, độc lập current selected Workspace. Không có selector, managed employee dùng own My Drive trong Organization; selector explicit phải được authorize trước lookup mặc định. Missing/revoked home membership hoặc thiếu private drive bị deny, không fallback Personal/General. Personal account hiện hữu giữ behavior cũ. Owned My Drive không nằm trong collaborative Workspace directory hoặc API invite/archive/membership thông thường. Org/Platform Admin không có quyền nội dung ngầm; explicit share vẫn theo policy hiện có. Business My Drive tính Tenant + Member quota, không nhận Workspace starter quota.
 
 `storageReady` là kiểm tra metadata binding/revision phù hợp tại thời điểm response, không phải provider health hoặc nghiệm thu storage thật. P2 không tạo/bind cluster, đổi routing, key hoặc credentials. Thiếu Enterprise binding tiếp tục fail closed cho upload. Không convert tài khoản hoặc di chuyển dữ liệu cũ; migration/rollout serving cần phê duyệt riêng.
+
+### P2 hardening: storage, removal và invitation
+
+Managed Organization destination (business Tenant có provisioning key hoặc durable OrganizationIdentity) từ chối upload mới khi routing OFF: `503 {detail,code:"organization_storage_unavailable"}`. Thiếu/không hợp lệ binding trả `storage_binding_unavailable`; sai storage ownership/scope trả `storage_scope_mismatch`. Workspace selector ngoài quyền vẫn bị chặn trước routing. Legacy upload/paste/copy không thể pin binding nên từ chối managed destination trước object/quota/metadata write. Personal/SaaS và business legacy không có managed provenance giữ compatibility; dữ liệu/session đã pin không chuyển target khi binding hoặc flag đổi.
+
+Hai members GET hiện có trả thêm `capabilities:{removeMembers,requestMemberRemoval}` và mỗi member có `pendingRemovalRequestId`. Business Workspace Manager không được DELETE trực tiếp (`403 removal_approval_required`); active Org OWNER/ADMIN có quyền quản lý trực tiếp theo các guard hiện có. Personal SaaS giữ direct removal.
+
+| Route trong `/accounts/api/` | Contract |
+| --- | --- |
+| POST `workspaces/{workspace}/members/{assignment}/removal-requests/` | Org Workspace Manager, exact `{reason}` dài 8–500; `201 {request}`, replay pending giống nhau `200`, pending conflict `409`. |
+| GET `tenants/{tenant}/workspace-removal-requests/?page=1` | Org OWNER/ADMIN; pending requests, `{requests,count,page,pageSize:20,hasNext}`; page 1–100000. |
+| POST `tenants/{tenant}/workspace-removal-requests/{request}/decision/` | Org OWNER/ADMIN, exact `{decision:"approve"|"reject",reason}`; `200 {request}`. Recheck actor/requester và assignment trong transaction; tự duyệt bị chặn, resolved/stale approval `409`; reject vẫn đóng được stale pending. |
+
+Request giữ snapshot assignment/membership để revoke/regrant hoặc đổi quyền không làm request cũ áp dụng nhầm. Approve và revoke atomic, có audit request/approve/reject/execution; không xóa account, Organization membership hoặc content. Các guard self/protected Org roles/manager cuối cùng vẫn áp dụng. Sai Tenant không được đọc hoặc quyết định request.
+
+Admin/Organization/Workspace invitation URL mới dùng fragment. Frontend vẫn đọc legacy query links rồi scrub ngay, không forward token qua login `next` hoặc browser storage; sau đăng nhập người nhận mở lại link gốc. `POST workspace-invites/preview/` exact `{token}` dùng session + CSRF; GET query giữ cho client cũ. Preview và response tạo token có `private, no-store`/`no-referrer`; ba invitation pages có no-referrer ngay từ HTTP response. Request đầu tiên của legacy query link có thể đã xuất hiện ở upstream access log; việc này không được tuyên bố đã thu hồi. Expiry, one-time, invited email và quyền backend giữ nguyên.
