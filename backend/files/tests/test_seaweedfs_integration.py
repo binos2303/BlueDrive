@@ -325,12 +325,7 @@ class SeaweedFSIntegrationTests(unittest.TestCase):
         with self.assertRaises(ClientError) as raised:
             self.client.head_bucket(Bucket="outside-bluedrive-" + uuid.uuid4().hex)
         self.assertEqual(raised.exception.response["ResponseMetadata"]["HTTPStatusCode"], 403)
-        existing_cors = self.client.get_bucket_cors(Bucket=self.bucket)["CORSRules"]
-        for operation, params in ((self.client.put_bucket_versioning, {"VersioningConfiguration": {"Status": "Enabled"}}),
-                                   (self.client.put_bucket_cors, {"CORSConfiguration": {"CORSRules": existing_cors}})):
-            with self.subTest(case="bucket-administration-denied"), self.assertRaises(ClientError) as raised:
-                operation(Bucket=self.bucket, **params)
-            self.assertEqual(raised.exception.response["ResponseMetadata"]["HTTPStatusCode"], 403)
+        # IAM scope được đối chiếu chỉ đọc ở preflight; không thử sửa bucket dù mong bị từ chối.
 
     def test_cors_preflight_and_exposed_upload_receipts(self):
         origin = os.environ["FRONTEND_ORIGINS"].split(",")[0]
@@ -345,3 +340,41 @@ class SeaweedFSIntegrationTests(unittest.TestCase):
         self.assertTrue({"etag", "x-amz-checksum-sha256"} <= exposed)
         _, rejected, _ = http(signed, method="OPTIONS", headers={"Origin": "https://unapproved.invalid", "Access-Control-Request-Method": "PUT"})
         self.assertNotIn(rejected.get("Access-Control-Allow-Origin"), ("*", "https://unapproved.invalid"))
+
+
+class ProviderGateSafetyTests(unittest.TestCase):
+    def denial_fixture(self):
+        from unittest.mock import Mock
+
+        denied = ClientError({"Error": {"Code": "AccessDenied"},
+                              "ResponseMetadata": {"HTTPStatusCode": 403}}, "HeadBucket")
+        clients = [Mock(spec_set=("head_bucket", "close")) for _ in range(2)]
+        for client in clients:
+            client.head_bucket.side_effect = denied
+        case = SeaweedFSIntegrationTests("test_anonymous_invalid_credentials_and_cross_bucket_are_denied")
+        case.endpoint = "http://127.0.0.1:1"
+        case.bucket = "bluedrive-test-unit-fixture"
+        case.client = Mock(spec_set=("head_bucket", "close"))
+        case.client.head_bucket.side_effect = denied
+        return case, clients
+
+    def test_runtime_denial_gate_never_calls_bucket_administration(self):
+        from unittest.mock import patch
+
+        case, clients = self.denial_fixture()
+        # Client nghiêm ngặt chỉ cho HEAD/close; thêm lệnh sửa bucket sẽ làm test lỗi.
+        with patch("boto3.client", side_effect=clients) as factory:
+            case.test_anonymous_invalid_credentials_and_cross_bucket_are_denied()
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(case.client.head_bucket.call_count, 1)
+        self.assertTrue(all(client.head_bucket.call_count == 1 and client.close.call_count == 1 for client in clients))
+
+    def test_runtime_denial_gate_still_rejects_cross_bucket_success(self):
+        from unittest.mock import patch
+
+        case, clients = self.denial_fixture()
+        case.client.head_bucket.side_effect = None
+        case.client.head_bucket.return_value = {}
+        with patch("boto3.client", side_effect=clients), self.assertRaises(AssertionError):
+            case.test_anonymous_invalid_credentials_and_cross_bucket_are_denied()
+        self.assertEqual(case.client.head_bucket.call_count, 1)
