@@ -113,7 +113,7 @@ Remove-Item Env:SEAWEEDFS_INTEGRATION
 
 Test worker không mock S3: gọi upload API, lấy part authorization, upload qua HTTP, reconcile ListParts, complete, chạy `finalize_uploads`, đọc file qua service hiện có, kiểm quota và reject hash sai; gồm file rỗng. Dùng test DB riêng của Django, không tạo tài khoản giả ở DB ứng dụng. Trước khi test, bảo đảm không có tiến trình khác đang dùng cùng test DB.
 
-Class finalizer có thêm gate pin connection/binding, session/CSRF, direct download và retry sau metadata rollback khi S3 đã publish. Gate này cần Chrome đã cài cùng frontend dependencies hiện có để chạy challenge CORS thật; browser dùng home/cache tạm, không nhận credential DB/S3. Không sửa bucket bằng application identity để thử denial. Kết quả fixture không thay nghiệm thu runtime phục vụ, Enterprise hay backup/restore; xem [bằng chứng P4](../../docs/PLATFORM_QUALIFICATION_2026-11-13.md#tiếp-nối-p4--17112026-development).
+Class finalizer có thêm gate pin connection/binding, session/CSRF, direct download, lifecycle, Workspace quota đồng thời và retry sau metadata rollback/timeout/cleanup fault. Gate này cần Chrome đã cài cùng frontend dependencies hiện có để chạy challenge CORS thật; browser dùng home/cache tạm, không nhận credential DB/S3. Không sửa bucket bằng application identity để thử denial. Kết quả fixture không thay nghiệm thu runtime phục vụ, Enterprise hay backup/restore; xem [bằng chứng P4](../../docs/PLATFORM_QUALIFICATION_2026-11-13.md#tiếp-nối-p4--17112026-development).
 
 ```powershell
 Push-Location .\frontend
