@@ -289,12 +289,15 @@ def create_upload(request):
         if existing is not None:
             try:
                 adapter = adapter_for_upload(existing, fallback=get_storage_adapter)
-            except Exception:
-                logger.exception("Storage adapter unavailable for user_id=%s", request.user.pk)
+            except StorageError as error:
+                logger.error("Storage adapter unavailable for user_id=%s code=%s", request.user.pk, getattr(error, 'code', 'storage_unavailable'))
                 return Response(
-                    {"detail": "Object storage is not available."},
+                    {"detail": "Object storage is not available.", "code": getattr(error, 'code', 'storage_unavailable')},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
+            except Exception:
+                logger.exception("Storage adapter unavailable for user_id=%s", request.user.pk)
+                return Response({"detail": "Object storage is not available.", "code": "storage_unavailable"}, status=503)
             return existing_session_response(existing)
 
     # Create the object key through the configured adapter; do not invent a key format.
@@ -302,10 +305,10 @@ def create_upload(request):
         target_fields = upload_target(tenant, workspace)
         adapter = get_storage_adapter(connection=target_fields['storage_connection']) if target_fields else get_storage_adapter()
         object_key = adapter.create_object_key("staging")
-    except StorageError:
-        logger.exception("Object storage unavailable for user_id=%s", request.user.pk)
+    except StorageError as error:
+        logger.error("Object storage unavailable for user_id=%s code=%s", request.user.pk, getattr(error, 'code', 'storage_unavailable'))
         return Response(
-            {"detail": "Object storage is not available."},
+            {"detail": "Object storage is not available.", "code": getattr(error, 'code', 'storage_unavailable')},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     except Exception:
@@ -353,8 +356,8 @@ def create_upload(request):
             )
         try:
             adapter = adapter_for_upload(existing, fallback=get_storage_adapter)
-        except StorageError:
-            return Response({'detail':'Object storage is not available.'},status=503)
+        except StorageError as error:
+            return Response({'detail':'Object storage is not available.', 'code': getattr(error, 'code', 'storage_unavailable')},status=503)
         return existing_session_response(existing)
 
     try:
