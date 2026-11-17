@@ -7,7 +7,7 @@ from django.db import IntegrityError, transaction
 from django.http import HttpResponseForbidden
 
 from .models import (
-    Membership, Tenant, Workspace,
+    Membership, OrganizationIdentity, Tenant, Workspace,
     WorkspaceMembership,
 )
 
@@ -16,8 +16,26 @@ class ActiveTenantRequired(PermissionDenied):
     pass
 
 
+def get_organization_identity(user):
+    """Ownership không biến mất khi membership bị thu hồi hoặc thiếu."""
+    if not user or not getattr(user, "pk", None):
+        return None
+    try:
+        return user.organization_identity
+    except OrganizationIdentity.DoesNotExist:
+        return None
+
+
+def _organization_identity_is_active(user):
+    identity = get_organization_identity(user)
+    return identity is None or Membership.objects.filter(
+        tenant_id=identity.tenant_id, user_id=user.pk, status=Membership.Status.ACTIVE,
+        tenant__kind=Tenant.Kind.BUSINESS, tenant__status=Tenant.Status.ACTIVE,
+    ).exists()
+
+
 def active_membership(user, tenant_id):
-    if not user or not user.is_authenticated or not user.is_active:
+    if not user or not user.is_authenticated or not user.is_active or not _organization_identity_is_active(user):
         return None
     return (
         Membership.objects.filter(
@@ -32,7 +50,7 @@ def active_membership(user, tenant_id):
 
 
 def active_memberships(user):
-    if not user or not user.is_authenticated or not user.is_active:
+    if not user or not user.is_authenticated or not user.is_active or not _organization_identity_is_active(user):
         return Membership.objects.none()
     return Membership.objects.filter(
         user_id=user.pk,
@@ -50,15 +68,20 @@ def active_tenant_ids(user):
 
 
 def get_default_tenant(user):
-    """Resolve the personal My Drive tenant first, independent of memberships.
+    """Home là Organization của managed identity hoặc Personal của user thường.
 
-    The Drive switcher sends an explicit workspace ID when a shared workspace
-    is selected. Without that selector, Drive means the authenticated user's
-    own personal area; this prevents joining a shared/business workspace from
-    silently replacing My Drive as the default context.
+    Membership cộng tác không thay ownership My Drive; managed identity thiếu
+    quyền home phải bị chặn thay vì chuyển sang Personal hoặc Tenant khác.
     """
     if not user or not user.is_authenticated or not user.is_active:
         raise ActiveTenantRequired("An active account is required.")
+
+    identity = get_organization_identity(user)
+    if identity is not None:
+        membership = active_membership(user, identity.tenant_id)
+        if membership is None:
+            raise ActiveTenantRequired("Organization access is unavailable.")
+        return membership.tenant
 
     personal_membership = (
         Membership.objects.filter(
@@ -148,15 +171,16 @@ def get_default_workspace(tenant):
 
 
 def workspace_role_for_user(user, workspace):
-    """Resolve a direct Workspace role; group-based grants are not supported.
+    """Quyền quản trị Tenant chỉ kế thừa vào vùng cộng tác, không vào ngăn riêng.
 
-    Active tenant owners/admins administer active workspaces. Other users
-    must hold an active, direct WorkspaceMembership. File and folder actions
-    still require their resource-level permission checks.
+    Các thao tác file/folder vẫn phải kiểm tra quyền tài nguyên sau bước này.
     """
     membership = active_membership(user, workspace.tenant_id)
     if membership is None or workspace.status != Workspace.Status.ACTIVE:
         return None
+    if workspace.owned_identity_id is not None:
+        # Quyền quản lý account/Tenant không mở ngăn My Drive riêng của employee.
+        return WorkspaceMembership.Role.ADMIN if workspace.owned_identity_id == user.pk else None
     if membership.role in (Membership.Role.OWNER, Membership.Role.ADMIN):
         return WorkspaceMembership.Role.ADMIN
 
@@ -169,6 +193,17 @@ def workspace_role_for_user(user, workspace):
         .values_list("role", flat=True)
         .first()
     )
+
+
+def resource_default_workspace(user, tenant):
+    """Model fallback của employee không được ghi ngầm vào General của Organization."""
+    identity = get_organization_identity(user)
+    if identity is None:
+        return get_default_workspace(tenant)
+    workspace = Workspace.objects.filter(owned_identity=identity, tenant=tenant, status=Workspace.Status.ACTIVE).first()
+    if workspace is None or not can_access_workspace(user, workspace):
+        raise ActiveTenantRequired("An explicit authorized organization workspace is required.")
+    return workspace
 
 def can_access_workspace(user, workspace):
     return workspace_role_for_user(user, workspace) is not None
@@ -195,9 +230,8 @@ def _request_workspace_values(request, payload=None):
 
     for params in (getattr(request, "GET", None), getattr(request, "POST", None)):
         if params is not None and "workspace_id" in params:
-            value = params.get("workspace_id")
-            if value is not None and str(value).strip():
-                values.append(value)
+            supplied = params.getlist("workspace_id") if hasattr(params, "getlist") else [params.get("workspace_id")]
+            values.extend(value for value in supplied if value is not None and str(value).strip())
 
     headers = getattr(request, "headers", {})
     header_value = headers.get("X-Workspace-ID") if headers else None
@@ -209,23 +243,13 @@ def _request_workspace_values(request, payload=None):
     return values
 
 
-def resolve_request_workspace(request, tenant, payload=None):
-    """Resolve one active workspace that the caller is authorized to access.
+def resolve_request_workspace(request, tenant=None, payload=None):
+    """Kiểm selector trước home lookup và chỉ trả Workspace đã được cấp quyền.
 
-    Supported selectors are JSON/form/query ``workspace_id`` and the
-    ``X-Workspace-ID`` header. Conflicting or malformed selectors fail closed.
-    Requests without a selector retain compatibility by selecting the tenant's
-    default workspace when accessible, otherwise the first accessible active
-    workspace. An explicitly selected workspace never silently falls back.
+    Selector JSON/form/query/header mâu thuẫn hoặc sai định dạng bị từ chối.
+    Managed identity không selector chỉ dùng ngăn riêng; user thường giữ fallback
+    Workspace đã có. Selector explicit không bao giờ fallback ngầm.
     """
-    if tenant is None:
-        return None
-
-    tenant_id = getattr(tenant, "pk", tenant)
-    tenant_obj = tenant if isinstance(tenant, Tenant) else Tenant.objects.filter(pk=tenant_id).first()
-    if tenant_obj is None or tenant_obj.status != Tenant.Status.ACTIVE:
-        return None
-
     supplied_values = _request_workspace_values(request, payload)
     selected_workspace_id = None
     if supplied_values:
@@ -253,6 +277,25 @@ def resolve_request_workspace(request, tenant, payload=None):
         if workspace is None or not can_access_workspace(request.user, workspace):
             return None
         return workspace
+
+    if tenant is None:
+        try:
+            tenant = get_default_tenant(request.user)
+        except ActiveTenantRequired:
+            return None
+    tenant_id = getattr(tenant, "pk", tenant)
+    tenant_obj = tenant if isinstance(tenant, Tenant) else Tenant.objects.filter(pk=tenant_id).first()
+    if tenant_obj is None or tenant_obj.status != Tenant.Status.ACTIVE:
+        return None
+
+    identity = get_organization_identity(request.user)
+    if identity is not None:
+        # Không thay ngăn riêng bằng General hoặc workspace đầu tiên khi offboard.
+        workspace = Workspace.objects.filter(
+            owned_identity_id=identity.pk, tenant_id=identity.tenant_id,
+            status=Workspace.Status.ACTIVE,
+        ).select_related("tenant").first()
+        return workspace if tenant_obj.pk == identity.tenant_id and workspace is not None and can_access_workspace(request.user, workspace) else None
 
     default_workspace = get_default_workspace(tenant_obj)
     if (

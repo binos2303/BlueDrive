@@ -30,8 +30,7 @@ from .services import (
 
 
 def _context(request):
-    tenant = get_default_tenant(request.user)
-    workspace = resolve_request_workspace(request, tenant)
+    workspace = resolve_request_workspace(request)
     if workspace is None or not can_access_workspace(request.user, workspace):
         return None
     return workspace

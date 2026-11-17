@@ -308,8 +308,8 @@ def folder_upload(request):
             messages.error(request, "The destination folder belongs to a different workspace.")
             return redirect(request.META.get("HTTP_REFERER", "dashboard"))
     else:
-        tenant = get_default_tenant(request.user)
-        workspace = resolve_request_workspace(request, tenant)
+        workspace = resolve_request_workspace(request)
+        tenant = workspace.tenant if workspace is not None else None
         if workspace is None or not can_edit_workspace_content(request.user, workspace):
             messages.error(request, "Editor access to an active workspace is required.")
             return redirect("dashboard")
@@ -514,18 +514,19 @@ def folder_create(request):
         folder = form.save(commit=False)
         resource_owner = parent.owner if parent is not None else request.user
         folder.owner = resource_owner
-        folder.tenant = parent.tenant if parent is not None else get_default_tenant(request.user)
         if parent is not None:
+            folder.tenant = parent.tenant
             folder.workspace = parent.workspace
             requested_workspace_id = request.POST.get("workspace_id")
             if requested_workspace_id and str(requested_workspace_id) != str(parent.workspace_id):
                 messages.error(request, "The destination folder belongs to a different workspace.")
                 return redirect(request.META.get("HTTP_REFERER", "dashboard"))
         else:
-            folder.workspace = resolve_request_workspace(request, folder.tenant)
+            folder.workspace = resolve_request_workspace(request)
             if folder.workspace is None or not can_edit_workspace_content(request.user, folder.workspace):
                 messages.error(request, "Editor access to an active workspace is required.")
                 return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+            folder.tenant = folder.workspace.tenant
         folder.parent = parent
         if folder.parent is not None and folder.parent.deleted_at is not None:
             messages.error(request, "Invalid parent folder.")
@@ -603,11 +604,11 @@ def folder_create_api(request):
             return JsonResponse({"error": "Destination folder belongs to a different workspace."}, status=404)
 
     resource_owner = parent.owner if parent else request.user
-    tenant = parent.tenant if parent else get_default_tenant(request.user)
+    tenant = parent.tenant if parent else None
     if parent is not None:
         workspace = parent.workspace
     else:
-        workspace = resolve_request_workspace(request, tenant, data)
+        workspace = resolve_request_workspace(request, payload=data)
         if workspace is None:
             return JsonResponse({"error": "Workspace is unavailable or not accessible."}, status=404)
         if not can_edit_workspace_content(request.user, workspace):

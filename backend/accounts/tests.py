@@ -63,7 +63,11 @@ class AccountApiTests(TestCase):
         )
         self.client.force_authenticate(self.user)
 
-        response = self.client.get(reverse("api-current-account"))
+        # Chọn vùng cộng tác tường minh; tham gia Organization không đổi home My Drive.
+        workspace = tenant.workspaces.get(is_default=True)
+        response = self.client.get(
+            reverse("api-current-account"), HTTP_X_WORKSPACE_ID=str(workspace.pk)
+        )
 
         self.assertEqual(response.data["account"]["type"], "business")
         self.assertEqual(response.data["account"]["tenant"]["id"], str(tenant.pk))

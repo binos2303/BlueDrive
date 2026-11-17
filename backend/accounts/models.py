@@ -1,6 +1,7 @@
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 
@@ -33,6 +34,8 @@ class Tenant(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    provisioning_key = models.UUIDField(null=True, blank=True, unique=True)
+    provisioning_digest = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         constraints = [
@@ -114,6 +117,38 @@ class Membership(models.Model):
                 name="membership_tenant_role_idx",
             ),
         ]
+
+
+class OrganizationIdentity(models.Model):
+    """Ownership tồn tại sau thu hồi membership để account không thành Personal."""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, primary_key=True, on_delete=models.PROTECT,
+        related_name="organization_identity",
+    )
+    tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="organization_identities")
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="organization_invitations_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    request_key = models.UUIDField(default=uuid.uuid4, unique=True)
+    request_digest = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "user"], name="org_identity_tenant_user_uniq")]
+
+    def clean(self):
+        if self.tenant_id and not Tenant.objects.filter(pk=self.tenant_id, kind=Tenant.Kind.BUSINESS).exists():
+            raise ValidationError({"tenant": "Organization identity requires a business tenant."})
+        if self.user_id and (self.user.is_staff or self.user.is_superuser or Tenant.objects.filter(personal_owner_id=self.user_id).exists()):
+            raise ValidationError({"user": "Organization identity requires a separate managed account."})
+        previous = type(self).objects.filter(pk=self.pk).values_list("tenant_id", flat=True).first() if self.pk else None
+        if previous is not None and previous != self.tenant_id:
+            raise ValidationError({"tenant": "Organization ownership cannot be reassigned."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
 
 
 class QuotaAccount(models.Model):
@@ -223,6 +258,9 @@ class Workspace(models.Model):
         default=Status.ACTIVE,
     )
     is_default = models.BooleanField(default=False)
+    owned_identity = models.OneToOneField(
+        OrganizationIdentity, null=True, blank=True, on_delete=models.PROTECT, related_name="my_drive",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -252,6 +290,10 @@ class Workspace(models.Model):
                 condition=Q(status__in=["active", "archived"]),
                 name="workspace_status_valid_check",
             ),
+            models.CheckConstraint(
+                condition=Q(owned_identity__isnull=True) | Q(is_default=False),
+                name="workspace_owned_not_default",
+            ),
         ]
         indexes = [
             models.Index(fields=["tenant", "status"], name="workspace_tenant_status_idx"),
@@ -260,6 +302,18 @@ class Workspace(models.Model):
 
     def __str__(self):
         return f"{self.tenant.name} / {self.name}"
+
+    @property
+    def is_my_drive(self):
+        return self.is_default or self.owned_identity_id is not None
+
+    def clean(self):
+        if self.owned_identity_id and (self.is_default or self.owned_identity.tenant_id != self.tenant_id):
+            raise ValidationError({"owned_identity": "Organization My Drive must use its identity's tenant."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
 
 
 class WorkspaceMembership(models.Model):

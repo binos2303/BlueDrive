@@ -6,6 +6,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from accounts.services import get_personal_tenant
+from accounts.access import get_default_tenant, get_organization_identity
 from .models import File, UploadSession
 from .quota import (
     finalize_upload_quota,
@@ -106,7 +107,7 @@ def _clone_encrypted_file(source_file, *, owner, folder, file_name, tenant=None)
         tenant=(
             folder.tenant
             if folder is not None
-            else tenant or get_personal_tenant(owner)
+            else tenant or (get_default_tenant(owner) if get_organization_identity(owner) is not None else get_personal_tenant(owner))
         ),
         owner=owner,
         workspace=(folder.workspace if folder is not None else source_file.workspace),

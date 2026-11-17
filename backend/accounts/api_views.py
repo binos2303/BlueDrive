@@ -1,4 +1,5 @@
 from .platform_admin import is_platform_admin
+from .access import active_membership
 from django import forms
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.core.exceptions import ValidationError
@@ -53,72 +54,46 @@ def _registration_accepted():
     )
 
 
-def _account_snapshot(user):
-    memberships = list(
-        Membership.objects.filter(
-            user=user,
-            status=Membership.Status.ACTIVE,
-            tenant__status=Tenant.Status.ACTIVE,
-        )
-        .select_related("tenant")
-        .order_by("tenant__kind", "tenant__name", "tenant_id")
-    )
-    business_memberships = [
-        membership
-        for membership in memberships
-        if membership.tenant.kind == Tenant.Kind.BUSINESS
-    ]
-    personal_membership = next(
-        (
-            membership
-            for membership in memberships
-            if membership.tenant.kind == Tenant.Kind.PERSONAL
-            and membership.tenant.personal_owner_id == user.pk
-        ),
-        None,
-    )
-    account_type = (
-        "business"
-        if business_memberships
-        else "individual"
-        if personal_membership
-        else "unclassified"
-    )
-    selected_membership = (
-        business_memberships[0]
-        if len(business_memberships) == 1
-        else personal_membership
-        if not business_memberships
-        else None
-    )
+def _account_snapshot(user, request=None):
+    """Snapshot dùng cùng context đã cấp quyền; My Drive luôn trỏ vùng home riêng."""
+    from types import SimpleNamespace
+    from .access import (ActiveTenantRequired, _request_workspace_values,
+                         get_default_tenant, get_organization_identity, resolve_request_workspace)
+
+    memberships = list(Membership.objects.filter(
+        user=user, status=Membership.Status.ACTIVE, tenant__status=Tenant.Status.ACTIVE,
+    ).select_related("tenant").order_by("tenant__kind", "tenant__name", "tenant_id"))
+    identity = get_organization_identity(user)
+    try:
+        home_tenant = get_default_tenant(user)
+    except ActiveTenantRequired:
+        if identity is not None:
+            raise
+        home_tenant = None
+    home_workspace = resolve_request_workspace(SimpleNamespace(user=user), home_tenant) if home_tenant else None
+    if identity is not None and home_workspace is None:
+        raise ActiveTenantRequired("Organization My Drive is unavailable.")
+    selected_workspace = resolve_request_workspace(request) if request is not None else home_workspace
+    if request is not None and _request_workspace_values(request) and selected_workspace is None:
+        raise ActiveTenantRequired("Selected workspace is unavailable.")
+    selected_tenant = selected_workspace.tenant if selected_workspace else home_tenant
+    selected_membership = next((row for row in memberships if selected_tenant and row.tenant_id == selected_tenant.pk), None)
+    account_type = ("business" if selected_tenant and selected_tenant.kind == Tenant.Kind.BUSINESS
+                    else "individual" if selected_tenant and selected_tenant.kind == Tenant.Kind.PERSONAL
+                    else "unclassified")
     return {
         "is_platform_admin": is_platform_admin(user),
-        "profile": {
-            "username": user.get_username(),
-            "email": user.email,
-        },
+        "profile": {"username": user.get_username(), "email": user.email},
         "account": {
             "type": account_type,
-            "tenant": (
-                {
-                    "id": str(selected_membership.tenant_id),
-                    "name": selected_membership.tenant.name,
-                    "role": selected_membership.role,
-                }
-                if selected_membership
-                else None
-            ),
+            "tenant": ({"id": str(selected_membership.tenant_id), "name": selected_membership.tenant.name,
+                        "role": selected_membership.role} if selected_membership else None),
             "upgradeEligible": None if account_type == "individual" else False,
         },
-        "memberships": [
-            {
-                "id": str(membership.tenant_id),
-                "name": membership.tenant.name,
-                "type": membership.tenant.kind,
-                "role": membership.role,
-            }
-            for membership in memberships
-        ],
+        "myDrive": ({"tenantId": str(home_workspace.tenant_id), "workspaceId": str(home_workspace.pk),
+                     "ownership": "organization" if identity is not None else "personal"} if home_workspace else None),
+        "memberships": [{"id": str(row.tenant_id), "name": row.tenant.name,
+                         "type": row.tenant.kind, "role": row.role} for row in memberships],
     }
 
 
@@ -265,7 +240,10 @@ def login_api_view(request):
 @permission_classes([IsAuthenticated])
 def current_account_view(request):
     if request.method == "GET":
-        return Response(_account_snapshot(request.user))
+        return Response(_account_snapshot(request.user, request))
+
+    # Không ghi profile rồi mới phát hiện selector hoặc managed context không hợp lệ.
+    _account_snapshot(request.user, request)
 
     if not isinstance(request.data, dict) or set(request.data) != {"email", "current_password"}:
         return Response({"detail": "Email and current password are required."}, status=400)
@@ -281,7 +259,7 @@ def current_account_view(request):
         update_user_email(request.user, form.cleaned_data["email"], request.data["current_password"])
     except EmailUpdateDenied as error:
         return Response({"detail": error.detail, "fieldErrors": {error.field: [error.detail]}}, status=error.status)
-    return Response(_account_snapshot(request.user))
+    return Response(_account_snapshot(request.user, request))
 
 
 @api_view(["POST"])
@@ -366,6 +344,7 @@ def _set_tenant_member_suspension(
         )
         if (
             actor_membership is None
+            or active_membership(request.user, tenant.pk) is None
             or actor_membership.role
             not in (Membership.Role.OWNER, Membership.Role.ADMIN)
         ):
@@ -393,8 +372,17 @@ def _set_tenant_member_suspension(
                 status=status.HTTP_409_CONFLICT,
             )
 
+        from .models import OrganizationIdentity
+        identity = OrganizationIdentity.objects.select_for_update().filter(user_id=target.user_id, tenant=tenant).first()
+        managed_user = get_user_model().objects.select_for_update().get(pk=target.user_id) if identity else None
+        if managed_user is not None and not suspended and (identity.activated_at is None or not managed_user.has_usable_password()):
+            return Response({"detail": "Accept the account invitation before restoring access.", "code": "invitation_required"}, status=409)
         target.status = new_status
         target.save(update_fields=["status", "updated_at"])
+        if managed_user is not None:
+            # Identity riêng của Organization: offboard chặn login, không xóa hồ sơ/data.
+            managed_user.is_active = not suspended
+            managed_user.save(update_fields=["is_active"])
         ActivityLog.objects.create(
             user=request.user,
             tenant=tenant,

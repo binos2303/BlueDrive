@@ -51,10 +51,7 @@ def _json_payload(request):
 
 
 def _drive_context(request, payload=None):
-    tenant = get_default_tenant(request.user)
-    if tenant is None:
-        raise Http404
-    workspace = resolve_request_workspace(request, tenant, payload)
+    workspace = resolve_request_workspace(request, payload=payload)
     if workspace is None:
         raise Http404("Workspace is unavailable or not accessible.")
     return workspace.tenant, workspace

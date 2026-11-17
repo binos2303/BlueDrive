@@ -11,17 +11,21 @@ def create_personal_tenant_for_new_user(sender, instance, created, **kwargs):
     # Provisioned admins are created inactive with an unusable password.
     # They are staff before the first post_save, so they must never receive
     # the ordinary user's Personal Tenant during invitation.
-    if created and not instance.is_staff and not instance.is_superuser:
+    if (created and not instance.is_staff and not instance.is_superuser
+            and not getattr(instance, "_skip_personal_tenant_provisioning", False)):
         get_personal_tenant(instance)
 
 
-from accounts.models import Membership, Tenant, WorkspaceMembership
+from accounts.models import Membership, OrganizationIdentity, Tenant, WorkspaceMembership
 from accounts.access import get_default_workspace
 
 
 @receiver(post_save, sender=Membership)
 def ensure_default_workspace_for_new_membership(sender, instance, created, **kwargs):
     if not created:
+        return
+    if OrganizationIdentity.objects.filter(user_id=instance.user_id, tenant_id=instance.tenant_id).exists():
+        # Identity provisioning cấp My Drive riêng, không cấp General ngầm.
         return
     # A membership added to another user's personal tenant (for example when
     # accepting a Workspace invitation) must not grant access to its private
@@ -52,7 +56,7 @@ def ensure_default_workspace_for_new_membership(sender, instance, created, **kwa
 @receiver(post_save, sender="accounts.Workspace")
 def provision_new_workspace_quota(sender, instance, created, **kwargs):
     """Assign Workspace Starter to newly created non-default workspaces."""
-    if created and not instance.is_default:
+    if created and not instance.is_my_drive:
         from accounts.models import QuotaAccount, StoragePlan
         plan = starting_storage_plan(StoragePlan.Scope.WORKSPACE)
         QuotaAccount.objects.get_or_create(

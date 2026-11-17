@@ -120,15 +120,21 @@ def permanently_delete_files(files):
         for file in files:
             if file.pk in billed_files:
                 continue
-            if file.workspace and not file.workspace.is_default:
-                quota = QuotaAccount.objects.filter(
+            if file.workspace and not file.workspace.is_my_drive:
+                quotas = QuotaAccount.objects.filter(
                     workspace_id=file.workspace_id, scope=QuotaAccount.Scope.WORKSPACE,
-                ).first()
+                )
             else:
-                quota = QuotaAccount.objects.filter(
+                quotas = QuotaAccount.objects.filter(
                     tenant_id=file.tenant_id, scope=QuotaAccount.Scope.TENANT,
-                ).first()
-            if quota is not None:
+                )
+                if file.workspace and file.workspace.owned_identity_id is not None:
+                    # My Drive employee được tính cả ngân sách Organization và cá nhân.
+                    quotas = quotas | QuotaAccount.objects.filter(
+                        tenant_id=file.tenant_id, user_id=file.owner_id,
+                        scope=QuotaAccount.Scope.MEMBER,
+                    )
+            for quota in quotas:
                 decrement_by_account[quota.pk] += max(0, int(file.file_size))
 
         accounts = {

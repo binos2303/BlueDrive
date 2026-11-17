@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import admin_api, admin_files_api, admin_logs_api, admin_permissions_api, admin_settings_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api
+from . import admin_api, admin_files_api, admin_logs_api, admin_permissions_api, admin_settings_api, api_views, settings_api, views, workspace_api, platform_admin_provisioning, quota_admin_api, organization_quota_api, account_security_api, organization_api
 
 
 urlpatterns = [
@@ -34,6 +34,8 @@ urlpatterns = [
     path("api/admin/quotas/history/", quota_admin_api.quota_history_view, name="api-admin-quota-history"),
     path("api/admin/quotas/<uuid:quota_id>/", quota_admin_api.quota_update_view, name="api-admin-quota-update"),
     path("api/admin/organizations/", admin_api.admin_organizations_view, name="api-admin-organizations"),
+    path("api/admin/organizations/<uuid:tenant_id>/reinvite/", organization_api.reinvite_organization_administrator_view, name="api-admin-organization-reinvite"),
+    path("api/organization-invite/accept/", organization_api.accept_organization_invitation_view, name="api-organization-invite-accept"),
     path("api/admin/workspaces/", admin_api.admin_workspaces_view, name="api-admin-workspaces"),
     path("register/", views.register_view, name="register"),
     path("login/", views.login_view, name="login"),
@@ -112,6 +114,11 @@ urlpatterns = [
         "api/tenants/<uuid:tenant_id>/workspaces/<uuid:workspace_id>/members/<uuid:membership_id>/",
         workspace_api.workspace_member_detail_view,
         name="api-workspace-member-detail",
+    ),
+    path(
+        "api/tenants/<uuid:tenant_id>/memberships/<uuid:membership_id>/reinvite/",
+        organization_api.reinvite_organization_member_view,
+        name="api-organization-member-reinvite",
     ),
     path(
         "api/tenants/<uuid:tenant_id>/memberships/<uuid:membership_id>/suspend/",
