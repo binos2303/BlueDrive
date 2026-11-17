@@ -1,5 +1,5 @@
 import { accountCsrfHeaders, requestAccountApi } from "@/lib/account-service";
-import type { OrganizationWorkspace, WorkspaceStatus } from "@/lib/workspace-service";
+import type { OrganizationWorkspace, WorkspaceStatus, WorkspaceRemovalRequest } from "@/lib/workspace-service";
 
 export type OrganizationMember = {
   membershipId: string;
@@ -132,4 +132,14 @@ export function removeWorkspaceMember(tenantId: string, workspaceId: string, mem
     tenantPath(tenantId, `workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(membershipId)}/`),
     "DELETE",
   );
+}
+
+export type WorkspaceRemovalRequests = { requests: WorkspaceRemovalRequest[]; count: number; page: number; pageSize: number; hasNext: boolean };
+
+export function getWorkspaceRemovalRequests(tenantId: string, page = 1) {
+  return requestAccountApi<WorkspaceRemovalRequests>(tenantPath(tenantId, `workspace-removal-requests/?page=${page}`));
+}
+
+export function decideWorkspaceRemoval(tenantId: string, requestId: string, decision: "approve" | "reject", reason: string) {
+  return mutate<{ request: WorkspaceRemovalRequest }>(tenantPath(tenantId, `workspace-removal-requests/${encodeURIComponent(requestId)}/decision/`), "POST", { decision, reason });
 }

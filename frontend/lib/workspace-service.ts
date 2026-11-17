@@ -110,8 +110,9 @@ export async function previewWorkspaceInvite(token: string): Promise<{
   invitedBy: string;
   expiresAt: string;
 }> {
-  const params = new URLSearchParams({ token });
-  return requestAccountApi(`/accounts/api/workspace-invites/preview/?${params.toString()}`);
+  return requestAccountApi("/accounts/api/workspace-invites/preview/", {
+    method: "POST", headers: await accountCsrfHeaders(), body: JSON.stringify({ token }),
+  });
 }
 
 export async function acceptWorkspaceInvite(token: string): Promise<{
@@ -144,6 +145,13 @@ export type WorkspaceMember = {
   status: "active";
   isSelf: boolean;
   isProtected: boolean;
+  pendingRemovalRequestId?: string | null;
+};
+
+export type WorkspaceRemovalRequest = {
+  id: string; workspaceId: string; workspaceName: string; assignmentId: string;
+  membershipId: string; targetUsername: string; requestedByUsername: string;
+  reason: string; status: "pending" | "approved" | "rejected"; createdAt: string;
 };
 
 export type WorkspaceMembersResult = {
@@ -154,7 +162,15 @@ export type WorkspaceMembersResult = {
   page: number;
   pageSize: number;
   hasNext: boolean;
+  capabilities?: { removeMembers: boolean; requestMemberRemoval: boolean };
 };
+
+export async function requestWorkspaceMemberRemoval(workspaceId: string, assignmentId: string, reason: string) {
+  return requestAccountApi<{ request: WorkspaceRemovalRequest }>(
+    `/accounts/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(assignmentId)}/removal-requests/`,
+    { method: "POST", headers: await accountCsrfHeaders(), body: JSON.stringify({ reason }) },
+  );
+}
 
 export function getWorkspaceMembersPage(workspaceId: string, page = 1): Promise<WorkspaceMembersResult> {
   const query = new URLSearchParams({ page: String(page), page_size: "20" });
