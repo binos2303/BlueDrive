@@ -3,8 +3,14 @@
 Run: python manage.py test accounts.test_platform_admin_phase4 -v 2
 """
 from urllib.parse import parse_qs, urlsplit
+from datetime import datetime, timedelta
+import secrets
+from smtplib import SMTPException
+from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
 from django.contrib.sessions.models import Session
 from django.core import mail
 from django.test import Client, TestCase, override_settings
@@ -60,8 +66,9 @@ class PlatformAdminPhase04Tests(TestCase):
 
     def test_invitation_activation_is_one_time_and_stays_non_superuser(self):
         self.assertEqual(self.invite().status_code, 201)
-        url = next(line for line in mail.outbox[0].body.splitlines() if "/admin-invite?" in line)
-        params = parse_qs(urlsplit(url).query)
+        url = next(line for line in mail.outbox[0].body.splitlines() if "/admin-invite#" in line)
+        self.assertFalse(urlsplit(url).query)
+        params = parse_qs(urlsplit(url).fragment)
         new_client = APIClient(enforce_csrf_checks=True)
         csrf = new_client.get(reverse("api-csrf")).data["csrfToken"]
         payload = {
@@ -134,14 +141,16 @@ class PlatformAdminPhase04Tests(TestCase):
     def test_reinvite_invalidates_old_link_and_preserves_identity(self):
         self.assertEqual(self.invite().status_code, 201)
         user = get_user_model().objects.get(username="new-platform-admin")
-        first_link = next(line for line in mail.outbox[-1].body.splitlines() if "/admin-invite?" in line)
-        first = parse_qs(urlsplit(first_link).query)
+        first_link = next(line for line in mail.outbox[-1].body.splitlines() if "/admin-invite#" in line)
+        self.assertFalse(urlsplit(first_link).query)
+        first = parse_qs(urlsplit(first_link).fragment)
         response = self.client.post(reverse("api-admin-reinvite", args=[user.pk]), {
             "reason": "The original invitation expired or was not delivered"
         }, format="json", **self.csrf_header)
         self.assertEqual(response.status_code, 200, response.data)
-        second_link = next(line for line in mail.outbox[-1].body.splitlines() if "/admin-invite?" in line)
-        second = parse_qs(urlsplit(second_link).query)
+        second_link = next(line for line in mail.outbox[-1].body.splitlines() if "/admin-invite#" in line)
+        self.assertFalse(urlsplit(second_link).query)
+        second = parse_qs(urlsplit(second_link).fragment)
         self.assertNotEqual(first["token"][0], second["token"][0])
         self.assertEqual(PlatformAdminIdentity.objects.filter(user=user).count(), 1)
         new_client = APIClient(enforce_csrf_checks=True)
@@ -168,3 +177,48 @@ class PlatformAdminPhase04Tests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, 403)
         self.assertFalse(get_user_model().objects.filter(username="missing-csrf").exists())
+
+    def test_debug_transport_never_emits_invitation_tokens_to_console_or_file(self):
+        for backend in ("console", "filebased", "dummy"):
+            with self.subTest(backend=backend), override_settings(
+                EMAIL_BACKEND=f"django.core.mail.backends.{backend}.EmailBackend"
+            ), patch("accounts.platform_admin_provisioning.send_mail") as send:
+                response = self.invite()
+                self.assertEqual(response.status_code, 503)
+                send.assert_not_called()
+        self.assertFalse(get_user_model().objects.filter(username="new-platform-admin").exists())
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_delivery_failure_logs_no_token_and_rolls_back_invited_identity(self):
+        token = secrets.token_urlsafe(32)
+        with patch("accounts.platform_admin_provisioning.default_token_generator.make_token", return_value=token), \
+                patch("accounts.platform_admin_provisioning.send_mail", side_effect=SMTPException(token)), \
+                self.assertLogs("accounts.platform_admin_provisioning", level="WARNING") as captured:
+            response = self.invite()
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(token in "\n".join(captured.output))
+        self.assertFalse(token.encode() in response.content)
+        self.assertFalse(get_user_model().objects.filter(username="new-platform-admin").exists())
+        self.assertFalse(PlatformAdminIdentity.objects.exists())
+
+    def test_invalid_expired_and_missing_csrf_tokens_do_not_activate_account(self):
+        self.assertEqual(self.invite().status_code, 201)
+        user = get_user_model().objects.get(username="new-platform-admin")
+        link = next(line for line in mail.outbox[-1].body.splitlines() if "/admin-invite#" in line)
+        fields = parse_qs(urlsplit(link).fragment)
+        password = secrets.token_urlsafe(32)
+        payload = {"uid": fields["uid"][0], "token": fields["token"][0],
+                   "password1": password, "password2": password}
+        client = APIClient(enforce_csrf_checks=True)
+        url = reverse("api-admin-invite-accept")
+        self.assertEqual(client.post(url, payload, format="json").status_code, 403)
+        csrf = client.get(reverse("api-csrf")).data["csrfToken"]
+        invalid = {**payload, "token": "invalid"}
+        self.assertEqual(client.post(url, invalid, format="json", HTTP_X_CSRFTOKEN=csrf).status_code, 400)
+        past = datetime.now() - timedelta(seconds=settings.PASSWORD_RESET_TIMEOUT + 1)
+        with patch.object(default_token_generator, "_now", return_value=past):
+            expired = {**payload, "token": default_token_generator.make_token(user)}
+        self.assertEqual(client.post(url, expired, format="json", HTTP_X_CSRFTOKEN=csrf).status_code, 400)
+        user.refresh_from_db()
+        self.assertFalse(user.is_active or user.has_usable_password())
+        self.assertFalse(PlatformAdminAuditEvent.objects.filter(action=PlatformAdminAuditEvent.Action.ACCEPT_ADMIN).exists())
