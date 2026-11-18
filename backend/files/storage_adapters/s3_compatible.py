@@ -664,9 +664,9 @@ class S3CompatibleStorageAdapter:
         self.delete_object(object_key)
         return quarantined
 
-    def delete_object(self, object_key: str) -> None:
+    def list_exact_versions(self, object_key: str) -> list[dict[str, str]]:
         self._validate_object_key(object_key)
-        # Xóa mọi phiên bản của đúng key, không chỉ tạo delete marker hoặc xóa key cùng prefix.
+        # Chỉ liệt kê version và delete marker của đúng key, kể cả khi cùng prefix.
         versions = []
         markers = {}
         seen = set()
@@ -693,6 +693,10 @@ class S3CompatibleStorageAdapter:
             markers = {"KeyMarker": marker[0]}
             if marker[1]:
                 markers["VersionIdMarker"] = marker[1]
+        return versions
+
+    def delete_object(self, object_key: str) -> None:
+        versions = self.list_exact_versions(object_key)
         for offset in range(0, len(versions), 1000):
             batch = versions[offset:offset + 1000]
             result = self._call("delete_objects", lambda: self._client.delete_objects(

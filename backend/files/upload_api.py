@@ -22,7 +22,7 @@ from accounts.access import (
     get_default_tenant, get_default_workspace,
     resolve_request_workspace,
 )
-from files.models import File, QuotaReservation, UploadFinalizationJob, UploadSession
+from files.models import File, QuotaReservation, StorageLocation, UploadFinalizationJob, UploadSession
 from files.quota import QuotaExceeded, QuotaStateError, finalize_upload_quota, reserve_upload_quota
 from files.services import unique_upload_name
 from files.storage_adapters import get_storage_adapter
@@ -555,20 +555,30 @@ def abort_upload(request, upload_id):
             # Multipart completion may already have succeeded. Deleting the
             # object concurrently with the finalizer could corrupt publication.
             return Response({"detail": "Upload is finalizing and cannot be canceled."}, status=409)
-        if session.state in (UploadSession.State.CANCELED, UploadSession.State.FAILED):
+        if session.state in (UploadSession.State.CANCELED, UploadSession.State.EXPIRED, UploadSession.State.FAILED):
             return Response({"state": session.state})
-        session.state = UploadSession.State.CANCELED
-        session.save(update_fields=["state", "updated_at"])
+        expired = session.expires_at <= timezone.now()
+        session.state = UploadSession.State.EXPIRED if expired else UploadSession.State.CANCELED
+        fields = ["state", "updated_at"]
+        if expired:
+            session.failure_code = "expired"
+            fields.append("failure_code")
+        session.save(update_fields=fields)
+        if QuotaReservation.objects.filter(upload_session=session, state=QuotaReservation.State.RESERVED).exists():
+            # Cancel và trả reservation commit chung trước storage RPC.
+            finalize_upload_quota(session.pk, completed=False)
     cleanup_pending = False
     try:
-        storage = adapter_for_upload(session, fallback=get_storage_adapter, cleanup=True)
-        if session.provider_upload_id:
-            storage.abort_multipart(session.object_key, session.provider_upload_id)
-        storage.delete_object(session.object_key)
+        if StorageLocation.objects.filter(object_ref=session.object_key).exists():
+            cleanup_pending = True
+        else:
+            storage = adapter_for_upload(session, fallback=get_storage_adapter, cleanup=True)
+            if session.provider_upload_id:
+                storage.abort_multipart(session.object_key, session.provider_upload_id)
+            if session.object_key:
+                storage.delete_object(session.object_key)
     except StorageError:
         cleanup_pending = True
-    if QuotaReservation.objects.filter(upload_session=session).exists():
-        finalize_upload_quota(session.pk, completed=False, actor=request.user)
     if cleanup_pending:
         return Response({"state": session.state, "cleanup_pending": True}, status=202)
     return Response({"state": session.state})

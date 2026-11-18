@@ -124,6 +124,31 @@ class OrganizationStorageIsolationTests(TestCase):
         pinned.assert_called_once_with(connection=connection)
         adapter.publish_verified_object.assert_called_once()
 
+    @override_settings(SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED=True)
+    def test_revision_disabled_during_copy_cannot_publish(self):
+        connection, _config = self.binding()
+        adapter = self.adapter()
+        with patch('files.upload_api.get_storage_adapter', return_value=adapter):
+            response = self.create_upload()
+        self.assertEqual(response.status_code, 201)
+        upload = UploadSession.objects.get(pk=response.json()['upload_id'])
+        UploadSession.objects.filter(pk=upload.pk).update(state=UploadSession.State.VERIFYING)
+        published = adapter.publish_verified_object.return_value
+
+        def disable_revision(*args, **kwargs):
+            StorageConnectionRevision.objects.filter(pk=connection.pk).update(state='disabled')
+            return published
+
+        adapter.publish_verified_object.side_effect = disable_revision
+        with patch('files.storage_adapters.get_storage_adapter', return_value=adapter) as pinned:
+            with self.assertRaises(StorageConfigurationError):
+                finalize_verified_upload(upload, io.BytesIO(self.payload), self.employee,
+                    verified_sha256=hashlib.sha256(self.payload).hexdigest())
+            self.assertIs(adapter_for_upload(upload, fallback=Mock(), cleanup=True), adapter)
+        self.assertTrue(all(call.kwargs['connection'].pk == connection.pk for call in pinned.call_args_list))
+        self.assertFalse(File.objects.filter(workspace=self.drive).exists())
+        self.assertFalse(StorageLocation.objects.filter(tenant=self.tenant).exists())
+
     @override_settings(SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED=False)
     def test_unpinned_managed_session_cannot_mint_new_writes_but_retains_original_cleanup(self):
         config = StorageConfig.objects.create(tenant=self.tenant, provider='s3',

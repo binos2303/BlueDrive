@@ -287,6 +287,8 @@ def admin_file_action_view(request, file_id):
         if drive_file.deleted_at is None:
             return Response({"detail": "File must be in Trash."}, status=409)
         if action == "restore":
+            if drive_file.purge_started_at is not None:
+                return Response({"detail": "Permanent deletion is already in progress."}, status=409)
             if not _live_parent_chain(drive_file):
                 return Response({"detail": "Restore the parent folder before restoring this file."}, status=409)
             if File.objects.filter(
@@ -316,20 +318,22 @@ def admin_file_action_view(request, file_id):
             request.user, drive_file,
             PlatformAdminAuditEvent.Action.FILE_PURGE_REQUESTED, reason,
         )
-        try:
-            permanently_delete_files([drive_file])
-        except Exception:
-            # The existing service retains metadata and marks failed storage
-            # locations for retry. Never expose object refs or exception text.
-            _audit_file_action(
-                request.user, drive_file,
-                PlatformAdminAuditEvent.Action.FILE_PURGE_FAILED, reason,
-            )
-            return Response({
-                "detail": "Storage cleanup failed or could not be confirmed. File metadata was retained where possible; check storage health before retrying."
-            }, status=503)
+    try:
+        deleted = permanently_delete_files(
+            [drive_file],
+            on_deleted=lambda files: _audit_file_action(
+                request.user, files[0], PlatformAdminAuditEvent.Action.FILE_PURGE_SUCCEEDED, reason,
+            ),
+        )
+    except Exception:
+        # Trạng thái purge đã lưu trước RPC, phục vụ retry và audit khi lỗi.
         _audit_file_action(
             request.user, drive_file,
-            PlatformAdminAuditEvent.Action.FILE_PURGE_SUCCEEDED, reason,
+            PlatformAdminAuditEvent.Action.FILE_PURGE_FAILED, reason,
         )
-        return Response({"id": file_id, "lifecycle": "purged"})
+        return Response({
+            "detail": "Storage cleanup failed or could not be confirmed. File metadata was retained where possible; check storage health before retrying."
+        }, status=503)
+    if not deleted:
+        return Response({"detail": "File not found."}, status=404)
+    return Response({"id": file_id, "lifecycle": "purged"})

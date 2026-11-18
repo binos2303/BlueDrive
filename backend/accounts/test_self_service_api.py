@@ -274,10 +274,11 @@ class SelfServiceApiTests(TestCase):
             mime_type="text/plain",
         )
 
-        def fake_permanent_delete(files):
+        def fake_permanent_delete(files, *, on_deleted, folder_ids):
             files = list(files)
             ids = [item.pk for item in files]
             File.objects.filter(pk__in=ids).delete()
+            on_deleted(files)
             return len(ids)
 
         with patch("accounts.settings_api.permanently_delete_files", side_effect=fake_permanent_delete) as delete_mock:

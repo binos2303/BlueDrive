@@ -2,12 +2,16 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from unittest.mock import patch
 from unittest import skipUnless
+from uuid import uuid4
 
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError, connection
+from django.db import IntegrityError, connection, connections
 from django.test import TestCase, TransactionTestCase
+from django.utils import timezone
+from rest_framework.test import APIClient
 
-from accounts.models import QuotaAccount, Tenant
+from accounts.models import Membership, OrganizationIdentity, QuotaAccount, Tenant, Workspace
+from accounts.services import get_default_workspace, provision_organization_drive
 from files.models import File, QuotaReservation, UploadSession
 from files.quota import (
     QuotaExceeded,
@@ -16,6 +20,7 @@ from files.quota import (
     reserve_upload_quota,
 )
 from files.services import clone_encrypted_file_with_quota
+from files.storage_adapters.base import MultipartUpload
 
 
 User = get_user_model()
@@ -220,15 +225,77 @@ class QuotaReservationConcurrencyTests(TransactionTestCase):
     def test_concurrent_reservations_cannot_overrun_quota(self):
         user = User.objects.create_user(username="concurrent-quota-user")
         tenant = user.personal_tenant
-        account = QuotaAccount.objects.get(
-            tenant=tenant,
-            scope=QuotaAccount.Scope.TENANT,
+        account = QuotaAccount.objects.get(tenant=tenant, scope=QuotaAccount.Scope.TENANT)
+        self.assert_reservation_race(user, get_default_workspace(tenant), [account])
+
+    def test_competing_api_requests_with_one_key_initialize_once(self):
+        user = User.objects.create_user(username="idempotency-race-user")
+        contenders = 3
+        barrier = Barrier(contenders)
+
+        def make_key(scope):
+            barrier.wait(timeout=15)
+            return f"{scope}/{uuid4().hex}"
+
+        def create(_):
+            try:
+                client = APIClient()
+                client.force_authenticate(user)
+                response = client.post("/files/api/uploads/", {
+                    "name": "race.txt", "size_bytes": 60, "sha256": "a" * 64,
+                }, format="json", HTTP_IDEMPOTENCY_KEY="competing-requests")
+                return response.status_code, response.data.get("upload_id")
+            finally:
+                connections.close_all()
+
+        with patch("files.upload_api.get_storage_adapter") as factory:
+            adapter = factory.return_value
+            adapter.create_object_key.side_effect = make_key
+            adapter.initiate_multipart.return_value = MultipartUpload("fixture-multipart")
+            with ThreadPoolExecutor(max_workers=contenders) as workers:
+                results = list(workers.map(create, range(contenders)))
+            adapter.initiate_multipart.assert_called_once()
+        self.assertCountEqual([code for code, _ in results], [201, 200, 200])
+        upload = UploadSession.objects.get(initiated_by=user)
+        self.assertEqual({str(upload.pk)}, {key for _, key in results})
+        reservation = QuotaReservation.objects.get(upload_session=upload)
+        self.assertEqual(reservation.state, QuotaReservation.State.RESERVED)
+        self.assertEqual(reservation.quota_account.reserved_bytes, 60)
+
+    def test_employee_drive_competes_atomically_for_organization_and_member_quota(self):
+        manager, tenant, tenant_account, personal_account = self.business_quota()
+        user = User(username="quota-employee")
+        user._skip_personal_tenant_provisioning = True
+        user.save()
+        identity = OrganizationIdentity.objects.create(
+            user=user, tenant=tenant, invited_by=manager, activated_at=timezone.now(),
         )
-        account.limit_bytes = 100
-        account.save(update_fields=["limit_bytes", "updated_at"])
+        Membership.objects.create(user=user, tenant=tenant, role="member", status="active")
+        workspace = provision_organization_drive(identity)
+        member_account = QuotaAccount.objects.create(tenant=tenant, user=user, scope=QuotaAccount.Scope.MEMBER)
+        self.assert_reservation_race(user, workspace, [tenant_account, member_account], [personal_account])
+        self.assertFalse(Tenant.objects.filter(personal_owner=user).exists())
+
+    def test_business_workspace_competes_for_workspace_quota_only(self):
+        user, tenant, tenant_account, personal_account = self.business_quota()
+        workspace = Workspace.objects.create(tenant=tenant, name="Quota", slug="quota", created_by=user)
+        account = QuotaAccount.objects.get(workspace=workspace, scope=QuotaAccount.Scope.WORKSPACE)
+        self.assert_reservation_race(user, workspace, [account], [tenant_account, personal_account])
+
+    def business_quota(self):
+        user = User.objects.create_user(username="quota-business-owner")
+        tenant = Tenant.objects.create(kind=Tenant.Kind.BUSINESS, name="Quota organization")
+        Membership.objects.create(user=user, tenant=tenant, role="owner", status="active")
+        tenant_account = QuotaAccount.objects.create(tenant=tenant, scope=QuotaAccount.Scope.TENANT, limit_bytes=100)
+        personal_account = QuotaAccount.objects.get(tenant=user.personal_tenant, scope=QuotaAccount.Scope.TENANT)
+        return user, tenant, tenant_account, personal_account
+
+    def assert_reservation_race(self, user, workspace, accounts, untouched=()):
+        QuotaAccount.objects.filter(pk__in=[account.pk for account in accounts]).update(limit_bytes=100)
         uploads = [
             UploadSession.objects.create(
-                tenant=tenant,
+                tenant=workspace.tenant,
+                workspace=workspace,
                 initiated_by=user,
                 client_name=f"item-{index}.bin",
                 expected_size_bytes=60,
@@ -239,21 +306,32 @@ class QuotaReservationConcurrencyTests(TransactionTestCase):
         barrier = Barrier(2)
 
         def attempt(upload_id):
-            from django.db import close_old_connections
-
-            close_old_connections()
             try:
-                barrier.wait()
+                barrier.wait(timeout=10)
                 reserve_upload_quota(upload_id, User.objects.get(pk=user.pk))
-                return "reserved"
+                return upload_id
             except QuotaExceeded:
-                return "rejected"
+                return None
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(attempt, [row.pk for row in uploads]))
 
-        self.assertCountEqual(results, ["reserved", "rejected"])
-        account.refresh_from_db()
-        self.assertEqual(account.reserved_bytes, 60)
+        self.assertEqual(results.count(None), 1)
+        winner = next(result for result in results if result is not None)
+        rows = QuotaReservation.objects.filter(upload_session__in=uploads)
+        self.assertCountEqual(rows.values_list("quota_account_id", "upload_session_id", "state"),
+                              [(account.pk, winner, QuotaReservation.State.RESERVED) for account in accounts])
+        for account in accounts:
+            account.refresh_from_db()
+            self.assertEqual((account.used_bytes, account.reserved_bytes), (0, 60))
+            self.assertLessEqual(account.used_bytes + account.reserved_bytes, account.limit_bytes)
+        finalize_upload_quota(winner, completed=True, actual_size_bytes=59)
+        finalize_upload_quota(winner, completed=True, actual_size_bytes=59)
+        for account in accounts:
+            account.refresh_from_db()
+            self.assertEqual((account.used_bytes, account.reserved_bytes), (59, 0))
+        for account in untouched:
+            account.refresh_from_db()
+            self.assertEqual((account.used_bytes, account.reserved_bytes), (0, 0))

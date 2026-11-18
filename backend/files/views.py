@@ -10,7 +10,10 @@ from securedrive.frontend_redirects import redirect_to_frontend
 from django.contrib import messages
 from django.conf import settings
 from django.core.files.base import ContentFile
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from files.permanent_delete import (
+    FilePurgeInProgress, finish_folder_purge, permanently_delete_files, restore_trashed_files,
+)
 from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.utils import timezone
@@ -837,8 +840,12 @@ def file_restore(request, file_id):
         )
         return redirect("trash")
 
-    drive_file.deleted_at = None
-    drive_file.save(update_fields=["deleted_at", "updated_at"])
+    try:
+        if not restore_trashed_files(File.objects.filter(pk=drive_file.pk)):
+            return redirect("trash")
+    except FilePurgeInProgress:
+        messages.error(request, "Permanent deletion is already in progress.")
+        return redirect("trash")
     log_action(request.user, ActivityLog.Action.RESTORE, f"Restored file: {drive_file.file_name}", obj=drive_file)
     messages.success(request, "File restored successfully.")
     return redirect("trash")
@@ -859,19 +866,19 @@ def file_delete_permanently(request, file_id):
         return redirect("trash")
     file_name = drive_file.file_name
     try:
-        from .permanent_delete import permanently_delete_files
-        permanently_delete_files([drive_file])
+        permanently_delete_files(
+            [drive_file],
+            on_deleted=lambda files: log_action(
+                request.user, ActivityLog.Action.PERMANENT_DELETE,
+                f"Permanently deleted file: {file_name}", obj=files[0],
+            ),
+        )
     except Exception:
         messages.error(
             request,
             "Could not permanently delete the file from storage. The file metadata was retained so you can retry.",
         )
         return redirect("trash")
-    log_action(
-        request.user,
-        ActivityLog.Action.PERMANENT_DELETE,
-        f"Permanently deleted file: {file_name}",
-    )
     messages.success(request, "File permanently deleted.")
     return redirect("trash")
 
@@ -954,30 +961,32 @@ def trash_bulk_action(request):
             ).exists():
                 messages.error(request, f'A file named "{item.file_name}" already exists in the destination folder.')
                 return redirect("trash")
-        with transaction.atomic():
-            for folder in folders:
-                ids = [item.id for item in subtree(folder)]
-                Folder.objects.filter(
-                    owner=request.user, tenant=folder.tenant,
-                    workspace=folder.workspace, id__in=ids,
-                ).update(deleted_at=None)
-                File.objects.filter(
-                    owner=request.user, tenant=folder.tenant,
-                    workspace=folder.workspace, folder_id__in=ids,
-                    deleted_at__isnull=False,
-                ).update(deleted_at=None)
-            File.objects.filter(
-                owner=request.user, tenant__in=tenant_ids, id__in=file_ids,
-            ).update(deleted_at=None)
+        try:
+            with transaction.atomic():
+                restore_files = File.objects.filter(owner=request.user, tenant__in=tenant_ids, id__in=file_ids)
+                restore_folders = Folder.objects.none()
+                for folder in folders:
+                    ids = [item.id for item in subtree(folder)]
+                    restore_files |= File.objects.filter(
+                        owner=request.user, tenant=folder.tenant, workspace=folder.workspace, folder_id__in=ids,
+                    )
+                    restore_folders |= Folder.objects.filter(
+                        owner=request.user, tenant=folder.tenant, workspace=folder.workspace, id__in=ids,
+                    )
+                restore_trashed_files(restore_files)
+                restore_folders.update(deleted_at=None)
+        except (FilePurgeInProgress, IntegrityError):
+            messages.error(request, "Selected files could not be restored. Check Trash and try again.")
+            return redirect("trash")
         log_action(request.user, ActivityLog.Action.RESTORE, f"Restored {len(files)} file(s) and {len(folders)} folder(s) from Trash")
         messages.success(request, "Selected items restored successfully.")
         return redirect("trash")
 
     if action == "permanent_delete":
         try:
-            from .permanent_delete import permanently_delete_files
             trees = []
-            for root_folder in _top_level_folders(folders):
+            roots = _top_level_folders(folders)
+            for root_folder in roots:
                 tree_items = [root_folder]
                 index = 0
                 while index < len(tree_items):
@@ -1000,22 +1009,27 @@ def trash_bulk_action(request):
                 item.pk: item
                 for item in [*files, *list(nested_files)]
             }
-            permanently_delete_files(files_by_id.values())
-            if tree_ids:
-                workspace_ids = {item.workspace_id for item in tree_by_id.values()}
-                UploadSession.objects.filter(
-                    target_folder_id__in=tree_ids,
-                    workspace_id__in=workspace_ids,
-                ).update(target_folder=None)
-                Folder.objects.filter(
+            root_ids = [folder.pk for folder in roots]
+
+            def finish_delete(deleted_files):
+                scoped_folders = Folder.objects.filter(
                     owner=request.user,
                     tenant__in=tenant_ids,
                     id__in=tree_ids,
-                ).delete()
+                )
+                count = finish_folder_purge(scoped_folders, root_ids)
+                log_action(
+                    request.user, ActivityLog.Action.PERMANENT_DELETE,
+                    f"Permanently deleted {len(deleted_files)} file(s) and {count} folder(s) from Trash",
+                )
+
+            permanently_delete_files(
+                files_by_id.values(), on_deleted=finish_delete,
+                folder_ids=tree_ids, trashed_folder_ids=root_ids,
+            )
         except Exception:
             messages.error(request, "Could not permanently delete all selected storage objects. Metadata was retained where cleanup failed; retry after checking storage.")
             return redirect("trash")
-        log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted {len(files)} file(s) and {len(folders)} folder(s) from Trash")
         messages.success(request, "Selected items permanently deleted.")
         return redirect("trash")
 

@@ -10,7 +10,7 @@ from accounts.access import get_default_tenant, get_default_workspace, get_organ
 from accounts.models import QuotaAccount, Tenant
 from accounts.services import get_personal_tenant
 from files.models import File
-from files.permanent_delete import PermanentDeleteError, permanently_delete_files
+from files.permanent_delete import PermanentDeleteError, finish_folder_purge, permanently_delete_files
 from folders.models import Folder
 from logs.models import ActivityLog, SearchHistory
 
@@ -273,14 +273,28 @@ def delete_my_drive_data_view(request):
         workspace=workspace,
         owner=request.user,
     ))
-    folder_count = Folder.objects.filter(
+    folders = Folder.objects.filter(
         tenant=personal_tenant,
         workspace=workspace,
         owner=request.user,
-    ).count()
+    )
+    folder_ids = list(folders.values_list("pk", flat=True))
+    folder_count = 0
+
+    def finish_delete(files):
+        nonlocal folder_count
+        folder_count = finish_folder_purge(folders.filter(pk__in=folder_ids))
+        ActivityLog.objects.create(
+            user=request.user,
+            tenant=personal_tenant,
+            workspace=workspace,
+            action=ActivityLog.Action.DELETE_MY_DRIVE_DATA,
+            description="Permanently deleted all files and folders in My Drive.",
+            metadata={"filesDeleted": len(files), "foldersDeleted": folder_count},
+        )
 
     try:
-        deleted_files = permanently_delete_files(drive_files)
+        deleted_files = permanently_delete_files(drive_files, on_deleted=finish_delete, folder_ids=folder_ids)
     except PermanentDeleteError:
         # Keep adapter/object references and lower-level storage details in the
         # server logs, not in a self-service response returned to the client.
@@ -288,20 +302,6 @@ def delete_my_drive_data_view(request):
             "detail": "Some storage objects could not be deleted. The request was stopped so it can be retried safely.",
         }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-    Folder.objects.filter(
-        tenant=personal_tenant,
-        workspace=workspace,
-        owner=request.user,
-    ).delete()
-
-    ActivityLog.objects.create(
-        user=request.user,
-        tenant=personal_tenant,
-        workspace=workspace,
-        action=ActivityLog.Action.DELETE_MY_DRIVE_DATA,
-        description="Permanently deleted all files and folders in My Drive.",
-        metadata={"filesDeleted": deleted_files, "foldersDeleted": folder_count},
-    )
     return Response({
         "detail": "My Drive data was permanently deleted.",
         "filesDeleted": deleted_files,

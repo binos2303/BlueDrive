@@ -7,6 +7,7 @@ PutObject, preserving their existing behavior.
 """
 import hmac
 import io
+import logging
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -22,12 +23,14 @@ from files.models import File, FileVersion, StorageConfig, StorageLocation, Uplo
 from files.quota import finalize_upload_quota
 from files.services import unique_upload_name
 from files.storage_adapters import get_storage_adapter
-from files.storage_routing import adapter_for_upload
+from files.storage_routing import adapter_for_upload, validate_upload_storage
 from files.validators import MAX_UPLOAD_SIZE, calculate_sha256, detect_mime_type, validate_filename
 from folders.models import Folder
 from logs.models import ActivityLog
 from logs.services import log_action
 from sharing.services import can_edit_folder
+
+logger = logging.getLogger(__name__)
 
 
 class UploadDestinationUnavailable(ValidationError):
@@ -77,11 +80,21 @@ def _lock_writable_destination(session, actor):
     if session.target_folder_id:
         # Refresh folder scope too; the selected destination may have moved or
         # entered Trash since this session was created.
-        folder = Folder.objects.get(pk=session.target_folder_id)
+        folder = Folder.objects.select_for_update(no_key=True).get(pk=session.target_folder_id)
         if (folder.tenant_id != tenant.pk or folder.workspace_id != workspace.pk
                 or not can_edit_folder(folder, current_actor)):
             raise UploadDestinationUnavailable("Upload destination is no longer writable.")
         session.target_folder = folder
+    validate_upload_storage(session, lock=True)
+
+
+def _clean_published_staging(storage, upload_id, staging_key):
+    try:
+        # Một key đang có location phải đi qua quy trình permanent delete.
+        if not StorageLocation.objects.filter(object_ref=staging_key).exists():
+            storage.delete_object(staging_key)
+    except Exception as error:
+        logger.warning("Staging cleanup deferred: upload_id=%s error_type=%s", upload_id, type(error).__name__)
 
 
 def finalize_verified_upload(
@@ -243,12 +256,10 @@ def finalize_verified_upload(
             },
         )
 
-    if session.object_key:
-        try:
-            storage.delete_object(session.object_key)
-        except Exception:
-            # Reconciliation can garbage-collect the source when it is safe.
-            pass
+        if locked.object_key:
+            transaction.on_commit(
+                lambda: _clean_published_staging(storage, locked.pk, locked.object_key)
+            )
     return {
         "upload_id": str(session.pk),
         "state": UploadSession.State.AVAILABLE,

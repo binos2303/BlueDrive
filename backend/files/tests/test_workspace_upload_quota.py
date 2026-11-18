@@ -71,6 +71,13 @@ class WorkspaceUploadQuotaTests(TestCase):
         self.adapter.initiate_multipart.assert_called_once()
         self.assert_usage(0, 60)
 
+    def test_same_idempotency_key_with_different_payload_does_not_reserve_again(self):
+        self.assertEqual(self.create(size=60, key="same-key").status_code, 201)
+        self.assertEqual(self.create(size=61, key="same-key").status_code, 409)
+        self.assertEqual(QuotaReservation.objects.count(), 1)
+        self.adapter.initiate_multipart.assert_called_once()
+        self.assert_usage(0, 60)
+
     def test_quota_rejection_does_not_allocate_another_multipart_or_reservation(self):
         self.assertEqual(self.create(size=60).status_code, 201)
         rejected = self.create(size=41)
@@ -148,6 +155,17 @@ class WorkspaceUploadQuotaTests(TestCase):
         with patch('files.management.commands.cleanup_uploads.get_storage_adapter',return_value=self.adapter):
             call_command('cleanup_uploads',stdout=io.StringIO())
         self.assertEqual(QuotaReservation.objects.get().state, "released")
+        self.assert_usage(0, 0)
+
+    def test_abort_on_past_deadline_keeps_expired_state(self):
+        response = self.create(size=60)
+        upload_id = response.data["upload_id"]
+        UploadSession.objects.filter(pk=upload_id).update(expires_at=timezone.now() - timedelta(seconds=1))
+        url = f"/files/api/uploads/{upload_id}/abort/"
+        self.assertEqual(self.client.post(url).data["state"], "expired")
+        self.assertEqual(self.client.post(url).data["state"], "expired")
+        self.assertEqual(UploadSession.objects.get(pk=upload_id).failure_code, "expired")
+        self.assertEqual(QuotaReservation.objects.get(upload_session_id=upload_id).state, "released")
         self.assert_usage(0, 0)
 
     def test_folder_upload_finalization_consumes_workspace_quota_only_once(self):

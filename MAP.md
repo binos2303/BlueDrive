@@ -50,6 +50,7 @@ Luồng chính: frontend → Django cấp quyền/session/quota → S3 staging �
 | `backend/infrastructure/` | Storage Control Center: inventory/grants/bindings/revisions trong `models.py`; `api.py`, `connection_api.py`, `telemetry_api.py`, `urls.py`; profiles/connections/probes/telemetry/Prometheus trong các service tương ứng. Cờ rollout mặc định OFF ở settings. |
 | `backend/<app>/models.py`, `migrations/`, `serializers.py` khi có | Models và migration của đúng app sở hữu nghiệp vụ; serializers chỉ nằm ở app cần chúng. Kiểm tra migration/DB constraint ngoài ORM, đặc biệt ràng buộc cùng tenant trên PostgreSQL. |
 | `backend/<app>/management/commands/` | Worker và tác vụ vận hành. `run_upload_finalizer`, `finalize_uploads`, `cleanup_uploads`, quota reconciliation, probe cleanup và telemetry collection có thể thay trạng thái; đọc command/runbook trước chạy. Không dùng lệnh cutover lịch sử không còn trong source. |
+| `backend/files/management/commands/report_upload_recovery.py` | Báo cáo chỉ đọc một upload. `--inspect-storage` kiểm tra đúng key và version đã ghi nhận tại đích gốc. Kết quả đối chiếu có thể thay đổi trong lúc worker chạy và cần xác minh trước khi xử lý. |
 | `backend/templates/`, `static/`, `media/` | Templates/static của các Django views legacy; `media/` là nội dung runtime, có thể chứa ciphertext, không phải thư mục để dọn source. |
 
 ## Infrastructure, tests và scripts
