@@ -6,7 +6,7 @@
 
 | Thành phần | Nguồn xác minh và điểm vào |
 | --- | --- |
-| Web | [frontend/package.json](frontend/package.json), [lockfile](frontend/package-lock.json): Next.js **16.3.3**, React/React DOM **19.2.8**, TypeScript lock **5.9.3**, Tailwind lock **4.3.3**, Playwright **1.65.0**; các bản cài local tương ứng khớp lock tại lần đối chiếu. |
+| Web | [frontend/package.json](frontend/package.json), [lockfile](frontend/package-lock.json): Next.js **16.4.6**, React/React DOM **19.2.8**, TypeScript lock **5.9.3**, Tailwind lock **4.3.3**, Playwright **1.65.0**; Next/eslint-config-next được vá có mục tiêu trong P4 ngày 18/11/2026. |
 | Frontend runtime | `npm run dev/build/start`; [app/layout.tsx](frontend/app/layout.tsx) nạp theme, account và upload providers; [app/page.tsx](frontend/app/page.tsx) chuyển tới login. Next.js App Router tự khám phá page/layout, không cần import tường minh. |
 | API | [backend/requirements.txt](backend/requirements.txt): Django **5.2.17**, DRF **3.18.0**, Psycopg **3.3.6**, boto3/botocore **1.43.112**. [manage.py](backend/manage.py) → [settings.py](backend/securedrive/settings.py) → [urls.py](backend/securedrive/urls.py); WSGI/ASGI trong cùng package `securedrive/`. |
 | Database | Settings dùng `django.db.backends.postgresql`; mỗi Django app giữ models/migrations riêng. Application PostgreSQL local quan sát **18.6** bằng read-only query P0; không có manifest pin server ứng dụng. Filer PostgreSQL được Compose pin major **17-alpine** riêng từng cluster. |
