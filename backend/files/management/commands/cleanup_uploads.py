@@ -6,7 +6,7 @@ from django.utils import timezone
 from files.models import QuotaReservation, StorageLocation, UploadSession
 from files.quota import QuotaStateError, finalize_upload_quota
 from files.storage_adapters import get_storage_adapter
-from files.storage_adapters.base import StorageError
+from files.storage_adapters.base import StorageError, StorageIntegrityError
 from files.storage_routing import adapter_for_upload
 
 
@@ -40,16 +40,20 @@ class Command(BaseCommand):
                         continue
                 claimed_state = session.state
             try:
+                keys = {session.object_key} - {''}
+                if claimed_state not in published:
+                    keys.update({session.final_object_key} - {''})
+                if claimed_state == UploadSession.State.FAILED and session.object_key:
+                    # Copy quarantine có thể đã commit ở S3 trong khi DB chưa đổi key.
+                    keys.add(f"quarantine/{session.pk.hex}")
+                if StorageLocation.objects.filter(object_ref__in=keys).exists():
+                    # Không dựa vào tenant/state để suy đoán key là độc quyền vật lý.
+                    raise StorageIntegrityError("An upload cleanup key is still referenced.")
                 adapter = adapter_for_upload(session,fallback=get_storage_adapter,cleanup=True)
                 if session.provider_upload_id:
                     adapter.abort_multipart(session.object_key, session.provider_upload_id)
-                keys = [session.object_key]
-                if claimed_state not in published:
-                    keys.append(session.final_object_key)
-                for key in set(keys) - {''}:
-                    # Metadata AVAILABLE bảo vệ object ngay cả khi session cũ sai state.
-                    if not StorageLocation.objects.filter(tenant_id=session.tenant_id,storage_connection_id=session.storage_connection_id,object_ref=key,state='available').exists():
-                        adapter.delete_object(key)
+                for key in sorted(keys):
+                    adapter.delete_object(key)
                 with transaction.atomic():
                     current = UploadSession.objects.select_for_update().get(pk=session.pk)
                     if current.state == claimed_state:

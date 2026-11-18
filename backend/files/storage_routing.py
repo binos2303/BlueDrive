@@ -73,22 +73,43 @@ def upload_target(tenant, workspace):
     return {'storage_config':config,'storage_connection':connection,'endpoint_config_version':connection.revision}
 
 
-def adapter_for_upload(session, *, fallback, cleanup=False):
-    if session.storage_connection_id is None:
+def validate_upload_storage(session, *, cleanup=False, lock=False):
+    """Đối chiếu revision đã ghim. Publication khóa các hàng cấu hình trước commit."""
+    connection = None
+    if session.storage_connection_id is not None:
+        if lock:
+            from infrastructure.models import StorageConnectionRevision
+            connection = StorageConnectionRevision.objects.select_for_update(
+                of=('self',), no_key=True,
+            ).select_related('cluster').get(pk=session.storage_connection_id)
+            session.storage_connection = connection
+        else:
+            connection = session.storage_connection
+        _check_owner(connection, session.tenant)
+    config = session.storage_config if session.storage_config_id else None
+    if lock and config is not None:
+        config = StorageConfig.objects.select_for_update(no_key=True).get(pk=config.pk)
+        session.storage_config = config
+    if connection is None:
         # Bật routing thì mọi phiên upload phải ghim revision; không đọc kho mặc định.
         if settings.SECUREDRIVE_STORAGE_MULTI_CLUSTER_ROUTING_ENABLED:
             raise StorageConfigurationError('Upload has no verified storage connection.')
         if not cleanup and getattr(session, 'tenant', None) is not None:
             require_legacy_destination(session.tenant)
-        _check_legacy_endpoint(session.storage_config if session.storage_config_id else None)
+        _check_legacy_endpoint(config)
+        return None
+    if session.endpoint_config_version != connection.revision or config is None or config.tenant_id != session.tenant_id:
+        raise StorageConfigurationError('Pinned upload storage is unavailable.')
+    if not cleanup and (connection.state != 'ready' or config.status != 'active'):
+        raise StorageConfigurationError('Pinned upload storage is not writable.')
+    return connection
+
+
+def adapter_for_upload(session, *, fallback, cleanup=False):
+    connection = validate_upload_storage(session, cleanup=cleanup)
+    if connection is None:
         return fallback()
     from files.storage_adapters import get_storage_adapter
-    connection = session.storage_connection
-    _check_owner(connection,session.tenant)
-    if session.endpoint_config_version != connection.revision or session.storage_config_id is None or session.storage_config.tenant_id != session.tenant_id:
-        raise StorageConfigurationError('Pinned upload storage is unavailable.')
-    if not cleanup and (connection.state != 'ready' or session.storage_config.status != 'active'):
-        raise StorageConfigurationError('Pinned upload storage is not writable.')
     return get_storage_adapter(connection=connection)
 
 

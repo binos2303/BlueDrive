@@ -38,13 +38,15 @@ class FinalizationStreamTests(TestCase):
         storage = get_adapter.return_value
         storage.publish_verified_object.return_value = ObjectStat(size_bytes=len(self.data), version_id="published-v1")
         storage.create_object_key.return_value = "primary/" + "b" * 32
-        with tempfile.SpooledTemporaryFile(max_size=4, mode="w+b") as stream:
+        with self.captureOnCommitCallbacks(execute=True) as callbacks, tempfile.SpooledTemporaryFile(max_size=4, mode="w+b") as stream:
             stream.write(self.data)
             self.assertTrue(stream._rolled)
             result = finalize_verified_upload(
                 self.session, stream, self.user,
                 verified_sha256=self.sha, verified_etag="etag-2",
             )
+            storage.delete_object.assert_not_called()
+        self.assertEqual(len(callbacks), 1)
         self.assertEqual(result["state"], UploadSession.State.AVAILABLE)
         args = storage.publish_verified_object.call_args
         self.assertEqual(args.args[:2], (

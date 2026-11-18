@@ -3,14 +3,14 @@ import tempfile
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
-from django.db import IntegrityError
+from django.db import IntegrityError, OperationalError
 from django.utils import timezone
 
 from files.finalization import (
     FinalizationClaimLost, UploadDestinationUnavailable,
     finalize_verified_upload, lock_finalizing_upload,
 )
-from files.models import UploadFinalizationJob, UploadSession
+from files.models import StorageLocation, UploadFinalizationJob, UploadSession
 from files.quota import QuotaStateError, finalize_upload_quota
 from files.storage_adapters import get_storage_adapter
 from files.storage_routing import adapter_for_upload
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 PART_SIZE = 8 * 1024 * 1024
+MAX_ATTEMPTS = 3
 
 
 def _quarantine_failed_upload(upload_id):
@@ -47,6 +48,10 @@ def _quarantine_failed_upload(upload_id):
 
     storage = adapter_for_upload(session, fallback=get_storage_adapter, cleanup=True)
     quarantine_key = f"quarantine/{session.pk.hex}"
+    if StorageLocation.objects.filter(
+        object_ref__in={session.object_key, session.final_object_key, quarantine_key} - {""},
+    ).exists():
+        return False
 
     # If finalization wrote PRIMARY but the database transaction did not commit,
     # that object is an orphan. Remove it best-effort; the staging source remains
@@ -56,11 +61,10 @@ def _quarantine_failed_upload(upload_id):
             storage.delete_object(session.final_object_key)
         except StorageNotFoundError:
             pass
-        except StorageError:
+        except StorageError as error:
             logger.warning(
-                "Could not remove orphaned publication object for failed upload %s",
-                session.pk,
-                exc_info=True,
+                "Orphaned publication cleanup deferred: upload_id=%s error_type=%s",
+                session.pk, type(error).__name__,
             )
 
     try:
@@ -74,11 +78,10 @@ def _quarantine_failed_upload(upload_id):
             if session.provider_upload_id:
                 try:
                     storage.abort_multipart(session.object_key, session.provider_upload_id)
-                except StorageError:
+                except StorageError as error:
                     logger.warning(
-                        "Could not abort incomplete multipart upload %s",
-                        session.pk,
-                        exc_info=True,
+                        "Incomplete multipart abort deferred: upload_id=%s error_type=%s",
+                        session.pk, type(error).__name__,
                     )
             return False
         else:
@@ -102,6 +105,27 @@ def _quarantine_failed_upload(upload_id):
         )
         return False
     return True
+
+
+def _mark_failed(upload, job, code):
+    if upload.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+        upload.state = UploadSession.State.FAILED
+        upload.failure_code = code
+        upload.save(update_fields=["state", "failure_code", "updated_at"])
+    try:
+        finalize_upload_quota(upload.pk, completed=False)
+    except QuotaStateError:
+        logger.warning("Terminal upload quota requires reconciliation: upload_id=%s", upload.pk)
+    job.state = UploadFinalizationJob.State.FAILED
+    job.save(update_fields=["state", "updated_at"])
+
+
+def _try_quarantine(upload_id):
+    try:
+        if not _quarantine_failed_upload(upload_id):
+            logger.warning("Failed upload requires cleanup review: upload_id=%s", upload_id)
+    except Exception as error:
+        logger.warning("Quarantine deferred: upload_id=%s error_type=%s", upload_id, type(error).__name__)
 
 
 class Command(BaseCommand):
@@ -138,14 +162,23 @@ class Command(BaseCommand):
                         try:
                             finalize_upload_quota(upload.pk, completed=False)
                         except QuotaStateError:
-                            logger.warning("Terminal upload quota requires reconciliation: upload_id=%s", upload.pk, exc_info=True)
+                            logger.warning("Terminal upload quota requires reconciliation: upload_id=%s", upload.pk)
                     job.state = UploadFinalizationJob.State.FAILED
                     job.save(update_fields=["state", "updated_at"])
                     failed += 1
                     continue
-                job.state = UploadFinalizationJob.State.PROCESSING
-                job.attempts += 1
-                job.save(update_fields=["state", "attempts", "updated_at"])
+                exhausted = job.attempts >= MAX_ATTEMPTS
+                if exhausted:
+                    # Reclaim lần cuối bị crash không cấp thêm một lượt RPC.
+                    _mark_failed(upload, job, "finalization_failed")
+                    failed += 1
+                else:
+                    job.state = UploadFinalizationJob.State.PROCESSING
+                    job.attempts += 1
+                    job.save(update_fields=["state", "attempts", "updated_at"])
+            if exhausted:
+                _try_quarantine(upload.pk)
+                continue
             try:
                 storage = adapter_for_upload(upload, fallback=get_storage_adapter)
                 if upload.expected_size_bytes:
@@ -212,44 +245,24 @@ class Command(BaseCommand):
                         current_job.save(update_fields=["state", "updated_at"])
                         done += 1
                         continue
-                    transient = isinstance(error, (StorageRetryableError, IntegrityError))
-                    if transient and job.attempts < 3 and current.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
+                    # Serialization/connection errors có thể chỉ xuất hiện lúc COMMIT.
+                    transient = isinstance(error, (StorageRetryableError, IntegrityError, OperationalError))
+                    if transient and job.attempts < MAX_ATTEMPTS and current.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
                         current_job.state = UploadFinalizationJob.State.PENDING
+                        current_job.save(update_fields=["state", "updated_at"])
                         retrying += 1
                     else:
-                        if current.state in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
-                            current.state = UploadSession.State.FAILED
-                            current.failure_code = "destination_not_writable" if isinstance(error, UploadDestinationUnavailable) else "finalization_failed"
-                            current.save(update_fields=["state", "failure_code", "updated_at"])
-                        try:
-                            finalize_upload_quota(upload.pk, completed=False)
-                        except Exception:
-                            logger.exception("Unable to release failed upload quota: upload_id=%s", upload.pk)
-                        current_job.state = UploadFinalizationJob.State.FAILED
+                        _mark_failed(current, current_job,
+                            "destination_not_writable" if isinstance(error, UploadDestinationUnavailable) else "finalization_failed")
                         failed += 1
-                    current_job.save(update_fields=["state", "updated_at"])
-                logger.exception(
+                logger.error(
                     "Upload finalization failed: upload_id=%s, job_id=%s, "
-                    "attempt=%s, error_type=%s, error=%s",
+                    "attempt=%s, error_type=%s",
                     upload.pk,
                     job.pk,
                     job.attempts,
                     type(error).__name__,
-                    error,
                 )
                 if current_job.state == UploadFinalizationJob.State.FAILED:
-                    try:
-                        quarantined = _quarantine_failed_upload(upload.pk)
-                        if not quarantined:
-                            logger.warning(
-                                "Failed upload was marked failed but its object could not be quarantined: upload_id=%s",
-                                upload.pk,
-                            )
-                    except Exception:
-                        # Do not hide the original finalization error. Keep the source
-                        # object and metadata so cleanup/reconciliation can retry safely.
-                        logger.exception(
-                            "Could not quarantine failed upload object: upload_id=%s",
-                            upload.pk,
-                        )
+                    _try_quarantine(upload.pk)
         self.stdout.write(f"Finalized: {done}; retrying: {retrying}; failed: {failed}")
