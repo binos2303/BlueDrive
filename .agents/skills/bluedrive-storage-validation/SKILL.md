@@ -36,6 +36,30 @@ Chọn gate theo thay đổi hoặc phạm vi nghiệm thu được yêu cầu. 
 - Gián đoạn có kiểm soát Gateway, Filer và finalizer thuộc fixture đã xác minh. Thử ngắt upload rồi resume, ngắt finalization rồi retry. Sau khi khôi phục và restart đúng services fixture trong phạm vi duyệt, so metadata ứng dụng, Filer `filemeta` và bytes theo pinned version.
 - Xác minh file chưa AVAILABLE khi worker chưa xác minh object. Đối chiếu mỗi logical file, current version, reservation và UPLOAD audit sau retry để phát hiện publication trùng hoặc quota tính hai lần. Ghi rõ phần đã kiểm bằng outage thật và phần chỉ kiểm bằng fault injection.
 
+### File Lifecycle & Fault Recovery Qualification
+
+Chọn các dòng chạm contract đang sửa. Xem [bằng chứng P5](../../../docs/REFACTOR_P5_FILE_LIFECYCLE_2026-11-18.md) để chọn test và [runbook](../../../infra/seaweedfs/README.md) để chạy trên đúng fixture. Ghi riêng lớp kiểm chứng PostgreSQL độc lập, provider thật và điểm fault injection. Lỗi tại câu SQL khác lỗi tại COMMIT. Mock adapter có thể kiểm thứ tự I/O, còn outage cần gián đoạn dịch vụ fixture thật. Gate thiếu điều kiện ghi **BLOCKED** và ca không thực thi ghi **SKIP**.
+
+| Fault | Invariant phải đối chiếu |
+| --- | --- |
+| Crash trước S3 publication | Chưa AVAILABLE, staging đúng revision còn để retry. |
+| S3 COPY thành công, DB COMMIT lỗi | Staging còn, retry tạo đúng một logical version, quota và audit. Kiểm riêng version vật lý dư. |
+| Crash sau DB COMMIT | Retry nhận publication đã có và giữ metadata, quota, audit. |
+| Worker A mất claim, B hoàn tất | A không ghi đè metadata. RPC đã gửi vẫn có thể tạo version dư. |
+| Reclaim sau hết budget | Worker không cấp thêm attempt. Có disposition cho staging, reservation và quarantine. |
+| Hai uploads tranh quota | Admission không vượt hạn mức và hạch toán đúng scope. |
+| Cancel hoặc expiry | Release reservation đúng một lần và giữ trạng thái terminal. |
+| Quyền bị thu hồi | Publication từ chối theo quyền tại commit. |
+| Binding hoặc revision thay đổi | Upload và cleanup giữ đích đã pin. Revision không còn writable chặn publication. |
+| Hash hoặc size sai | Không AVAILABLE và xử lý đúng reservation. |
+| Quarantine thất bại | Metadata và receipt đủ để đối chiếu, retry đúng key. |
+| Xóa một phần version S3 | Purge intent chặn restore và chỉ retry các location liên quan. |
+| DB COMMIT lỗi sau xóa S3 | Giữ metadata phục hồi và không ghi quota/audit hai lần. |
+| Cleanup gặp object còn reference | Bảo toàn object và receipt của thao tác chưa xong. |
+| Gateway hoặc Filer gián đoạn | Resume/retry hội tụ qua outage thật, khớp pinned version, bytes và accounting. |
+
+Chỉ chạy worker trên fixture đã xác minh ở preflight. PostgreSQL phục vụ, finalizer phục vụ và destructive reconciliation cần quyền riêng. Đối chiếu chỉ đọc trước khi kết luận orphan, kể cả khi DB đã mất claim. Cleanup fixture dùng đúng receipt theo mục 6, từng gate ghi **PASS / FAIL / SKIP / BLOCKED** theo mục 8.
+
 ## 5. Backup & Restore
 
 1. Xác minh source là fixture đã duyệt và kiểm kê mọi writer. Drain công việc hoặc ghi rõ trạng thái in-flight cần giữ. Dừng writer ứng dụng và storage của fixture tại cùng consistency point, kể cả khả năng còn ghi từ presigned PUT đã cấp.
