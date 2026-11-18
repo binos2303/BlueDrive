@@ -204,3 +204,55 @@ P4 đã cung cấp prerequisite provider/isolation/persistence/restore cho P5 de
 [Skill storage validation](../.agents/skills/bluedrive-storage-validation/SKILL.md) chuẩn hóa preflight, provider/Tenant gates, E2E, outage, restore và disposition tài nguyên cho các lượt sau. Quy trình mới yêu cầu checksum riêng cho dump/archive/bundle và đọc lại pinned file sau restore. Bằng chứng thực thi của ngày 18/11 nằm trong bảng kết quả ở trên.
 
 **Retention đang chờ operator xác nhận thời hạn.** 32 named volumes thuộc các project fixture P4 nguồn và restore. Một bộ backup private gồm 4 PostgreSQL dumps, 12 SeaweedFS archives và cấu hình phục hồi. Operator BlueDrive phụ trách các tài nguyên này, đang được giữ để review và đối chiếu recovery. Mọi thao tác xóa recovery material cần phê duyệt riêng.
+
+## Final cleanup và security disposition — 18/11/2026
+
+P4 qualification đã chạy trên baseline `2c5ff27b7fdab32ecd0057a114f60e2b322e594b`. Commit tài liệu `cb0e02604e05b9d35cd728d7d329513899c159b1` bổ sung skill và retention cho [Draft PR #4](https://github.com/binos2303/BlueDrive/pull/4). Ba job của commit tài liệu đều PASS. Cleanup dùng nhánh `fix/p4-final-cleanup-security` kế thừa commit đó. [CI của P4 documentation](https://github.com/binos2303/BlueDrive/actions/runs/44294421070).
+
+### Frontend dependency security
+
+| Check | Baseline | Sau bản vá | Disposition |
+| --- | --- | --- | --- |
+| `npm audit --omit=dev` | 0 | **0** | PASS theo phạm vi production dependency graph |
+| `npm audit` | 16 entries, 10 high / 6 moderate, 5 advisory IDs | **14 entries high, 1 advisory ID** | OPEN vì hai bản `picomatch` cùng advisory và các package phụ thuộc |
+| Direct dependencies và production lock entries | Theo P4 | **0 thay đổi** | Giữ Next.js 16.4.6, React, TypeScript và ESLint config |
+
+- **Đã vá minimatch.** `eslint-config-next@16.4.6` cho phép `typescript-eslint@^8.56.0`. Cập nhật chuỗi TypeScript ESLint 8.68.0 → 8.73.0, trong đó `typescript-estree` đã khai báo `minimatch@^11.0.1`. Lockfile chọn 11.0.9, đóng CVE-2026-118764 về tiêu hao tài nguyên do khuếch đại glob. Node 24.18.0 và TypeScript 5.9.3 thỏa engine/peer của bản mới. [Upstream tracking](https://github.com/typescript-eslint/typescript-eslint/issues/13125) · [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249).
+- **Đã vá brace-expansion.** Dưới `minimatch@11.0.9`, `brace-expansion` lên 5.0.13. Nhánh `minimatch@3.1.5` của ESLint/plugins nhận 1.1.22 trong range đã khai báo. Hai bản vá đóng các lỗi CPU DoS và tràn stack CVE-2026-102277, CVE-2026-102278, CVE-2026-102276. [GHSA-q2hr-2g5m-vwhr](https://github.com/advisories/GHSA-q2hr-2g5m-vwhr) · [GHSA-qhr7-859c-m2p7](https://github.com/advisories/GHSA-qhr7-859c-m2p7) · [GHSA-6j4f-fj2g-mc7p](https://github.com/advisories/GHSA-6j4f-fj2g-mc7p).
+- **OPEN picomatch 2.3.2 và 4.0.7.** CVE-2026-112366 là regex DoS khi xử lý pattern extglob lặp. Hai installations đều transitive dev. Chuỗi 2.x đi từ `eslint-config-next → @next/eslint-plugin-next → fast-glob → micromatch → picomatch`. Chuỗi 4.x đi từ `eslint-config-next → typescript-eslint → @typescript-eslint/typescript-estree → tinyglobby → picomatch` và `eslint-config-next → eslint-import-resolver-typescript → tinyglobby → picomatch`. `fdir` có peer dependency trỏ tới cùng bản 4.x. Registry và advisory chưa có patched release trên hai nhánh. Package cha hiện hành vẫn dẫn tới cả hai nhánh. [GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf) · [Upstream issue #247](https://github.com/micromatch/picomatch/issues/247).
+
+ESLint dùng các glob và cấu hình từ source checkout. Workflow hiện tại không chuyển request hoặc nội dung file người dùng tải lên cho lint. Residual exposure là lint/build job bị chậm hoặc dừng nếu chạy trên checkout có cấu hình/pattern không tin cậy. Chạy lint trong môi trường kiểm tra giới hạn thời gian và quyền read-only của workflow. Khi upstream phát hành bản tương thích, cập nhật qua package cha và chạy lại audit/clean install/lint. Operator BlueDrive phụ trách disposition trước release.
+
+So sánh phương án ưu tiên cập nhật lockfile trong range package cha, vì giữ contract lint hiện có và dùng bản vá được upstream phát hành. Thay resolver hoặc override major sẽ đổi phạm vi glob/peer dependency. Đề xuất audit hạ `eslint-config-next` về 14.2.35 không phù hợp với Next 16.4.6. ESLint 9 đã EOL nhưng bản phát hành hiện hành của `eslint-plugin-import`, `eslint-plugin-jsx-a11y` và `eslint-plugin-react` khai báo peer tới ESLint 9. Theo dõi khi cả ba hỗ trợ ESLint 10 trước khi đổi major. npm 12 bổ sung metadata cho bundled optional WASI của Tailwind khi cập nhật lockfile, giữ nguyên version và integrity của package cha. [ESLint version support](https://eslint.org/version-support/).
+
+### Source và repository hygiene
+
+Sửa hướng dẫn E2E còn trỏ tới LAB MinIO như gate hiện hành sang SeaweedFS runbook. Truy vết xác nhận factory S3-compatible vẫn phục vụ đường đọc legacy và các location/revision đã pin. Migration MinIO lịch sử và provider tests giữ chức năng tương thích và kiểm tra từ chối ngoài phạm vi runner. Các lệnh cutover ghi trong phần lịch sử không có entry point trong checkout hiện tại. Giữ legacy reader, DB migrations, security tests và feature flags đang có caller. Diff không có thay đổi nghiệp vụ hoặc workflow.
+
+Checkout gốc giữ đúng 21 paths local đã đối chiếu byte hash, gồm 20 EXCLUDE và bản skill đã cập nhật. P2 worktrees giữ nguyên HEAD. Private config, auth states, runtime receipts và backup vẫn nằm ngoài index. Ba nhóm scan được ghi riêng. Working tree và staged index của candidate kiểm source hiện hành. Scan lịch sử trên base trả **4 findings đã ghi disposition ở P1**. Giữ kết quả lịch sử FAIL và quyết định hiện hành của operator. [P1 security closure](REFACTOR_P1_BASELINE_2026-11-16.md).
+
+### Fixture và backup inventory chỉ đọc
+
+Đối chiếu labels, image, network, mounts và Compose volume ownership cho 8 project fixture. 32 volumes đều gắn đúng một container fixture ở trạng thái exited. Không thấy process fixture hoặc cổng fixture đang mở trong lượt kiểm tra. Hai thư mục gốc private giữ ACL protected với bốn principals. Backup, manifest và receipts bên dưới kế thừa phạm vi quyền đó.
+
+Bốn PostgreSQL custom dumps qua kiểm tra TOC và giải mã toàn bộ payload bằng `pg_restore` offline, không kết nối DB. 12 cold archives khớp kích thước manifest, đọc đủ 120 file entries, kiểm tra tar path/type. Tạo baseline SHA-256 mới cho 16 dump/archive và 27 file cấu hình private, đọc lại khớp đủ 43 hashes. Manifest lúc backup không lưu digest artifact nên checksum mới chỉ dùng cho đối chiếu từ lần kiểm kê này. Evidence restore trước đó xác minh 11 pinned files, SHA, quyền và version. Lượt kiểm kê không chạy restore hay đọc lại object từ volume đã dừng.
+
+Hai generations, 11 pinned files, backup/config, manifest và receipts được giữ để review và phục hồi. Operator BlueDrive phụ trách retention, thời hạn đang chờ xác nhận. Không có volume nào chưa xác minh ownership trong nhóm 32. Inventory private giữ exact project, container ID, volume name, driver, creation time và hashes. Hiện chưa có tài nguyên được duyệt xóa. Sau khi operator duyệt danh sách cụ thể, kiểm tra lại mounts/writers, retention của bản phục hồi và checksum backup trước cleanup. Sau cleanup đối chiếu đúng tài nguyên đã duyệt biến mất, tài nguyên còn giữ vẫn đủ và Platform timestamps không đổi.
+
+### Serving operational readiness chỉ đọc
+
+| Hạng mục | Quan sát | Điều kiện để xử lý |
+| --- | --- | --- |
+| Platform healthy | 8/8 container healthy, created/started timestamps khớp snapshot P4 | Serving qualification cần evidence riêng trên đúng môi trường |
+| Telemetry STALE | Sample cũ hơn 468.000 giây, ngưỡng đọc 60 giây. Không thấy process collector, Windows service hoặc Scheduled Task tương ứng. Runbook dùng collector độc lập | Operator xác nhận topology, quyền và lịch collector. Nếu mở collector mới, rollback bằng dừng đúng process mới và giữ snapshot cũ |
+| Finalizer UNKNOWN | Không thấy CLI worker/sweep hoặc lịch chạy tương ứng, chưa có heartbeat serving đáng tin. PostgreSQL còn 1 done/1 failed từ lịch sử | Operator xác minh process supervision, startup config và target. Chỉ bật worker khi writer scope được duyệt và có phương án dừng đúng worker mới |
+| LAB probe cleanup_pending | 1 probe hết hạn, `bucket_created=false`, `cleanup_generation=111`, revision failed với `storage_identity_rejected`. Metadata không chứng minh bucket có hay vắng. ID và credential không xuất ra ngoài | Workflow hiện có yêu cầu operator chứng minh bucket vắng, giữ ownership guard và ghi audit khi reconcile. Phần thay đổi serving cần phê duyệt và snapshot metadata trước thao tác |
+| Enterprise Lab cũ | 5 container exited | Giữ assets và cấu hình tới khi operator duyệt riêng |
+
+Django chỉ đọc sample được collector ghi. LAB cleanup giữ pending nếu chưa chứng minh ownership/absence. Chưa có bằng chứng lỗi source cho hai trạng thái này. Các gate **SERVING RUNTIME VERIFIED** và **PRODUCTION RELEASE ACCEPTED** vẫn mở. P4 fixture qualification tiếp tục dựa trên kết quả lịch sử ở trên.
+
+### Kiểm tra candidate cleanup
+
+- Frontend trên Node 24.18.0 với `npm ci --ignore-scripts`: lint, typegen, TypeScript, **163 Node unit PASS** và build **41/41**. Browser mocked bằng Chrome qua Next production local: **66 PASS, 0 FAIL, 0 SKIP**, desktop/mobile. Không có thay đổi runtime trong lockfile. Các gate provider và E2E thật tiếp tục dùng bằng chứng P4 đã lưu.
+- Backend local: `pip check`, Django system check với settings test và **30 guards PASS**. Migration consistency và full PostgreSQL regression của candidate được xác nhận qua GitHub Actions. Provider SKIP vẫn được báo riêng.
+- Remote acceptance theo ba jobs repository-safety, backend và frontend trên cùng HEAD. Ghi SHA và run vào Draft PR cleanup. Rủi ro dev-toolchain còn OPEN, retention chưa được duyệt và serving qualification vẫn chờ.
