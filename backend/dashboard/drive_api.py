@@ -662,7 +662,8 @@ def drive_items_delete_api(request):
         )
     try:
         deleted_count = permanently_delete_files(
-            files_by_id.values(), on_deleted=finish_delete, trashed_folder_ids=root_ids,
+            files_by_id.values(), on_deleted=finish_delete,
+            folder_ids=tree_ids, trashed_folder_ids=root_ids,
         )
     except PermanentDeleteError:
         return JsonResponse({

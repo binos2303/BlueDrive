@@ -59,3 +59,25 @@ Adapter hiện có giữ version pinning, multipart checksum/size, terminal idem
 | Full regression, frontend, source/index | Run và kết quả trên exact commit ở checks của Draft PR. Hai ca provider mới tăng số skip mặc định từ 22 lên 24. |
 
 Nhánh `feature/p5-file-lifecycle-integrity` kế thừa `fix/p4-final-cleanup-security`. PR checks và phần nghiệm thu trong Draft PR ghi exact head SHA, kết quả Actions và phạm vi quyền review. P5 runtime verification cần bằng chứng riêng trên môi trường đích được phê duyệt. Production release và P6 nằm ngoài đợt này.
+
+## Final security review · 19/11/2026
+
+Review [Draft PR #6](https://github.com/binos2303/BlueDrive/pull/6) từ `a0be25f1d9a4954d724f28b5a188b1d537f542eb`. Kết quả lịch sử trên SHA đó là 674 PASS, 24 provider SKIP, 72 enabled fixtures, 30 guards và 15 PASS trên SeaweedFS fixture. Cả ba jobs đạt ở [run của PR](https://github.com/binos2303/BlueDrive/actions/runs/44356119634). Bằng chứng provider dùng đúng SHA và fixture đã ghi ở trên.
+
+| Mức | Finding | Bằng chứng và xử lý |
+| --- | --- | --- |
+| Cao, tính toàn vẹn và khả năng phục hồi | `finish_folder_purge` bỏ sót `UploadSession.State.AVAILABLE`, trạng thái thành công do finalizer ghi. API xóa cây sau khi upload có thể trả 503 dù đã gọi xóa object và đánh dấu File đang purge. Retry cùng yêu cầu tiếp tục bị chặn bởi lịch sử upload. | `test_purge_tree_with_published_upload_detaches_history_after_storage_delete` trên baseline trả 503. Sau sửa trả 200, xóa đúng object một lần, giữ lịch sử upload terminal, gỡ quan hệ với folder/File đã xóa và ghi đúng một audit thành công. |
+| Cao, thứ tự preflight | Một upload thực sự còn active trong cây cũng chỉ được phát hiện sau I/O hủy object. Khi đó File có purge intent và restore bị chặn mặc dù điều kiện xóa thư mục đã có thể kiểm trước. | `test_purge_tree_with_active_upload_stops_before_deleting_objects` trên baseline quan sát adapter gọi delete. Bản sửa kiểm các folder đã chọn trước intent và I/O, vẫn kiểm lại trước xóa metadata. Sau sửa 503 giữ FileVersion, không đặt intent và không gọi adapter. |
+
+Hai bài dùng PostgreSQL độc lập với marker/UUID và mock adapter để quan sát thứ tự I/O. Baseline **2 FAIL**. Sau sửa **50 PASS, 0 SKIP** cho collaboration, purge recovery, download security, admin files và self-service. Django system check và migration consistency **PASS**. Kết quả full regression và ba job của SHA sửa nằm trong [checks của PR #6](https://github.com/binos2303/BlueDrive/pull/6/checks). Hai bài mới không đo outage hay khả năng provider.
+
+| Bất biến rà soát | Bằng chứng trong source và test |
+| --- | --- |
+| Xác minh bytes trước publication | `finalize_uploads` kiểm multipart ownership, size, SHA-256 và scanner nếu cấu hình. `finalization` công bố File/Version/Location cùng quota và audit. Tests mismatch và streaming giữ trạng thái chưa AVAILABLE khi bytes chưa đạt. |
+| Claim, COMMIT, retry và quyền | Khóa và kiểm lại attempt, Tenant/Workspace membership, folder và revision đã pin trước ghi metadata. `on_commit` giữ staging qua rollback. Tests lỗi COMMIT, worker mất claim và hết ngân sách chứng minh không ghi trùng. COPY đã gửi vẫn có thể tạo version vật lý dư. |
+| Purge, restore và accounting | Intent được ghi trước I/O trên các entry point dùng transaction riêng. Restore kiểm intent, adapter giữ đúng revision, các cleanup checks giữ object có tham chiếu ngoài tập xóa. `_finish_purge` khóa lại File còn tồn tại, đảm bảo location đã xử lý rồi commit quota/audit/xóa metadata. Tests partial delete, lỗi COMMIT và hai request overlap vẫn là bằng chứng riêng. URL phát hành trước intent chịu TTL và tình trạng object version. |
+| Reconciliation | `report_upload_recovery` đối chiếu chỉ đọc theo key/version đã biết. Kết quả trong lúc RPC đang chạy có thể đổi. Chỉ báo cáo và giữ receipt khi ownership/ref hoặc độ đầy đủ của inventory còn nghi vấn. |
+
+Migration `0019` vẫn additive, nullable và không có data migration. Trước rollback ở môi trường được duyệt, xác minh backup và lịch chặn writer gồm yêu cầu purge mới, xác định số File còn intent hoặc location đang xóa/lỗi, rồi đối chiếu theo đúng revision. Giữ schema và forward-fix hoặc hoàn tất retry cho đến khi các intent được xử lý. Chỉ xem xét đảo schema sau khi kiểm đường restore và xác nhận không còn purge dở. Review này kiểm migration consistency và forward từ test runner, chưa chạy reverse trên dữ liệu phục vụ.
+
+Serving finalizer, malware scanner thật và runtime acceptance vẫn có phạm vi nghiệm thu riêng. Trạng thái bucket/volumes P4–P5 và recovery material được giữ theo disposition đã ghi.

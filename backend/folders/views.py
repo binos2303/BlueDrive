@@ -279,7 +279,10 @@ def folder_delete_permanently(request, folder_id):
         log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted folder: {folder_name}")
 
     try:
-        permanently_delete_files(nested_files, on_deleted=finish_delete, trashed_folder_ids=[folder.pk])
+        permanently_delete_files(
+            nested_files, on_deleted=finish_delete,
+            folder_ids=folder_ids, trashed_folder_ids=[folder.pk],
+        )
     except Exception:
         messages.error(request, "Could not permanently delete the folder from storage. Metadata was retained where cleanup failed; retry after checking storage.")
         return redirect("trash")

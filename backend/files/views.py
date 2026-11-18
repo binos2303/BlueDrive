@@ -1023,7 +1023,10 @@ def trash_bulk_action(request):
                     f"Permanently deleted {len(deleted_files)} file(s) and {count} folder(s) from Trash",
                 )
 
-            permanently_delete_files(files_by_id.values(), on_deleted=finish_delete, trashed_folder_ids=root_ids)
+            permanently_delete_files(
+                files_by_id.values(), on_deleted=finish_delete,
+                folder_ids=tree_ids, trashed_folder_ids=root_ids,
+            )
         except Exception:
             messages.error(request, "Could not permanently delete all selected storage objects. Metadata was retained where cleanup failed; retry after checking storage.")
             return redirect("trash")

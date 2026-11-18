@@ -1,4 +1,5 @@
 import uuid
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -9,9 +10,10 @@ from django.utils import timezone
 
 from accounts.models import Membership, Workspace, WorkspaceMembership
 from dashboard.views import _unique_copy_folder_name
-from files.models import File, FileVersion, StorageConfig, StorageLocation
+from files.models import File, FileVersion, StorageConfig, StorageLocation, UploadSession
 from files.services import unique_copy_name, unique_upload_name
 from folders.models import Folder
+from logs.models import ActivityLog
 
 
 class WorkspaceCollaborationTests(TestCase):
@@ -68,6 +70,57 @@ class WorkspaceCollaborationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(File.objects.filter(workspace=self.workspace).exists())
         self.assertFalse(Folder.objects.filter(workspace=self.workspace).exists())
+
+    def published_folder_upload(self):
+        session = UploadSession.objects.create(
+            tenant=self.tenant, workspace=self.workspace, initiated_by=self.editor,
+            target_folder=self.child, file=self.second, client_name=self.second.file_name,
+            state=UploadSession.State.AVAILABLE, expected_size_bytes=self.second.file_size,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        version = FileVersion.objects.create(
+            tenant=self.tenant, file=self.second, version_number=1, state=FileVersion.State.AVAILABLE,
+            size_bytes=self.second.file_size, is_current=True,
+        )
+        location = StorageLocation.objects.create(
+            tenant=self.tenant, file_version=version,
+            storage_config=StorageConfig.objects.create(tenant=self.tenant, provider="s3"),
+            object_ref="primary/" + uuid.uuid4().hex, state=StorageLocation.State.AVAILABLE,
+        )
+        return session, location
+
+    def test_purge_tree_with_published_upload_detaches_history_after_storage_delete(self):
+        session, location = self.published_folder_upload()
+        self.assertEqual(self.post("trash", folder_ids=[self.root.pk]).status_code, 200)
+        with patch("files.permanent_delete.adapter_for_location") as adapter:
+            response = self.post("delete", folder_ids=[self.root.pk])
+        self.assertEqual(response.status_code, 200)
+        adapter.return_value.delete_object.assert_called_once_with(location.object_ref)
+        session.refresh_from_db()
+        self.assertEqual(session.state, UploadSession.State.AVAILABLE)
+        self.assertIsNone(session.target_folder_id)
+        self.assertIsNone(session.file_id)
+        self.assertFalse(File.objects.filter(workspace=self.workspace).exists())
+        self.assertFalse(Folder.objects.filter(workspace=self.workspace).exists())
+        self.assertEqual(ActivityLog.objects.filter(
+            workspace=self.workspace, action=ActivityLog.Action.PERMANENT_DELETE,
+        ).count(), 1)
+
+    def test_purge_tree_with_active_upload_stops_before_deleting_objects(self):
+        self.published_folder_upload()
+        UploadSession.objects.create(
+            tenant=self.tenant, workspace=self.workspace, initiated_by=self.editor,
+            target_folder=self.child, client_name="pending.txt", expected_size_bytes=4,
+            state=UploadSession.State.VERIFYING, expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.assertEqual(self.post("trash", folder_ids=[self.root.pk]).status_code, 200)
+        with patch("files.permanent_delete.adapter_for_location") as adapter:
+            response = self.post("delete", folder_ids=[self.root.pk])
+        self.assertEqual(response.status_code, 503)
+        adapter.assert_not_called()
+        self.second.refresh_from_db()
+        self.assertIsNone(self.second.purge_started_at)
+        self.assertEqual(self.second.versions.get().state, FileVersion.State.AVAILABLE)
 
     def test_legacy_folder_lifecycle_also_includes_colleagues_descendants(self):
         self.client.force_login(self.owner)

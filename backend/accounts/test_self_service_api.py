@@ -274,7 +274,7 @@ class SelfServiceApiTests(TestCase):
             mime_type="text/plain",
         )
 
-        def fake_permanent_delete(files, *, on_deleted):
+        def fake_permanent_delete(files, *, on_deleted, folder_ids):
             files = list(files)
             ids = [item.pk for item in files]
             File.objects.filter(pk__in=ids).delete()

@@ -294,7 +294,7 @@ def delete_my_drive_data_view(request):
         )
 
     try:
-        deleted_files = permanently_delete_files(drive_files, on_deleted=finish_delete)
+        deleted_files = permanently_delete_files(drive_files, on_deleted=finish_delete, folder_ids=folder_ids)
     except PermanentDeleteError:
         # Keep adapter/object references and lower-level storage details in the
         # server logs, not in a self-service response returned to the client.

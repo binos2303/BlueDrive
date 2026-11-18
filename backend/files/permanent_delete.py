@@ -39,36 +39,44 @@ def restore_trashed_files(queryset):
     return File.objects.filter(pk__in=[file.pk for file in files]).update(deleted_at=None)
 
 
-def _lock_purge_roots(root_ids):
-    roots = Folder.objects.filter(pk__in=root_ids).select_for_update().order_by("pk")
-    if any(folder.deleted_at is None for folder in roots):
+def _lock_purge_folders(folders, trashed_folder_ids):
+    locked = list(folders.select_for_update().order_by("pk"))
+    roots = set(trashed_folder_ids)
+    if any(folder.pk in roots and folder.deleted_at is None for folder in locked):
         raise PermanentDeleteError("Folder was restored during deletion.")
+    return [folder.pk for folder in locked]
 
 
-def finish_folder_purge(folders, root_ids=()):
-    folder_ids = [folder.pk for folder in folders.select_for_update().order_by("pk")]
-    _lock_purge_roots(root_ids)
-    # Chặn cascade sang nội dung mới hoặc ngoài tập đã kiểm quyền và xóa bytes.
-    if (File.objects.filter(folder_id__in=folder_ids).exists()
-            or Folder.objects.filter(parent_id__in=folder_ids).exclude(pk__in=folder_ids).exists()):
-        raise PermanentDeleteError("Folder content changed during deletion.")
+def _settled_folder_uploads(folder_ids):
     terminal = (
-        UploadSession.State.COMPLETED, UploadSession.State.FAILED,
+        UploadSession.State.AVAILABLE, UploadSession.State.COMPLETED, UploadSession.State.FAILED,
         UploadSession.State.CANCELED, UploadSession.State.EXPIRED,
     )
     sessions = UploadSession.objects.filter(target_folder_id__in=folder_ids)
     if sessions.exclude(state__in=terminal).exists():
         raise PermanentDeleteError("Folder still has an active upload.")
-    sessions.filter(state__in=terminal).update(target_folder=None)
+    return sessions.filter(state__in=terminal)
+
+
+def finish_folder_purge(folders, root_ids=()):
+    folder_ids = _lock_purge_folders(folders, root_ids)
+    # Chặn cascade sang nội dung mới hoặc ngoài tập đã kiểm quyền và xóa bytes.
+    if (File.objects.filter(folder_id__in=folder_ids).exists()
+            or Folder.objects.filter(parent_id__in=folder_ids).exclude(pk__in=folder_ids).exists()):
+        raise PermanentDeleteError("Folder content changed during deletion.")
+    _settled_folder_uploads(folder_ids).update(target_folder=None)
     Folder.objects.filter(pk__in=folder_ids).delete()
     return len(folder_ids)
 
 
 @transaction.atomic
-def _begin_purge(snapshots, root_ids):
+def _begin_purge(snapshots, folder_ids, root_ids):
     files = list(File.objects.select_for_update(no_key=True)
                  .filter(pk__in=snapshots).order_by("pk"))
-    _lock_purge_roots(root_ids)
+    if folder_ids:
+        locked_folders = _lock_purge_folders(Folder.objects.filter(pk__in=folder_ids), root_ids)
+        # Từ chối upload còn chạy trước khi đặt purge intent hoặc gọi kho.
+        _settled_folder_uploads(locked_folders)
     now = timezone.now()
     for current in files:
         selected = snapshots[current.pk]
@@ -85,10 +93,10 @@ def _begin_purge(snapshots, root_ids):
     return files
 
 
-def permanently_delete_files(files, *, on_deleted=None, trashed_folder_ids=()):
+def permanently_delete_files(files, *, on_deleted=None, folder_ids=(), trashed_folder_ids=()):
     snapshots = {file.pk: file for file in files}
     try:
-        files = _begin_purge(snapshots, trashed_folder_ids)
+        files = _begin_purge(snapshots, folder_ids, trashed_folder_ids)
     except DatabaseError as error:
         raise PermanentDeleteError("Could not record permanent deletion.") from error
     if not files:
