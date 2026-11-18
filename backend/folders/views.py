@@ -21,6 +21,9 @@ from securedrive.frontend_redirects import redirect_to_frontend
 from files.rename_service import rename_resource, RenameError
 from files.models import File
 from files.models import UploadSession
+from files.permanent_delete import (
+    FilePurgeInProgress, finish_folder_purge, permanently_delete_files, restore_trashed_files,
+)
 from files.quota import (
     QuotaExceeded,
     QuotaStateError,
@@ -223,17 +226,20 @@ def folder_restore(request, folder_id):
             messages.error(request, f'A file named "{restored_file.file_name}" already exists in a restored folder.')
             return redirect("trash")
 
-    with transaction.atomic():
-        Folder.objects.filter(
-            id__in=folder_ids, tenant=folder.tenant,
-            workspace=folder.workspace,
-        ).update(deleted_at=None)
-        File.objects.filter(
-            tenant=folder.tenant,
-            workspace=folder.workspace,
-            folder_id__in=folder_ids,
-            deleted_at__isnull=False,
-        ).update(deleted_at=None)
+    try:
+        with transaction.atomic():
+            restore_trashed_files(File.objects.filter(
+                tenant=folder.tenant,
+                workspace=folder.workspace,
+                folder_id__in=folder_ids,
+            ))
+            Folder.objects.filter(
+                id__in=folder_ids, tenant=folder.tenant,
+                workspace=folder.workspace,
+            ).update(deleted_at=None)
+    except FilePurgeInProgress:
+        messages.error(request, "A file in this folder is already being permanently deleted.")
+        return redirect("trash")
 
     log_action(request.user, ActivityLog.Action.RESTORE, f"Restored folder: {folder.folder_name}", obj=folder)
     messages.success(request, f'"{folder.folder_name}" restored successfully.')
@@ -263,25 +269,21 @@ def folder_delete_permanently(request, folder_id):
     ).select_related("folder"))
     folder_name = folder.folder_name
 
-    try:
-        from files.permanent_delete import permanently_delete_files
-        permanently_delete_files(nested_files)
-        # Upload sessions retain their audit rows, but the protected folder FK
-        # must be detached before permanently removing the folder tree.
-        UploadSession.objects.filter(
-            target_folder_id__in=folder_ids,
-            workspace=folder.workspace,
-        ).update(target_folder=None)
-        Folder.objects.filter(
+    def finish_delete(_files):
+        folders = Folder.objects.filter(
             id__in=folder_ids,
             tenant=folder.tenant,
             workspace=folder.workspace,
-        ).delete()
+        )
+        finish_folder_purge(folders, [folder.pk])
+        log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted folder: {folder_name}")
+
+    try:
+        permanently_delete_files(nested_files, on_deleted=finish_delete, trashed_folder_ids=[folder.pk])
     except Exception:
         messages.error(request, "Could not permanently delete the folder from storage. Metadata was retained where cleanup failed; retry after checking storage.")
         return redirect("trash")
 
-    log_action(request.user, ActivityLog.Action.PERMANENT_DELETE, f"Permanently deleted folder: {folder_name}")
     messages.success(request, f'"{folder_name}" permanently deleted.')
     return redirect("trash")
 

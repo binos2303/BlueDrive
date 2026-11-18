@@ -26,8 +26,11 @@ from accounts.access import (
     get_default_tenant,
     resolve_request_workspace,
 )
-from files.models import File, UploadSession
-from files.permanent_delete import PermanentDeleteError, permanently_delete_files
+from files.models import File
+from files.permanent_delete import (
+    FilePurgeInProgress, PermanentDeleteError, finish_folder_purge,
+    permanently_delete_files, restore_trashed_files,
+)
 from files.quota import QuotaExceeded, QuotaStateError
 from files.services import unique_copy_name
 from files.rename_service import rename_resource, RenameError
@@ -596,14 +599,16 @@ def drive_items_restore_api(request):
 
     try:
         with transaction.atomic():
-            folder_count = Folder.objects.filter(
-                tenant=tenant, workspace=workspace, id__in=tree_ids,
-            ).update(deleted_at=None)
-            file_count = File.objects.filter(
+            file_count = restore_trashed_files(File.objects.filter(
                 tenant=tenant,
                 workspace=workspace,
                 id__in=list(files_to_restore),
+            ))
+            folder_count = Folder.objects.filter(
+                tenant=tenant, workspace=workspace, id__in=tree_ids,
             ).update(deleted_at=None)
+    except FilePurgeInProgress:
+        return JsonResponse({"detail": "Permanent deletion is already in progress. Retry deletion from Trash."}, status=409)
     except IntegrityError:
         return JsonResponse({"detail": "An item with the same name appeared during restore. Refresh and try again."}, status=409)
 
@@ -643,9 +648,23 @@ def drive_items_delete_api(request):
     ).select_related("folder"))
     files_by_id = {item.pk: item for item in [*direct_files, *nested_files]}
 
+    root_ids = [folder.pk for folder in top_folders]
+    folder_count = 0
+
+    def finish_delete(deleted_files):
+        nonlocal folder_count
+        folders = Folder.objects.filter(tenant=tenant, workspace=workspace, pk__in=tree_ids)
+        folder_count = finish_folder_purge(folders, root_ids)
+        log_action(
+            request.user, ActivityLog.Action.PERMANENT_DELETE,
+            f"Permanently deleted {len(deleted_files)} file(s) and {folder_count} folder record(s) from Trash",
+            workspace=workspace,
+        )
     try:
-        permanently_delete_files(files_by_id.values())
-    except PermanentDeleteError as error:
+        deleted_count = permanently_delete_files(
+            files_by_id.values(), on_deleted=finish_delete, trashed_folder_ids=root_ids,
+        )
+    except PermanentDeleteError:
         return JsonResponse({
             "detail": "Some storage objects could not be deleted. Metadata was retained so the operation can be retried."
         }, status=503)
@@ -654,33 +673,7 @@ def drive_items_delete_api(request):
             "detail": "Permanent deletion failed. No success was reported; check storage availability and retry."
         }, status=503)
 
-    # Upload sessions keep their audit history, so detach their protected folder FK.
-    if tree_ids:
-        UploadSession.objects.filter(
-            target_folder_id__in=tree_ids,
-            workspace=workspace,
-        ).update(target_folder=None)
-    folder_count = len(tree_ids)
-    if tree_ids:
-        try:
-            with transaction.atomic():
-                Folder.objects.filter(
-                    tenant=tenant,
-                    workspace=workspace,
-                    id__in=tree_ids,
-                ).delete()
-        except Exception:
-            return JsonResponse({
-                "detail": "File objects were deleted but folder metadata cleanup failed. Retry deleting the empty trashed folder."
-            }, status=503)
-
-    total = len(files_by_id) + len(tree_ids)
-    log_action(
-        request.user,
-        ActivityLog.Action.PERMANENT_DELETE,
-        f"Permanently deleted {len(files_by_id)} file(s) and {folder_count} folder record(s) from Trash",
-        workspace=workspace,
-    )
+    total = deleted_count + folder_count
     return JsonResponse({"detail": f"Permanently deleted {total} item(s).", "count": total})
 
 

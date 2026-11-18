@@ -10,7 +10,8 @@ import tempfile
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event, current_thread
+from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ from django.core.management import call_command
 from django.db import IntegrityError, close_old_connections
 from django.test import TransactionTestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import Membership, QuotaAccount, Workspace, WorkspaceMembership
@@ -27,6 +29,8 @@ from files.models import File, FileVersion, QuotaReservation, StorageLocation, U
 from files.storage_adapters import get_storage_adapter
 from files.storage_adapters.base import StorageRetryableError
 from files.tests import test_seaweedfs_integration as s3_gate
+from files.tests.test_finalization_recovery import fail_fileversion_commit
+from files.storage_adapters.s3_compatible import S3CompatibleStorageAdapter
 from files.views import _decrypt_file
 from folders.models import Folder
 from infrastructure.connection_probes import begin_probe, cleanup_probe, complete_probe, runtime_authorizations
@@ -328,6 +332,115 @@ class SeaweedFSFinalizerIntegrationTests(TransactionTestCase):
         versions = self.storage._client.list_object_versions(Bucket=connection.bucket, Prefix=final_key)
         self.assertFalse([entry for entry in versions.get("Versions", []) + versions.get("DeleteMarkers", [])
                           if entry["Key"] == final_key])
+
+    def test_real_postgresql_commit_failures_after_copy_and_delete(self):
+        connection = self.qualified_platform()
+        payload = b"P5 deferred publication and deletion commit failure\n"
+        session = self.upload(payload, hashlib.sha256(payload).hexdigest(), run_worker=False)
+        with fail_fileversion_commit():
+            call_command("finalize_uploads", stdout=io.StringIO())
+        session.refresh_from_db()
+        key = session.final_object_key
+        self.addCleanup(self.storage.delete_object, key)
+        self.assertEqual((session.state, session.file_id), ("verifying", None))
+        for object_key in (session.object_key, key):
+            with self.storage.open_object(object_key) as body:
+                self.assertEqual(body.read(), payload)
+        self.assertEqual(QuotaReservation.objects.get(upload_session=session).state, "reserved")
+
+        call_command("finalize_uploads", stdout=io.StringIO())
+        location = self.assert_publication_once(session, payload, connection)
+        audit = io.StringIO()
+        call_command("report_upload_recovery", str(session.pk), "--inspect-storage", stdout=audit)
+        report = json.loads(audit.getvalue())
+        self.assertEqual(report["missing_available_locations"], 0)
+        self.assertGreaterEqual(report["unreferenced_known_key_versions"], 1)
+
+        self.login_fixture()
+        selection = {"file_ids": [session.file_id], "folder_ids": []}
+        self.assertEqual(self.client.post(reverse("drive_items_trash_api"), selection, format="json").status_code, 200)
+
+        original_delete = S3CompatibleStorageAdapter.delete_object
+        versions_before = len(self.storage.list_exact_versions(key))
+
+        def partial_delete(adapter, object_key):
+            if object_key != key:
+                return original_delete(adapter, object_key)
+            version = adapter.list_exact_versions(key)[0]
+            adapter._client.delete_object(Bucket=connection.bucket, **version)
+            raise StorageRetryableError("Fixture lost the remaining version deletions.")
+
+        with patch.object(S3CompatibleStorageAdapter, "delete_object", partial_delete):
+            response = self.client.post(reverse("drive_items_delete_api"), selection, format="json")
+        self.assertEqual(response.status_code, 503)
+        location.refresh_from_db()
+        self.assertEqual(location.state, "error")
+        self.assertEqual(len(self.storage.list_exact_versions(key)), versions_before - 1)
+        self.assertEqual(self.client.post(reverse("drive_items_restore_api"), selection, format="json").status_code, 409)
+
+        with fail_fileversion_commit(deleting=True):
+            response = self.client.post(reverse("drive_items_delete_api"), selection, format="json")
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(File.objects.get(pk=session.file_id).purge_started_at)
+        self.assertEqual(FileVersion.objects.get(pk=location.file_version_id).state, "deleting")
+        location.refresh_from_db()
+        self.assertEqual(location.state, "deleted")
+        self.assertEqual(self.storage.list_exact_versions(key), [])
+        self.assertEqual(QuotaAccount.objects.get(tenant=session.tenant, scope="tenant").used_bytes, len(payload))
+        self.assertFalse(ActivityLog.objects.filter(action=ActivityLog.Action.PERMANENT_DELETE).exists())
+        self.assertEqual(self.client.post(reverse("drive_items_restore_api"), selection, format="json").status_code, 409)
+
+        self.assertEqual(self.client.post(reverse("drive_items_delete_api"), selection, format="json").status_code, 200)
+        self.assertFalse(File.objects.filter(pk=session.file_id).exists())
+        self.assertEqual(QuotaAccount.objects.get(tenant=session.tenant, scope="tenant").used_bytes, 0)
+        self.assertEqual(ActivityLog.objects.filter(action=ActivityLog.Action.PERMANENT_DELETE).count(), 1)
+
+    def test_real_stale_claim_after_copy_cannot_publish_late(self):
+        connection = self.qualified_platform()
+        payload = b"P5 stale worker returns after a real copy\n"
+        session = self.upload(payload, hashlib.sha256(payload).hexdigest(), run_worker=False)
+        copied = Event()
+        allow_return = Event()
+        original = S3CompatibleStorageAdapter.publish_verified_object
+
+        def publish(adapter, *args, **kwargs):
+            result = original(adapter, *args, **kwargs)
+            if current_thread().name.startswith("p5-stale"):
+                copied.set()
+                if not allow_return.wait(20):
+                    raise AssertionError("Fixture did not release stale worker.")
+            return result
+
+        def first_worker():
+            close_old_connections()
+            try:
+                call_command("finalize_uploads", stdout=io.StringIO())
+            finally:
+                close_old_connections()
+
+        with patch.object(S3CompatibleStorageAdapter, "publish_verified_object", publish):
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="p5-stale") as pool:
+                future = pool.submit(first_worker)
+                try:
+                    self.assertTrue(copied.wait(20))
+                    session.refresh_from_db()
+                    self.addCleanup(self.storage.delete_object, session.final_object_key)
+                    self.assertEqual((session.state, session.file_id), ("verifying", None))
+                    UploadFinalizationJob.objects.filter(upload_session=session).update(
+                        updated_at=timezone.now() - timedelta(minutes=11),
+                    )
+                    call_command("finalize_uploads", stdout=io.StringIO())
+                    pinned = self.assert_publication_once(session, payload, connection).provider_version_id
+                finally:
+                    allow_return.set()
+                future.result(timeout=20)
+        location = self.assert_publication_once(session, payload, connection)
+        self.assertEqual(location.provider_version_id, pinned)
+        with self.storage.open_object(location.object_ref, version_id=pinned) as body:
+            self.assertEqual(body.read(), payload)
+        self.assertEqual(UploadFinalizationJob.objects.get(upload_session=session).attempts, 2)
+        physical_versions = self.storage.list_exact_versions(location.object_ref)
+        self.assertEqual(len(physical_versions), 2)
 
     def test_concurrent_workspace_admission_keeps_its_budget_and_finalizes_once(self):
         connection = self.qualified_platform()

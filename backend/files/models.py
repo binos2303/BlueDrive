@@ -107,6 +107,7 @@ class File(models.Model):
         editable=False,
     )
     purge_after = models.DateTimeField(null=True, blank=True)
+    purge_started_at = models.DateTimeField(null=True, blank=True, editable=False)
 
     # ==========================
     # Timestamps
@@ -128,6 +129,10 @@ class File(models.Model):
 
     class Meta:
         constraints = [
+            models.CheckConstraint(
+                condition=Q(purge_started_at__isnull=True) | Q(deleted_at__isnull=False),
+                name="file_purge_requires_trash_check",
+            ),
             models.UniqueConstraint(
                 models.F("workspace"),
                 Coalesce(
