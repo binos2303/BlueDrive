@@ -198,3 +198,9 @@ Rollback source cần review và revert đúng commit P4; không tự rollback v
 **Git candidate:** chỉ bảy public paths kể trên, review diff/security/index trước commit; tiếp tục Draft PR #4, không merge/deploy. Baseline `b7933a3` có đủ ba CI jobs PASS; kết quả đó không đại diện candidate mới. SHA/Actions của candidate được ghi trong body/checks PR sau khi repository-safety/backend/frontend hoàn tất trên cùng SHA. Default CI vẫn 662 executed PASS + 22 provider SKIP dự kiến, enabled 72/guards 30/no-DB 2; phải đọc kết quả thật trước khi báo remote PASS.
 
 P4 đã cung cấp prerequisite provider/isolation/persistence/restore cho P5 development khi CI candidate đạt và được review. P5 vẫn cần failure table/crash/stale worker/quota/cleanup theo roadmap; các giới hạn serving/production và dev-tool security ở trên vẫn mở. Không triển khai P5 trong nhiệm vụ này.
+
+### Quy trình tái sử dụng P4
+
+[Skill storage validation](../.agents/skills/bluedrive-storage-validation/SKILL.md) chuẩn hóa preflight, provider/Tenant gates, E2E, outage, restore và disposition tài nguyên cho các lượt sau. Quy trình mới yêu cầu checksum riêng cho dump/archive/bundle và đọc lại pinned file sau restore. Bằng chứng thực thi của ngày 18/11 nằm trong bảng kết quả ở trên.
+
+**Retention đang chờ operator xác nhận thời hạn.** 32 named volumes thuộc các project fixture P4 nguồn và restore. Một bộ backup private gồm 4 PostgreSQL dumps, 12 SeaweedFS archives và cấu hình phục hồi. Operator BlueDrive phụ trách các tài nguyên này, đang được giữ để review và đối chiếu recovery. Mọi thao tác xóa recovery material cần phê duyệt riêng.
