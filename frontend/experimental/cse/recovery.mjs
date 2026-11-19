@@ -5,13 +5,17 @@ import { fingerprint, message } from "./trust.mjs";
 
 const kitIdentity = ["tenant", "subject", "keyId", "generation"];
 const own = (record, fields) => fields.map((field) => record[field]);
-const kitAad = (bundle) => message("p61-personal-kit", [bundle.version, ...own(bundle, kitIdentity), bundle.receivePublicHex]);
+const kitAad = (bundle, domain) => message(domain, [bundle.version, ...own(bundle, kitIdentity), bundle.receivePublicHex]);
+const kitDomain = "p61-personal-kit";
+export const createKit = (identity) => createKeyBundle(identity, kitDomain);
+export const openKit = (bundle, material, identity, session) => openKeyBundle(bundle, material, identity, session, kitDomain);
 
-export async function createKit(identity) {
+export async function createKeyBundle(identity, domain) {
   const receive = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
   const signer = await signingKey(true);
   const offlineMaterial = random(32);
-  const bundle = { ...identity, version: 1, iv: random(12), receivePublicHex: hex(await publicBytes(receive.publicKey)) };
+  const bundle = { tenant: identity.tenant, subject: identity.subject, keyId: identity.keyId, generation: identity.generation,
+    version: 1, iv: random(12), receivePublicHex: hex(await publicBytes(receive.publicKey)) };
   const rawReceive = new Uint8Array(await crypto.subtle.exportKey("pkcs8", receive.privateKey));
   const rawSign = new Uint8Array(await crypto.subtle.exportKey("pkcs8", signer.privateKey));
   const lengths = new Uint8Array(4);
@@ -23,7 +27,7 @@ export async function createKit(identity) {
   try {
     const key = await aesKey(offlineMaterial, ["encrypt"]);
     bundle.sealed = new Uint8Array(await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: bundle.iv, additionalData: kitAad(bundle), tagLength: 128 }, key, payload,
+      { name: "AES-GCM", iv: bundle.iv, additionalData: kitAad(bundle, domain), tagLength: 128 }, key, payload,
     ));
     return { bundle, offlineMaterial, receivePublic: receive.publicKey, signerPublic: signer.publicKey };
   } finally {
@@ -31,7 +35,7 @@ export async function createKit(identity) {
   }
 }
 
-export async function openKit(bundle, offlineMaterial, signedIdentity, session) {
+export async function openKeyBundle(bundle, offlineMaterial, signedIdentity, session, domain) {
   if (!session.authenticated || !bundle || !offlineMaterial || bundle.version !== 1
       || bundle.tenant !== session.tenant || bundle.subject !== session.subject
       || bundle.iv.length !== 12 || bundle.sealed.length > 2048 || !/^04[0-9a-f]{128}$/.test(bundle.receivePublicHex)
@@ -40,7 +44,7 @@ export async function openKit(bundle, offlineMaterial, signedIdentity, session) 
   }
   const key = await aesKey(offlineMaterial, ["decrypt"]);
   const decoded = new Uint8Array(await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: bundle.iv, additionalData: kitAad(bundle), tagLength: 128 }, key, bundle.sealed,
+    { name: "AES-GCM", iv: bundle.iv, additionalData: kitAad(bundle, domain), tagLength: 128 }, key, bundle.sealed,
   ));
   try {
     if (decoded.length < 4) throw new Error("Invalid recovery key framing");
