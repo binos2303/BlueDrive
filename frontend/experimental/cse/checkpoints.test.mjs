@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -97,6 +97,18 @@ test("same-sequence witness equivocation preserves last accepted checkpoint", as
   assert.deepEqual(await f.store.read(f.tenant), saved);
 });
 
+test("adjacent directory snapshots never change a published key ID or relabel a revoked key", async () => {
+  const f = await fixture();
+  const next = await signingKey();
+  const replacement = await deviceEntry(next.publicKey, { ...f.record, epoch: 2 });
+  await assert.rejects(f.authority.publish([replacement]), /transition invalid/);
+  const revoked = await f.revoke();
+  await assert.rejects(f.authority.publish([{ ...f.record, keyId: id(), epoch: 3 }]), /transition invalid/);
+  const rotated = { ...replacement, keyId: id(), epoch: 3 };
+  assert.equal((await f.authority.publish([rotated])).sequence, revoked.sequence + 1);
+  assert.equal((await f.client().authorize(rotated)).entry.keyId, rotated.keyId);
+});
+
 test("witness unavailable, local corruption, future skew and expiration fail closed", async (t) => {
   await t.test("unavailable", async () => {
     const f = await fixture();
@@ -151,6 +163,36 @@ test("authority rotation requires dual endorsement and linked cutover", async ()
   assert.equal((await f.client({ pins }).authorize(f.record)).head.sequence, 4);
 });
 
+test("fresh or pre-rotation clients verify the endorsed cutover before accepting a later head", async () => {
+  const f = await fixture();
+  const retained = f.store;
+  await f.client().authorize(f.record);
+  const next = await signingKey();
+  const endorsed = await endorseRotation(f.tenant, f.root, next, f.first);
+  const pins = await directoryPins(f.tenant, f.root.publicKey, f.pin, [endorsed]);
+  const otherHistory = directoryAuthority(f.tenant, f.root, f.now);
+  await otherHistory.publish([{ ...f.record, epoch: 2 }]);
+  await otherHistory.publish([{ ...f.record, epoch: 2 }], next);
+  await otherHistory.publish([{ ...f.record, epoch: 2 }]);
+  const fresh = storage();
+  for (const store of [fresh, retained]) {
+    const saved = await store.read(f.tenant);
+    await assert.rejects(f.client({ pins, store, latest: otherHistory.latest }).authorize(f.record), /checkpoint invalid|cutover/);
+    assert.deepEqual(await store.read(f.tenant), saved);
+  }
+
+  await f.authority.publish([f.record], next);
+  await f.authority.publish([f.record]);
+  await assert.rejects(f.client({ pins, store: fresh, latest: async (query) => {
+    const reply = await f.authority.latest(query);
+    return { ...reply, links: [] };
+  } }).authorize(f.record), /cutover/);
+  const accepted = await f.client({ pins, store: fresh }).authorize(f.record);
+  assert.equal(accepted.head.sequence, 3);
+  assert.equal((await f.client({ pins, store: fresh }).authorize(f.record)).head.sequence, 3);
+  assert.equal((await f.client({ pins, store: retained }).authorize(f.record)).head.sequence, 3);
+});
+
 test("enrollment proof needs a current endorsing signer and remains single-use across clients", async () => {
   const f = await fixture();
   const candidate = await signingKey();
@@ -202,12 +244,15 @@ test("independent witness reopens its journal with current revocation and reject
   const root = await mkdtemp(path.join(tmp, "bluedrive-witness-"));
   let log;
   let parallel;
+  let rolledBack;
   try {
     const filename = path.join(root, "directory.sqlite");
     log = authorityJournal(filename);
     parallel = authorityJournal(filename);
     const writer = directoryAuthority(f.tenant, f.root, f.now, log);
     await writer.publish([f.record]);
+    const backup = path.join(root, "before-revocation.sqlite");
+    await copyFile(filename, backup);
     const alternate = directoryAuthority(f.tenant, f.root, f.now, parallel);
     const revoked = [{ ...f.record, status: "revoked", epoch: 2 }];
     const results = await Promise.allSettled([writer.publish(revoked), alternate.publish(revoked)]);
@@ -220,9 +265,17 @@ test("independent witness reopens its journal with current revocation and reject
     assert.equal((await f.store.read(f.tenant)).sequence, 2);
     const badKey = directoryAuthority(f.tenant, await signingKey(), f.now, log);
     await assert.rejects(f.client({ latest: badKey.latest }).authorize(f.record), /configured key mismatch/);
+    rolledBack = authorityJournal(backup);
+    const staleWitness = directoryAuthority(f.tenant, f.root, f.now, rolledBack);
+    await assert.rejects(f.client({ latest: staleWitness.latest }).authorize(f.record), /Witness request rejected/);
+    assert.equal((await f.store.read(f.tenant)).sequence, 2);
+    // Một nonce mới chỉ xác nhận trạng thái của witness đang phục vụ, kể cả sau restore journal cũ.
+    const newProfile = f.client({ store: storage(), latest: staleWitness.latest });
+    assert.equal((await newProfile.authorize(f.record)).head.sequence, 1);
   } finally {
     log?.close();
     parallel?.close();
+    rolledBack?.close();
     const owned = await realpath(root);
     assert.equal(path.dirname(owned), tmp);
     assert.ok(path.basename(owned).startsWith("bluedrive-witness-"));

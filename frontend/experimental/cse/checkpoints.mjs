@@ -78,7 +78,10 @@ export function directoryAuthority(tenant, root, now = Date.now, journal = memor
       for (const old of current?.entries ?? []) {
         const row = entryList.find((candidate) => entryId(candidate) === entryId(old));
         if (!row || row.epoch < old.epoch || (row.epoch === old.epoch && digest(entryPayload(row)) !== digest(entryPayload(old)))
-            || (old.status === "revoked" && row.status === "active" && old.keyId === row.keyId)) throw new Error("Directory entry transition invalid");
+            || (old.keyId === row.keyId && old.publicKey !== row.publicKey)
+            || (old.status === "revoked" && row.status === "active" && (old.keyId === row.keyId || old.publicKey === row.publicKey))) {
+          throw new Error("Directory entry transition invalid");
+        }
       }
       const entries = await Promise.all(entryList.map(async (row) =>
         ({ ...row, signature: await sign(nextKey.privateKey, entryPayload(row)) })));
@@ -111,7 +114,7 @@ export function directoryAuthority(tenant, root, now = Date.now, journal = memor
 }
 
 function validSaved(row) {
-  return row && positive(row.sequence) && hash.test(row.digest);
+  return row && positive(row.sequence) && hash.test(row.digest) && (row.rotation === undefined || hash.test(row.rotation));
 }
 
 async function withDeadline(fetchLatest, request) {
@@ -126,6 +129,8 @@ async function withDeadline(fetchLatest, request) {
 
 export function directoryClient({ tenant, pins, store, latest, now = Date.now }) {
   const current = pins.at(-1);
+  const rotation = current.previous === null ? undefined : digest(message("BlueDrive/directory/observed-rotation/v1",
+    [tenant, current.id, current.sequence, current.previous]));
   const pinAt = (sequence) => pins.findLast((pin) => pin.sequence <= sequence);
   async function check(row) {
     const pin = pinAt(row.sequence);
@@ -140,9 +145,12 @@ export function directoryClient({ tenant, pins, store, latest, now = Date.now })
     if (expected.tenant !== tenant) throw new Error("Directory scope mismatch");
     const before = await store.read(tenant);
     if (before !== undefined && !validSaved(before)) throw new Error("Local checkpoint corrupt");
+    const needsCutover = rotation !== undefined && (before?.rotation !== rotation || before.sequence < current.sequence);
+    // Head cao hơn mốc chuyển khóa chỉ có giá trị khi checkpoint bàn giao thuộc cùng chuỗi đã duyệt.
+    const after = needsCutover ? Math.min(before?.sequence ?? current.sequence - 1, current.sequence - 1) : before?.sequence ?? 0;
     const nonce = hex(random(32));
     const requested = now();
-    const { checkpoint, proof, entries, links } = await withDeadline(latest, { tenant, nonce, after: before?.sequence ?? 0 });
+    const { checkpoint, proof, entries, links } = await withDeadline(latest, { tenant, nonce, after });
     const isFresh = (time) => Number.isSafeInteger(proof.issued) && proof.issued >= requested - skewMs
       && proof.issued <= time + skewMs && proof.expires === proof.issued + windowMs && time < proof.expires
       && time >= requested - skewMs;
@@ -162,8 +170,10 @@ export function directoryClient({ tenant, pins, store, latest, now = Date.now })
       chain.set(row.sequence, row.previous);
       previous = { sequence: row.sequence, digest: row === checkpoint ? head : await check(row) };
     }
+    if (needsCutover && chain.get(current.sequence) !== current.previous) throw new Error("Endorsed cutover missing");
     const entry = entries.find((row) => entryId(row) === entryId(expected));
     if (entry && !await verify(current.publicKey, entry.signature, entryPayload(entry))) throw new Error("Directory record signature invalid");
+    const accepted = { sequence: checkpoint.sequence, digest: head, ...(rotation === undefined ? {} : { rotation }) };
     await store.update(tenant, (saved) => {
       if (!isFresh(now())) throw new Error("Witness freshness expired before commit");
       if (saved !== undefined) {
@@ -173,7 +183,7 @@ export function directoryClient({ tenant, pins, store, latest, now = Date.now })
           throw new Error("Directory rollback or equivocation");
         }
       }
-      return { sequence: checkpoint.sequence, digest: head };
+      return accepted;
     });
     if (!isFresh(now())) throw new Error("Witness freshness expired");
     if (!entry || entry.status !== "active" || (expected.keyId !== undefined && entry.keyId !== expected.keyId)) {
@@ -183,7 +193,7 @@ export function directoryClient({ tenant, pins, store, latest, now = Date.now })
     const publicKey = entry.purpose === "receive" ? await importRecipient(raw)
       : await crypto.subtle.importKey("raw", raw, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
     if (!isFresh(now())) throw new Error("Witness freshness expired");
-    return { entry, publicKey, head: { sequence: checkpoint.sequence, digest: head }, freshnessExpires: proof.expires };
+    return { entry, publicKey, head: accepted, freshnessExpires: proof.expires };
   }
 
   return {
