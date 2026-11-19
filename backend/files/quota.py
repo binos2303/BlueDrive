@@ -115,7 +115,7 @@ def reserve_upload_quota(upload_session_id, user):
     ):
         raise QuotaStateError("Workspace quota not initialized. Run quota reconciliation.")
 
-    requested_bytes = upload.expected_size_bytes
+    requested_bytes = upload.cse_metadata.get("logical_size", upload.expected_size_bytes)
     for account in accounts_by_id.values():
         if (
             account.limit_bytes is not None
@@ -188,10 +188,11 @@ def finalize_upload_quota(
         for reservation in reservations
     ):
         raise QuotaStateError("The upload quota has already been finalized.")
+    charge_bytes = upload.cse_metadata.get("logical_size", actual_size_bytes)
     if completed and (
         actual_size_bytes is None
         or actual_size_bytes < 0
-        or any(actual_size_bytes > row.reserved_bytes for row in reservations)
+        or any(charge_bytes > row.reserved_bytes for row in reservations)
     ):
         raise QuotaStateError("The verified object size exceeds its reservation.")
     if completed:
@@ -217,7 +218,7 @@ def finalize_upload_quota(
             raise QuotaStateError("The quota reservation counters are inconsistent.")
         account.reserved_bytes -= reservation.reserved_bytes
         if completed:
-            account.used_bytes += actual_size_bytes
+            account.used_bytes += charge_bytes
         account.save(update_fields=["reserved_bytes", "used_bytes", "updated_at"])
         reservation.state = target_state
         reservation.finalized_at = timezone.now()

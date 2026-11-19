@@ -196,6 +196,8 @@ class File(models.Model):
 
 
 class FileVersion(models.Model):
+    cse_metadata = models.JSONField(default=dict, blank=True)
+    crypto_version_id = models.UUIDField(null=True, blank=True, unique=True, editable=False)
     class State(models.TextChoices):
         PENDING = "pending", "Pending"
         UPLOADING = "uploading", "Uploading"
@@ -407,6 +409,8 @@ class StorageLocation(models.Model):
 
 
 class UploadSession(models.Model):
+    cse_metadata = models.JSONField(default=dict, blank=True)
+    crypto_version_id = models.UUIDField(null=True, blank=True, unique=True, editable=False)
     class State(models.TextChoices):
         INITIATED = "initiated", "Initiated"
         UPLOADING = "uploading", "Uploading"

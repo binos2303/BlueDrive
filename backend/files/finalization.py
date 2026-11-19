@@ -19,6 +19,7 @@ from django.utils.module_loading import import_string
 
 from accounts.access import can_edit_workspace_content
 from accounts.models import Membership, Tenant, Workspace, WorkspaceMembership
+from files import cse
 from files.models import File, FileVersion, StorageConfig, StorageLocation, UploadFinalizationJob, UploadSession
 from files.quota import finalize_upload_quota
 from files.services import unique_upload_name
@@ -86,6 +87,11 @@ def _lock_writable_destination(session, actor):
             raise UploadDestinationUnavailable("Upload destination is no longer writable.")
         session.target_folder = folder
     validate_upload_storage(session, lock=True)
+    if session.cse_metadata:
+        cse.authorize_write(current_actor, tenant, workspace, session.target_folder, session.cse_metadata,
+                            session.expected_size_bytes, session.expected_sha256, session.storage_connection, pinned=True)
+    elif cse.requires_cse(tenant, workspace):
+        raise UploadDestinationUnavailable("Destination requires a CSE upload.")
 
 
 def _clean_published_staging(storage, upload_id, staging_key):
@@ -118,7 +124,8 @@ def finalize_verified_upload(
     content.seek(0, io.SEEK_END)
     actual_size = content.tell()
     content.seek(0)
-    if actual_size != session.expected_size_bytes or actual_size > MAX_UPLOAD_SIZE:
+    encrypted = bool(session.cse_metadata)
+    if actual_size != session.expected_size_bytes or actual_size > (cse.MAX_WIRE if encrypted else MAX_UPLOAD_SIZE):
         raise ValueError("Verified upload size does not match its reservation.")
     actual_sha256 = verified_sha256 or calculate_sha256(content)
     if not isinstance(actual_sha256, str) or len(actual_sha256) != 64 or any(
@@ -132,9 +139,20 @@ def finalize_verified_upload(
         raise ValueError("Verified upload checksum does not match its reservation.")
 
     extension = validate_filename(session.client_name)
-    mime_type = detect_mime_type(DjangoFile(content, name=session.client_name), extension)
+    logical_size = actual_size
+    if encrypted:
+        prefix = cse.authorize_write(actor, session.tenant, session.workspace, session.target_folder,
+                                     session.cse_metadata, actual_size, actual_sha256,
+                                     session.storage_connection, pinned=True)
+        if content.read(cse.PREFIX) != prefix or verified_sha256 is None:
+            raise ValidationError("Ciphertext prefix does not match the signed manifest.")
+        content.seek(0)
+        mime_type = "application/octet-stream"
+        logical_size = session.cse_metadata["logical_size"]
+    else:
+        mime_type = detect_mime_type(DjangoFile(content, name=session.client_name), extension)
     scanner_path = getattr(settings, "SECUREDRIVE_UPLOAD_SCANNER", "")
-    if scanner_path:
+    if scanner_path and not encrypted:
         with transaction.atomic():
             session = lock_finalizing_upload(session.pk, job_attempt)
             if session.state not in (UploadSession.State.VERIFYING, UploadSession.State.SCANNING):
@@ -196,6 +214,9 @@ def finalize_verified_upload(
             content_type=mime_type or "application/octet-stream",
         )
 
+    if encrypted and (not published.version_id or published.version_id == "null"):
+        raise ValidationError("Encrypted object has no pinned provider version.")
+
     with transaction.atomic():
         locked = lock_finalizing_upload(session.pk, job_attempt)
         if locked.state in (UploadSession.State.AVAILABLE, UploadSession.State.COMPLETED):
@@ -212,8 +233,8 @@ def finalize_verified_upload(
         )
         drive_file = File.objects.create(
             tenant=tenant, workspace=locked.workspace, owner=owner, folder=folder,
-            file_name=visible_name, file_size=actual_size, mime_type=mime_type,
-            hash_sha256=actual_sha256, is_encrypted=False,
+            file_name=visible_name, file_size=logical_size, mime_type=mime_type,
+            hash_sha256=actual_sha256, is_encrypted=encrypted,
             encryption_version=1, file_path="",
         )
         if locked.storage_config_id:
@@ -224,9 +245,10 @@ def finalize_verified_upload(
                 defaults={'endpoint':settings.SECUREDRIVE_STORAGE_ENDPOINT_URL,'status':StorageConfig.Status.ACTIVE})
         version = FileVersion.objects.create(
             tenant=tenant, file=drive_file, version_number=1,
-            state=FileVersion.State.AVAILABLE, size_bytes=actual_size,
+            state=FileVersion.State.AVAILABLE, size_bytes=logical_size,
             mime_type=mime_type, sha256=actual_sha256, is_current=True,
-            is_encrypted=False, encryption_scheme="", encryption_version=1,
+            is_encrypted=encrypted, encryption_scheme=cse.SCHEME if encrypted else "", encryption_version=1,
+            cse_metadata=locked.cse_metadata, crypto_version_id=locked.crypto_version_id,
             verified_at=timezone.now(),
         )
         StorageLocation.objects.create(
@@ -250,9 +272,9 @@ def finalize_verified_upload(
             f"Uploaded {drive_file.file_name}",
             obj=drive_file,
             metadata={
-                "size_bytes": actual_size,
+                "size_bytes": logical_size,
                 "upload_id": str(locked.pk),
-                "source": "multipart",
+                "source": "cse_multipart" if encrypted else "multipart",
             },
         )
 

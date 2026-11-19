@@ -23,6 +23,7 @@ from accounts.access import (
     resolve_request_workspace,
 )
 from files.models import File, QuotaReservation, StorageLocation, UploadFinalizationJob, UploadSession
+from files import cse
 from files.quota import QuotaExceeded, QuotaStateError, finalize_upload_quota, reserve_upload_quota
 from files.services import unique_upload_name
 from files.storage_adapters import get_storage_adapter
@@ -37,7 +38,7 @@ PRESIGN_SECONDS = 180
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _owned_session(request, upload_id):
+def _owned_session(request, upload_id, *, cleanup=False):
     session = get_object_or_404(
         UploadSession.objects.select_related("tenant", "target_folder", "workspace", "storage_config", "storage_connection__cluster"),
         pk=upload_id,
@@ -48,6 +49,14 @@ def _owned_session(request, upload_id):
         # Membership may have been revoked after the upload was initialized.
         from django.http import Http404
         raise Http404
+    if session.cse_metadata and not cleanup:
+        try:
+            cse.authorize_write(request.user, session.tenant, session.workspace, session.target_folder,
+                                session.cse_metadata, session.expected_size_bytes, session.expected_sha256,
+                                session.storage_connection, pinned=True)
+        except ValidationError:
+            from django.http import Http404
+            raise Http404
     return session
 
 
@@ -110,6 +119,8 @@ def _release_reserved_quota_after_setup_failure(upload_session_id, actor):
 def create_upload(request):
     """Create or resume a browser-to-S3 multipart upload session."""
     data = request.data
+    encrypted = "cse" in data
+    metadata = data.get("cse", {})
 
     # Keep the request contract used by the existing frontend:
     # {"name": str, "size_bytes": int, "sha256": hex, "folder_id": optional}
@@ -123,7 +134,7 @@ def create_upload(request):
         if isinstance(raw_size, bool):
             raise ValidationError("Invalid file size.")
         size = int(raw_size)
-        if size < 0 or size > MAX_UPLOAD_SIZE:
+        if size < 0 or size > (cse.MAX_WIRE if encrypted else MAX_UPLOAD_SIZE):
             raise ValidationError("File size is outside the supported limit.")
 
         sha256 = data.get("sha256", "")
@@ -182,6 +193,13 @@ def create_upload(request):
             {"detail": "Destination is not writable."},
             status=status.HTTP_404_NOT_FOUND,
         )
+    if encrypted:
+        try:
+            cse.authorize_write(request.user, tenant, workspace, folder, metadata, size, sha256)
+        except ValidationError:
+            return Response({"detail": "Encrypted upload authorization is unavailable."}, status=403)
+    elif cse.requires_cse(tenant, workspace):
+        return Response({"detail": "This fixture requires an encrypted upload."}, status=403)
 
     # The database column is max_length=128; do not use 255 here.
     idempotency_key = request.headers.get("Idempotency-Key", "").strip()[:128]
@@ -215,6 +233,7 @@ def create_upload(request):
             and session.expected_sha256 == sha256
             and session.target_folder_id == getattr(folder, "pk", None)
             and session.workspace_id == workspace.pk
+            and session.cse_metadata == metadata
         )
 
     def existing_session_response(session):
@@ -303,8 +322,12 @@ def create_upload(request):
     # Create the object key through the configured adapter; do not invent a key format.
     try:
         target_fields = upload_target(tenant, workspace)
+        if encrypted:
+            cse.fixture_storage(target_fields.get("storage_connection"))
         adapter = get_storage_adapter(connection=target_fields['storage_connection']) if target_fields else get_storage_adapter()
         object_key = adapter.create_object_key("staging")
+    except ValidationError:
+        return Response({"detail": "Encrypted storage is unavailable."}, status=503)
     except StorageError as error:
         logger.error("Object storage unavailable for user_id=%s code=%s", request.user.pk, getattr(error, 'code', 'storage_unavailable'))
         return Response(
@@ -327,6 +350,8 @@ def create_upload(request):
             client_name=name,
             expected_size_bytes=size,
             expected_sha256=sha256,
+            cse_metadata=metadata,
+            crypto_version_id=metadata["version"] if encrypted else None,
             expires_at=timezone.now() + timedelta(hours=1),
             idempotency_key=idempotency_key,
             object_key=object_key,
@@ -546,7 +571,7 @@ def upload_status(request, upload_id):
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def abort_upload(request, upload_id):
-    session = _owned_session(request, upload_id)
+    session = _owned_session(request, upload_id, cleanup=True)
     with transaction.atomic():
         session = UploadSession.objects.select_for_update().get(pk=session.pk)
         if session.state in (UploadSession.State.COMPLETED, UploadSession.State.AVAILABLE):

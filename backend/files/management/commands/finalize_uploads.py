@@ -22,6 +22,7 @@ from files.storage_adapters.base import (
     StorageRetryableError,
 )
 from files.validators import MAX_UPLOAD_SIZE, calculate_sha256
+from files.cse import MAX_WIRE
 import logging
 
 logger = logging.getLogger(__name__)
@@ -197,7 +198,8 @@ class Command(BaseCommand):
                         upload.object_key, expected_size=0,
                         expected_sha256=hashlib.sha256(b"").hexdigest(),
                     )
-                if stat.size_bytes != upload.expected_size_bytes or stat.size_bytes > MAX_UPLOAD_SIZE:
+                limit = MAX_WIRE if upload.cse_metadata else MAX_UPLOAD_SIZE
+                if stat.size_bytes != upload.expected_size_bytes or stat.size_bytes > limit:
                     raise StorageIntegrityError("Completed object size failed verification.")
                 # Download to an 8-MiB memory-bounded spool instead of holding
                 # the entire 100-MiB object in RAM. The verified bytes are used
@@ -206,7 +208,7 @@ class Command(BaseCommand):
                 # from Django. The original staging key remains until DB commit.
                 with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as verified:
                     retrieved = storage.download_to(
-                        upload.object_key, verified, max_bytes=MAX_UPLOAD_SIZE
+                        upload.object_key, verified, max_bytes=limit
                     )
                     if retrieved.size_bytes != stat.size_bytes:
                         raise StorageIntegrityError("Staging object size changed during verification.")

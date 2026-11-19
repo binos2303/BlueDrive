@@ -190,6 +190,10 @@ def drive_items_move_api(request):
             return JsonResponse({"detail": "Destination folder is unavailable or inaccessible."}, status=404)
     destination_parent_id = destination.id if destination else None
 
+    from files.cse import is_cse_file
+    if any(is_cse_file(item) for item in direct_files):
+        return JsonResponse({"detail": "Encrypted items stay in Personal My Drive."}, status=409)
+
     for folder in top_folders:
         if folder.parent_id == destination_parent_id:
             continue
@@ -339,7 +343,11 @@ def drive_items_duplicate_api(request):
         return error
     _file_ids, _folder_ids, direct_files, top_folders = selected
 
+    from files import cse
     from files.storage_adapters.base import StorageConfigurationError
+
+    if cse.requires_cse(tenant, workspace) or any(cse.is_cse_file(item) for item in direct_files):
+        return JsonResponse({"detail": "Encrypted items cannot be duplicated here."}, status=409)
 
     created_object_keys = []
     created_count = 0
