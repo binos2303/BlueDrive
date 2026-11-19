@@ -1,0 +1,4 @@
+# Fixtures liên thông. Giữ cùng phiên bản PyCA với baseline backend.
+cryptography==48.0.0
+cffi==2.0.0
+pycparser==3.0
