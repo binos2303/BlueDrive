@@ -138,6 +138,10 @@ export const djangoAccountService: AccountService = {
     });
   },
   async signOut() {
+    if (process.env.NEXT_PUBLIC_BLUEDRIVE_CSE_FIXTURE_PIN) {
+      const { lockCse } = await import("./cse/personal.mjs");
+      lockCse();
+    }
     await requestAccountApi<void>("/accounts/api/logout/", {
       method: "POST",
       headers: await accountCsrfHeaders(),

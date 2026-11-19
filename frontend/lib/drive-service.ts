@@ -150,8 +150,15 @@ export async function downloadDriveFile(
   onProgress: (progress: DownloadProgress) => void,
 ): Promise<FileDownloadResult> {
   const authorization = await requestAccountApi<
-    { mode: "backend" } | { mode: "presigned"; url: string; filename: string; expires_in: number; size_bytes: number }
+    { mode: "backend" } | { mode: "cse"; challenge: string }
+    | { mode: "presigned"; url: string; filename: string; expires_in: number; size_bytes: number }
   >(`/drive/files/${fileId}/download-url/`, { cache: "no-store", redirect: "error", referrerPolicy: "no-referrer" });
+  if (authorization.mode === "cse") {
+    if (!process.env.NEXT_PUBLIC_BLUEDRIVE_CSE_FIXTURE_PIN) throw new Error("Encrypted downloads are unavailable in this environment.");
+    const { downloadCse } = await import("./cse/personal.mjs");
+    await downloadCse(fileId, authorization.challenge, onProgress);
+    return "received";
+  }
   if (authorization.mode === "presigned") {
     let url: URL;
     try {

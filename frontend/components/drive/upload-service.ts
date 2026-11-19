@@ -187,12 +187,17 @@ export const djangoMultipartUploadService: UploadService = {
     activeTransfers.set(task.id, control);
     try {
     observer.onStatus("preparing", task.uploadSessionId ?? undefined);
+    const encryption = process.env.NEXT_PUBLIC_BLUEDRIVE_CSE_FIXTURE_PIN ? await import("@/lib/cse/personal.mjs") : null;
+    const encrypted = await encryption?.prepareEncryptedUpload(task, file, control.signal);
+    const payload = encrypted?.blob ?? file;
+    const wireSize = payload.size;
+    const savedUploadId = encrypted ? null : task.uploadSessionId;
     // A file with the same name/size can be uploaded to different folders.
-    const resumeKey = resumeStorageKey(task, file);
+    const resumeKey = resumeStorageKey(task, file) + (encrypted ? `:cse:${encrypted.meta.version}` : "");
     // Abort during hashing must not allocate a new UploadSession. If this is a
     // resumed task, release its existing reservation on *cancel* (not pause).
     const cancelBeforeUpload = async () => {
-      const existingSession = task.uploadSessionId ?? readSessionValue(resumeKey);
+      const existingSession = savedUploadId ?? readSessionValue(resumeKey);
       if (existingSession) {
         try {
           await requestUploadApi(`/files/api/uploads/${existingSession}/abort/`, {
@@ -201,10 +206,11 @@ export const djangoMultipartUploadService: UploadService = {
         } catch { /* Expiry/reconciliation will clean up on network failure. */ }
       }
       forgetResumeState(resumeKey);
+      encryption?.clearEncryptedAttempt(task.id);
     };
     let fileSha256: string;
     try {
-      fileSha256 = await sha256File(file, { signal: control.signal });
+      fileSha256 = encrypted?.digest ?? await sha256File(file, { signal: control.signal });
     } catch (error) {
       control.throwIfPaused();
       if (signal.aborted) {
@@ -218,7 +224,7 @@ export const djangoMultipartUploadService: UploadService = {
       await cancelBeforeUpload();
       return;
     }
-    let uploadId = task.uploadSessionId ?? readSessionValue(resumeKey);
+    let uploadId = savedUploadId ?? readSessionValue(resumeKey);
     let alreadyCompleting = false;
     if (uploadId) {
       try {
@@ -235,6 +241,7 @@ export const djangoMultipartUploadService: UploadService = {
           removeSessionValue(resumeKey);
           removeSessionValue(`${resumeKey}:idempotency`);
           removeSessionValue(`${resumeKey}:parts`);
+          encryption?.clearEncryptedAttempt(task.id, "Encrypted file available");
           return;
         }
         alreadyCompleting = state.state === "verifying" || state.state === "scanning";
@@ -256,12 +263,13 @@ export const djangoMultipartUploadService: UploadService = {
       }
       const created = await requestUploadApi<UploadSessionResponse>("/files/api/uploads/", {
         method: "POST", headers: { ...(await accountCsrfHeaders()), "Idempotency-Key": idempotency },
-        body: JSON.stringify({ name: file.name, size_bytes: file.size, sha256: fileSha256, folder_id: task.destinationId }),
+        body: JSON.stringify({ name: file.name, size_bytes: wireSize, sha256: fileSha256,
+          folder_id: task.destinationId, ...(encrypted ? { cse: encrypted.meta } : {}) }),
       });
       uploadId = created.upload_id;
     }
     saveSessionValue(resumeKey, uploadId);
-    const count = Math.ceil(file.size / PART_SIZE);
+    const count = Math.ceil(wireSize / PART_SIZE);
     const receiptsKey = `${resumeKey}:parts`;
     // Chỉ lưu ETag từ PUT thành công; backend đối chiếu ListParts ở kho đã ghim.
     const savedReceipts = alreadyCompleting ? new Map<number, string>()
@@ -269,13 +277,13 @@ export const djangoMultipartUploadService: UploadService = {
     // A previously uploaded part can disappear or be overwritten by another tab.
     // Reuse only receipts still confirmed by the storage provider.
     const completed = alreadyCompleting ? savedReceipts
-      : await fetchReconciledPartReceipts(uploadId, file.size, savedReceipts, requestUploadApi);
+      : await fetchReconciledPartReceipts(uploadId, wireSize, savedReceipts, requestUploadApi);
     if (savedReceipts.size > 0) {
       saveSessionValue(receiptsKey, serializePartReceipts(uploadId, completed));
     }
-    const progress = new UploadPartProgress(file.size, PART_SIZE);
+    const progress = new UploadPartProgress(wireSize, PART_SIZE);
     completed.forEach((_etag, number) => progress.update(number, PART_SIZE));
-    const telemetry = new UploadProgressTelemetry(file.size, progress.uploadedBytes);
+    const telemetry = new UploadProgressTelemetry(wireSize, progress.uploadedBytes);
     const updatePartProgress = (number: number, loaded: number, force = false) => {
       const uploadedBytes = progress.update(number, loaded);
       const report = telemetry.report(uploadedBytes, force);
@@ -302,7 +310,7 @@ export const djangoMultipartUploadService: UploadService = {
         const partNumber = pending[next++];
         if (partNumber === undefined) return;
         const start = (partNumber - 1) * PART_SIZE;
-        const part = file.slice(start, Math.min(file.size, start + PART_SIZE));
+        const part = payload.slice(start, Math.min(wireSize, start + PART_SIZE));
         for (let attempt = 0; attempt <= PART_RETRIES; attempt++) {
           try {
             const permission = await partAuthorizations.get(partNumber, control.signal);
@@ -351,12 +359,14 @@ export const djangoMultipartUploadService: UploadService = {
       removeSessionValue(resumeKey);
       removeSessionValue(`${resumeKey}:idempotency`);
       removeSessionValue(receiptsKey);
+      encryption?.clearEncryptedAttempt(task.id);
       return;
     }
     if (fatal) throw fatal;
     if (!alreadyCompleting) {
       control.throwIfPaused();
       observer.onStatus("verifying", uploadId);
+      encryption?.markEncryptedVerification();
       await requestUploadApi<{ state: string; file_id?: number }>(`/files/api/uploads/${uploadId}/complete/`, {
         method: "POST", headers: await accountCsrfHeaders(),
         body: JSON.stringify({ parts: [...completed].sort(([a], [b]) => a - b).map(([part_number, etag]) => ({ part_number, etag })) }),
@@ -384,6 +394,7 @@ export const djangoMultipartUploadService: UploadService = {
     removeSessionValue(resumeKey);
     removeSessionValue(`${resumeKey}:idempotency`);
     removeSessionValue(receiptsKey);
+    encryption?.clearEncryptedAttempt(task.id, "Encrypted file available");
     observer.onCompleted();
     } finally {
       activeTransfers.delete(task.id);

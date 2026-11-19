@@ -8,6 +8,7 @@ import { browserTrustHarness } from "./browser-trust-harness.mjs";
 import { authorityJournal } from "./authority-journal.mjs";
 
 const source = fileURLToPath(new URL(".", import.meta.url));
+const shared = new Set(["/format.mjs", "/envelopes.mjs", "/trust.mjs", "/recovery.mjs", "/device-unlock.mjs"]);
 const files = new Set(["/browser-fixture.mjs", "/bench-worker.mjs", "/format.mjs", "/envelopes.mjs", "/trust.mjs",
   "/browser-trust.mjs", "/checkpoints.mjs", "/device-unlock.mjs", "/recovery.mjs"]);
 const aliases = {
@@ -28,7 +29,7 @@ const server = createServer(async (request, response) => {
     if (url.pathname === "/") { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(pageHtml); return; }
     const dependency = /^\/deps\/((?:@hpke\/(?:core|common)\/esm\/|@noble\/hashes\/)[0-9a-zA-Z_./-]+\.js)$/.exec(url.pathname);
     const assets = dependency && !dependency[1].includes("..") ? path.join(source, "node_modules", dependency[1])
-      : files.has(url.pathname) ? path.join(source, url.pathname.slice(1)) : null;
+      : files.has(url.pathname) ? path.join(source, shared.has(url.pathname) ? "../../lib/cse" : "", url.pathname.slice(1)) : null;
     if (!assets) { response.writeHead(404).end(); return; }
     const body = await readFile(assets);
     response.setHeader("Content-Type", "text/javascript; charset=utf-8");
