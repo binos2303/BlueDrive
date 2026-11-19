@@ -204,3 +204,13 @@ Trước khi bắt đầu rollout, lặp các gate P4/P5 mà implementation ch�
 3. Dựng reader/encoder thử nghiệm và trust/enrollment/recovery primitives trên fixture, cùng negative vectors. Reader legacy tiếp tục qua suite tương thích trước khi thêm writer.
 4. Thêm contract additive, ciphertext publication và quota trong fixture, rồi sharing/revoke/recovery. Kiểm lifecycle P4/P5 đã thay, audit và backup/restore. Đo cả failure/cancel và route pin.
 5. Sau security review và phê duyệt vận hành, thử opt-in hẹp, có rollback đọc được version CSE và runbook recovery có custodian. Kết luận P6 SECURITY ACCEPTED chỉ sau khi các quyết định và gates theo môi trường đã đạt.
+
+## 20. Findings từ prototype P6.1
+
+- Suite P-256 thử với `@hpke/core` cần truyền `CryptoKeyPair` gồm public key khớp với directory và private key non-extractable khi mở envelope. Truyền riêng private key làm thư viện thử export để tái tạo public key và thất bại. Prototype giữ các byte format `cse_v1`.
+- Xác thực receipt resume với scope và chữ ký producer đã pin cùng digest của spool. Digest do người chỉnh được cả spool và receipt cung cấp không đủ bằng chứng. Nếu receipt không xác thực được, bỏ intent cũ và dùng version/DEK mới.
+- Non-extractable `CryptoKey` trong IndexedDB vẫn dùng được từ cùng origin khi UI fixture đang khóa. Bản sao Chrome profile trên cùng máy Windows cũng dùng được key. Khi yêu cầu khóa thực sự ngoài phiên, cần chốt trust boundary độc lập, chẳng hạn origin/client tách riêng hoặc authenticator có unlock đã kiểm chứng.
+- Một authority fingerprint đã pin xác thực nguồn chữ ký. Thiết bị mới vẫn cần checkpoint đáng tin để biết directory mới nhất. TOFU hoặc chỉ xác minh chữ ký đều có thể chấp nhận epoch cũ khi thiếu checkpoint.
+- OPFS resume cần qualification riêng theo engine/OS. Fixture WebKit Windows xác minh crypto và IndexedDB nhưng probe OPFS trả `UnknownError`. V1 nên chặn resume khi capability chưa đạt. Enterprise prototype xác minh hai phê duyệt độc lập trước một service giữ khóa. Cryptographic threshold custody vẫn là quyết định mở.
+
+[Kết quả, phạm vi browser và các quyết định cần duyệt](REFACTOR_P6_CRYPTO_FEASIBILITY_2026-11-19.md).
