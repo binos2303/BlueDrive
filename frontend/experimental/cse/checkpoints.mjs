@@ -173,6 +173,13 @@ export function directoryClient({ tenant, pins, store, latest, now = Date.now })
     if (needsCutover && chain.get(current.sequence) !== current.previous) throw new Error("Endorsed cutover missing");
     const entry = entries.find((row) => entryId(row) === entryId(expected));
     if (entry && !await verify(current.publicKey, entry.signature, entryPayload(entry))) throw new Error("Directory record signature invalid");
+    let publicKey;
+    if (entry?.status === "active" && (expected.keyId === undefined || entry.keyId === expected.keyId)) {
+      const raw = bytes(entry.publicKey);
+      publicKey = entry.purpose === "receive" ? await importRecipient(raw)
+        : await crypto.subtle.importKey("raw", raw, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
+    }
+    // So checkpoint sau khi import để thấy thu hồi đã được tab khác ghi trong lúc chờ WebCrypto.
     const accepted = { sequence: checkpoint.sequence, digest: head, ...(rotation === undefined ? {} : { rotation }) };
     await store.update(tenant, (saved) => {
       if (!isFresh(now())) throw new Error("Witness freshness expired before commit");
@@ -186,13 +193,7 @@ export function directoryClient({ tenant, pins, store, latest, now = Date.now })
       return accepted;
     });
     if (!isFresh(now())) throw new Error("Witness freshness expired");
-    if (!entry || entry.status !== "active" || (expected.keyId !== undefined && entry.keyId !== expected.keyId)) {
-      throw new Error("Device absent, revoked or replaced");
-    }
-    const raw = bytes(entry.publicKey);
-    const publicKey = entry.purpose === "receive" ? await importRecipient(raw)
-      : await crypto.subtle.importKey("raw", raw, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
-    if (!isFresh(now())) throw new Error("Witness freshness expired");
+    if (!publicKey) throw new Error("Device absent, revoked or replaced");
     return { entry, publicKey, head: accepted, freshnessExpires: proof.expires };
   }
 
