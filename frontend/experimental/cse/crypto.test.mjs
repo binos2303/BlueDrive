@@ -142,6 +142,26 @@ for (const size of [0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK + 7, MAX_PLAINT
   });
 }
 
+test("authenticated historical bytes require a separately trusted current version after metadata restore", async () => {
+  const historic = await sealedFixture(new Blob([utf8("historical fixture")]));
+  const current = await sealedFixture(new Blob([utf8("current fixture")]), { ...historic.scope, version: crypto.randomUUID() });
+  const restoredRow = structuredClone({ scope: historic.scope, descriptor: historic.descriptor });
+  const read = (row, scope, onExport) =>
+    openVerified(historic.blob, scope, row.descriptor, historic.material, historic.producer, onExport);
+  try {
+    let exported = 0;
+    await assert.rejects(read(restoredRow, current.scope, (chunk) => { exported += chunk.length; }), /Scope mismatch/);
+    assert.equal(exported, 0);
+    // Khi caller lấy cả phiên bản kỳ vọng từ bản sao cũ, chữ ký vẫn xác thực đúng nội dung lịch sử.
+    let text;
+    await read(restoredRow, restoredRow.scope, (chunk) => { text = new TextDecoder().decode(chunk); });
+    assert.equal(text, "historical fixture");
+  } finally {
+    historic.material.fill(0);
+    current.material.fill(0);
+  }
+});
+
 test("trimmed, reordered, duplicated or modified bytes never reach the export sink", async (t) => {
   const x = await sealedFixture(fixtureBlob(3 * CHUNK));
   const wire = new Uint8Array(await x.blob.arrayBuffer());

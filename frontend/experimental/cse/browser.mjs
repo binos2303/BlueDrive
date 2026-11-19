@@ -4,9 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, devices, firefox, webkit } from "playwright";
+import { browserTrustHarness } from "./browser-trust-harness.mjs";
+import { authorityJournal } from "./authority-journal.mjs";
 
 const source = fileURLToPath(new URL(".", import.meta.url));
-const files = new Set(["/browser-fixture.mjs", "/bench-worker.mjs", "/format.mjs", "/envelopes.mjs", "/trust.mjs"]);
+const files = new Set(["/browser-fixture.mjs", "/bench-worker.mjs", "/format.mjs", "/envelopes.mjs", "/trust.mjs",
+  "/browser-trust.mjs", "/checkpoints.mjs", "/device-unlock.mjs", "/recovery.mjs"]);
 const aliases = {
   "@hpke/core": "/deps/@hpke/core/esm/mod.js",
   "@hpke/common": "/deps/@hpke/common/esm/mod.js",
@@ -47,7 +50,7 @@ const origin = "http://127.0.0.1:" + server.address().port;
 async function ready(context) {
   const page = context.pages()[0] ?? await context.newPage();
   await page.goto(origin);
-  await page.waitForFunction(() => Boolean(globalThis.p61), { timeout: 15000 });
+  await page.waitForFunction(() => Boolean(globalThis.p61 && globalThis.p615), { timeout: 15000 });
   return page;
 }
 
@@ -63,6 +66,7 @@ async function run(engine) {
   };
   const profile = path.join(profiles, engine);
   let context;
+  let journal;
   let stage = "launch";
   try {
     context = await type.launchPersistentContext(profile, launch);
@@ -72,6 +76,9 @@ async function run(engine) {
     const info = await page.evaluate(() => ({ userAgent: navigator.userAgent, secure: isSecureContext }));
     if (!info.secure) throw new Error("Secure context required");
     const device = await page.evaluate(() => globalThis.p61.initDevice());
+    stage = "device-encrypted-bundle";
+    journal = authorityJournal(path.join(profiles, engine + "-witness.sqlite"));
+    const secureTrust = await browserTrustHarness(context, page, journal);
     stage = "opfs-probe";
     const opfs = await page.evaluate(() => globalThis.p61.probeOpfs());
     stage = "bench";
@@ -87,12 +94,14 @@ async function run(engine) {
     const workersMs = await page.evaluate(() => globalThis.p61.workers());
     stage = "reload";
     await page.reload();
-    await page.waitForFunction(() => Boolean(globalThis.p61));
+    await page.waitForFunction(() => Boolean(globalThis.p61 && globalThis.p615));
     const reload = await page.evaluate(() => globalThis.p61.deviceStatus());
+    const trustReload = await secureTrust.reload(page);
     const resumeReload = await page.evaluate(() => globalThis.p61.resumeAfterNavigation(false));
     await context.close();
     context = null;
     let profileCopy = "NOT RUN";
+    let encryptedProfileCopy = "NOT RUN";
     if (engine === "chromium" && process.platform === "win32") {
       stage = "same-host-profile-copy";
       const copy = path.join(profiles, engine + "-copy");
@@ -100,6 +109,8 @@ async function run(engine) {
       context = await type.launchPersistentContext(copy, launch);
       page = await ready(context);
       profileCopy = (await page.evaluate(() => globalThis.p61.deviceStatus())).persisted ? "KEY USABLE" : "KEY UNAVAILABLE";
+      await secureTrust.attach(context);
+      encryptedProfileCopy = await secureTrust.restore(page);
       await context.close();
       context = null;
     }
@@ -108,9 +119,13 @@ async function run(engine) {
     page = await ready(context);
     const restart = await page.evaluate(() => globalThis.p61.deviceStatus());
     const resumeRestart = await page.evaluate(() => globalThis.p61.resumeAfterNavigation(true));
+    const freshIntent = resumeRestart ? null : await page.evaluate(() => globalThis.p61.freshAfterMissingSpool());
     if (!reload.persisted || !restart.persisted || resumeRestart !== (bench.at(-1).spool === "OPFS") || resumeReload !== resumeRestart) {
       throw new Error("Persistence or resumable storage mismatch");
     }
+    stage = "device-checkpoint-restart-and-conflicting-tabs";
+    await secureTrust.attach(context);
+    const trustRestart = await secureTrust.restart(context, page);
     await context.close();
     context = null;
     stage = "isolated-profile";
@@ -123,13 +138,15 @@ async function run(engine) {
       await ephemeral.close();
       return { engine, status: "PASS", os: os.platform() + " " + os.release(), version: browser?.version() ?? info.userAgent,
         device, opfs, reload: reload.persisted, restart: restart.persisted, ephemeralProfileIsolated: privateEmpty, profileCopy,
-        resumeReload, resumeRestart, interruptedSeal, workersMs, bench };
+        resumeReload, resumeRestart, interruptedSeal, freshIntent, workersMs, bench, encryptedProfileCopy,
+        trustInitial: secureTrust.first, trustReload, trustRestart };
     } finally {
       await isolated.close();
     }
   } catch (error) {
     return { engine, status: "FAIL", stage, errorType: error.name, reason: String(error.message).split("\n")[0].slice(0, 180) };
   } finally {
+    journal?.close();
     await context?.close();
   }
 }
