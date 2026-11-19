@@ -238,6 +238,24 @@ test("two-tab out-of-order updates and interrupted writes never overwrite newer 
   assert.deepEqual(await f.store.read(f.tenant), saved);
 });
 
+test("a revocation committed while importing a public key blocks the older authorization", async (t) => {
+  const f = await fixture();
+  const importKey = crypto.subtle.importKey.bind(crypto.subtle);
+  let revokedDuringImport = false;
+  t.mock.method(crypto.subtle, "importKey", async (...args) => {
+    if (!revokedDuringImport && args[0] === "raw" && args[2].name === "ECDSA") {
+      revokedDuringImport = true;
+      await f.revoke();
+      await assert.rejects(f.client().authorize(f.record), /revoked/);
+    }
+    return importKey(...args);
+  });
+
+  await assert.rejects(f.client().authorize(f.record), /rollback/);
+  assert.equal(revokedDuringImport, true);
+  assert.equal((await f.store.read(f.tenant)).sequence, 2);
+});
+
 test("independent witness reopens its journal with current revocation and rejects concurrent publication", async () => {
   const f = await fixture();
   const tmp = await realpath(os.tmpdir());
