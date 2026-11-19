@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const next = fileURLToPath(new URL("../../.next/", import.meta.url));
-const markers = /BlueDrive\/CSE\/aead\/v1|BLUDCSE1|p61-device-enrollment|experimental[/\\]+cse|@hpke\/core/;
+const markers = /BlueDrive\/(?:CSE\/aead|directory\/checkpoint|device\/encrypted-bundle|recovery\/request)\/v1|BLUDCSE1|p61-device-enrollment|experimental[/\\]+cse|@hpke\/core/;
 let examined = 0;
 for (const scope of ["server", "static"]) {
   const root = path.join(next, scope);

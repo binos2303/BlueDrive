@@ -1,5 +1,7 @@
 # P6.1 — Cryptographic feasibility và security validation
 
+[Báo cáo P6.1.5](REFACTOR_P6_TRUST_RECOVERY_VALIDATION_2026-11-19.md) ghi riêng kết quả witness, checkpoint bền vững, unlock và custody emulator trên baseline của tài liệu này.
+
 Ngày 19/11/2026, Asia/Bangkok. Baseline P5 development `d344ec90ba4b4ea6cfe1dd9654b560e81064d740` và [P6 design](REFACTOR_P6_SECURITY_DESIGN_2026-11-19.md) `7d73359f9e1a67a48a49bc2b9aaa84e5eee3bb21` của Draft PR #7. Nhánh `feature/p6-crypto-feasibility` kế thừa đúng design head. Exact candidate và CI nằm trong Draft PR/checks.
 
 **Crypto feasibility đạt trong phạm vi fixture công bố khi các gate exact-head được xác nhận. P6.2 implementation readiness PARTIAL.** WebKit Windows chưa có OPFS resume. Thiết bị vật lý, cryptographic quorum và security design approval vẫn là gate riêng.

@@ -2,6 +2,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { fixtureScope, equal, hex, openVerified, random, resumeSealed, seal, signingKey } from "./format.mjs";
 import { recipientKey, unwrap, wrap } from "./envelopes.mjs";
 import { DirectoryTrust, deviceEntry, fingerprint, pinAuthority, signEntry } from "./trust.mjs";
+import "./browser-trust.mjs";
 
 const MIB = 1024 * 1024;
 const keySlot = "device";
@@ -197,6 +198,23 @@ async function interrupted() {
   return true;
 }
 
+async function freshAfterMissingSpool() {
+  check(await storage("get", receiptSlot) === undefined, "Unexpected trusted spool receipt");
+  const producer = { ...await signingKey(), keyId: id() };
+  const firstScope = fixtureScope();
+  const secondScope = { ...firstScope, version: id() };
+  const first = await seal(source(1), firstScope, producer, () => {});
+  const second = await seal(source(1), secondScope, producer, () => {});
+  try {
+    check(firstScope.version !== secondScope.version && !equal(first.material, second.material),
+      "Missing spool reused an intent or a DEK");
+    return true;
+  } finally {
+    first.material.fill(0);
+    second.material.fill(0);
+  }
+}
+
 function worker() {
   return new Promise((resolve, reject) => {
     const running = new Worker("/bench-worker.mjs", { type: "module" });
@@ -211,4 +229,4 @@ async function workers() {
   return results.map((value) => value.ms);
 }
 
-globalThis.p61 = { initDevice, deviceStatus, probeOpfs, runCase, resumeAfterNavigation, interrupted, workers };
+globalThis.p61 = { initDevice, deviceStatus, probeOpfs, runCase, resumeAfterNavigation, interrupted, workers, freshAfterMissingSpool };

@@ -1,5 +1,7 @@
 # P6 — Thiết kế mã hóa phía client và khôi phục khóa
 
+Bằng chứng prototype tiếp nối về [directory freshness, thiết bị và recovery custody P6.1.5](REFACTOR_P6_TRUST_RECOVERY_VALIDATION_2026-11-19.md) bổ sung mục 18–20. Đề xuất production và các quyết định phê duyệt vẫn theo từng gate.
+
 Ngày 19/11/2026, Asia/Bangkok. **PROPOSED · SECURITY DESIGN.** Thiết kế triển khai tiếp theo của [ADR-0010](ADR-0010-seaweedfs-enterprise-and-client-encryption-target.md).
 
 ## 1. Tóm tắt đề xuất
