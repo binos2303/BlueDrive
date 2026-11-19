@@ -9,6 +9,7 @@ from cryptography.exceptions import InvalidTag
 from securedrive.frontend_redirects import redirect_to_frontend
 from django.contrib import messages
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.db import IntegrityError, transaction
 from files.permanent_delete import (
@@ -53,6 +54,7 @@ from security.aes_service import (
     wrap_dek,
 )
 
+from . import cse
 from .forms import FileUploadForm
 from .rename_service import rename_resource, RenameError
 from .models import File, FileVersion, StorageLocation, UploadSession
@@ -407,10 +409,12 @@ def _decrypt_file(drive_file):
     The name is retained for compatibility with preview/share/copy callers.
     """
     current_version = drive_file.versions.filter(is_current=True).first()
+    if current_version and (cse.is_cse(current_version) or current_version.encryption_scheme.lower() not in cse.LEGACY_SCHEMES):
+        raise Http404
     # If either metadata layer says encrypted, never downgrade to plaintext mode.
     version_is_encrypted = bool(
         drive_file.is_encrypted
-        or (current_version is not None and current_version.is_encrypted)
+        or (current_version is not None and (current_version.is_encrypted or current_version.encryption_scheme))
     )
     try:
         if current_version is None:
@@ -634,6 +638,17 @@ def file_download_url(request, file_id):
         return Response({"detail": reason}, status=409)
 
     version = drive_file.versions.filter(is_current=True).first()
+    if cse.is_cse(version):
+        from .cse_api import download_challenge, private_response
+        try:
+            cse.authorize_owner(request.user, drive_file.tenant, drive_file.workspace, drive_file.folder_id)
+        except ValidationError as exc:
+            raise Http404 from exc
+        if not is_owner or version.encryption_scheme != cse.SCHEME:
+            raise Http404
+        return private_response({"mode": "cse", "challenge": download_challenge(request, drive_file, version)})
+    if version and version.encryption_scheme.lower() not in cse.LEGACY_SCHEMES:
+        raise Http404
     # Không cấp URL cho ciphertext, kể cả khi cờ mã hóa không khớp metadata cũ.
     needs_decryption = bool(
         drive_file.is_encrypted or drive_file.encryption_nonce or drive_file.wrapped_dek or drive_file.dek_nonce
@@ -1071,6 +1086,8 @@ def file_move(request, file_id):
     if not can_edit_file(drive_file, request.user):
         messages.error(request, "You do not have permission to move this file.")
         return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+    if cse.is_cse_file(drive_file):
+        return JsonResponse({"detail": "Encrypted items stay in Personal My Drive."}, status=409)
 
     share = get_receiver_share_for_file(drive_file, request.user) if drive_file.owner_id != request.user.id else None
     shared_root = share.folder if share and share.folder_id else None
@@ -1154,6 +1171,8 @@ def file_cut(request, file_id):
     if not can_edit_file(drive_file, request.user):
         messages.error(request, "You do not have permission to move this file.")
         return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+    if cse.is_cse_file(drive_file):
+        return JsonResponse({"detail": "Encrypted items stay in Personal My Drive."}, status=409)
 
     request.session["clipboard"] = {"type": "file_cut", "file_id": drive_file.id}
     request.session.modified = True
@@ -1190,6 +1209,10 @@ def file_paste(request):
             messages.error(request, "You no longer have permission to edit this file.")
             request.session.pop("clipboard", None)
             return redirect(request.META.get("HTTP_REFERER", "dashboard"))
+        if cse.is_cse_file(source_file) or (
+            clipboard_type == "file" and cse.requires_cse(source_file.tenant, source_file.workspace)
+        ):
+            return JsonResponse({"detail": "Encrypted items cannot be copied or moved here."}, status=409)
 
         source_share = get_receiver_share_for_file(source_file, request.user) if source_file.owner_id != request.user.id else None
         shared_root = source_share.folder if source_share and source_share.folder_id else None

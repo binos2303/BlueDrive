@@ -1,8 +1,12 @@
 from django.urls import path
 
 from . import views, upload_api
+from . import cse_api
 
 urlpatterns = [
+    path("files/api/cse/directory/", cse_api.trusted_directory, name="api-cse-directory"),
+    path("files/api/cse/<int:file_id>/download/", cse_api.authorize_download, name="api-cse-download"),
+    path("files/api/cse/<int:file_id>/rewrap/", cse_api.save_recovery_rewrap, name="api-cse-rewrap"),
     path("files/api/uploads/", upload_api.create_upload, name="api-upload-create"),
     path("files/api/uploads/<uuid:upload_id>/", upload_api.upload_status, name="api-upload-status"),
     path("files/api/uploads/<uuid:upload_id>/parts/<int:part_number>/authorization/", upload_api.authorize_part, name="api-upload-part-authorization"),

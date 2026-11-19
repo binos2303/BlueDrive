@@ -463,11 +463,15 @@ def upsert_direct_share(*, resource, receiver, owner, permission):
 
 def can_manage_direct_share(resource, actor):
     """Only the file/folder owner with current Workspace edit rights manages grants."""
+    from files.cse import is_cse_file
+    from files.models import File
     if resource is None or resource.owner_id != actor.pk or resource.deleted_at is not None:
         return False
     if not _owner_can_edit_workspace_resource(resource, actor):
         return False
     if isinstance(resource, File):
+        if is_cse_file(resource):
+            return False
         folder = resource.folder
     else:
         folder = resource

@@ -40,6 +40,7 @@ if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY is required (set in .env)")
 
 DEBUG = _env_bool("DEBUG", False)
+CSE_FIXTURE = None
 ALLOWED_HOSTS = _env_list("ALLOWED_HOSTS") or ["localhost", "127.0.0.1"]
 
 # --- Apps & middleware ---
